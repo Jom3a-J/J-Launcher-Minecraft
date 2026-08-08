@@ -59,6 +59,8 @@ class FlameAPI final : public ResourceAPI {
             default:
             case ModPlatform::ResourceType::Mod:
                 return 6;
+            case ModPlatform::ResourceType::Plugin:
+                return 5;
             case ModPlatform::ResourceType::ResourcePack:
                 return 12;
             case ModPlatform::ResourceType::ShaderPack:

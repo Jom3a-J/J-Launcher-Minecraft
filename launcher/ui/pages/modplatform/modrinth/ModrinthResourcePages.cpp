@@ -80,4 +80,18 @@ ModPage* Modrinth::createModPage(ResourceDownloadDialog* dialog, BaseInstance& i
     return new ModPage(dialog, instance, prepareModrinth(), &ModrinthAPI::get(),
                        ModFilterWidget::create(&static_cast<MinecraftInstance&>(instance), true));
 }
+
+ModPage* Modrinth::createModPage(ResourceDownloadDialog* dialog,
+                                 BaseInstance& instance,
+                                 ModPlatform::ResourceType resourceType,
+                                 const QStringList& loaderNames)
+{
+    return new ModPage(dialog,
+                       instance,
+                       prepareModrinth(),
+                       &ModrinthAPI::get(),
+                       ModFilterWidget::create(&static_cast<MinecraftInstance&>(instance), true),
+                       resourceType,
+                       loaderNames);
+}
 }  // namespace ResourceDownload

@@ -439,6 +439,8 @@ set(JAVA_SOURCES
 
     java/JavaMetadata.h
     java/JavaMetadata.cpp
+    java/JavaRuntimeInstallTask.h
+    java/JavaRuntimeInstallTask.cpp
     java/download/ArchiveDownloadTask.cpp
     java/download/ArchiveDownloadTask.h
     java/download/ManifestDownloadTask.cpp
@@ -803,6 +805,32 @@ SET(LAUNCHER_SOURCES
     HardwareInfo.cpp
     HardwareInfo.h
 
+    # Local server management
+    server/ServerManager.h
+    server/ServerManager.cpp
+    server/ServerModpackInstaller.h
+    server/ServerModpackInstaller.cpp
+    server/ServerInstance.h
+    server/ServerInstance.cpp
+    server/ServerPackImportTransaction.h
+    server/ServerPackImportTransaction.cpp
+    server/ServerDiagnostics.h
+    server/ServerDiagnostics.cpp
+    server/ServerContentUpdater.h
+    server/ServerContentUpdater.cpp
+    server/ServerPlayerAccess.h
+    server/ServerPlayerAccess.cpp
+    server/ServerProperties.h
+    server/ServerProperties.cpp
+    server/ServerDownloader.h
+    server/ServerDownloader.cpp
+    ui/pages/server/ServerListPage.h
+    ui/pages/server/ServerListPage.cpp
+    ui/pages/server/ServerListPage.ui
+    ui/pages/server/ServerSettingsPage.h
+    ui/pages/server/ServerSettingsPage.cpp
+    ui/pages/server/ServerSettingsPage.ui
+
     # console utils
     console/Console.h
 
@@ -1102,6 +1130,8 @@ SET(LAUNCHER_SOURCES
     ui/dialogs/ChooseOfflineNameDialog.h
     ui/dialogs/UntrustedModsDialog.cpp
     ui/dialogs/UntrustedModsDialog.h
+    ui/dialogs/CreateServerDialog.cpp
+    ui/dialogs/CreateServerDialog.h
 
     ui/dialogs/skins/SkinManageDialog.cpp
     ui/dialogs/skins/SkinManageDialog.h

@@ -73,6 +73,10 @@ DataPackResourcePage* createDataPackResourcePage(ResourceDownloadDialog* dialog,
 ResourcePackResourcePage* createResourcePackResourcePage(ResourceDownloadDialog* dialog, BaseInstance& instance);
 TexturePackResourcePage* createTexturePackResourcePage(ResourceDownloadDialog* dialog, BaseInstance& instance);
 ModPage* createModPage(ResourceDownloadDialog* dialog, BaseInstance& instance);
+ModPage* createModPage(ResourceDownloadDialog* dialog,
+                       BaseInstance& instance,
+                       ModPlatform::ResourceType resourceType,
+                       const QStringList& loaderNames);
 }  // namespace Modrinth
 
 }  // namespace ResourceDownload

@@ -76,6 +76,7 @@ class ThemeManager;
 class IconTheme;
 class BaseInstance;
 class MinecraftInstance;
+class ServerManager;
 
 class LogModel;
 
@@ -179,6 +180,9 @@ class Application : public QApplication {
     /// the java installed path the application is using
     const QString javaPath();
 
+    /// Persistent owner of locally managed Minecraft servers.
+    ServerManager* serverManager() const { return m_serverManager.get(); }
+
     bool isPortable() { return m_portable; }
 
     const Capabilities capabilities() { return m_capabilities; }
@@ -268,6 +272,7 @@ class Application : public QApplication {
     std::unique_ptr<MCEditTool> m_mcedit;
     QSet<QString> m_features;
     std::unique_ptr<ThemeManager> m_themeManager;
+    std::unique_ptr<ServerManager> m_serverManager;
 
     QMap<QString, std::shared_ptr<BaseProfilerFactory>> m_profilers;
 

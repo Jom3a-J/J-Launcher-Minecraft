@@ -520,6 +520,28 @@ QString JavaUtils::getJavaCheckPath()
     return APPLICATION->getJarPath("JavaCheck.jar");
 }
 
+bool JavaUtils::isJavaRuntimeLayoutComplete(const QString& javaPath)
+{
+    if (!QFileInfo(javaPath).isFile()) {
+        return false;
+    }
+#if defined(Q_OS_WIN)
+    const QDir binaryDirectory(QFileInfo(javaPath).absolutePath());
+    const QDir runtimeDirectory(binaryDirectory.absoluteFilePath(".."));
+    const bool hasVm = QFileInfo(runtimeDirectory.filePath("bin/server/jvm.dll")).isFile();
+    const bool modularLayout =
+        QFileInfo(runtimeDirectory.filePath("lib/jvm.cfg")).isFile()
+        && QFileInfo(runtimeDirectory.filePath("lib/modules")).isFile();
+    const bool legacyLayout =
+        (QFileInfo(runtimeDirectory.filePath("lib/amd64/jvm.cfg")).isFile()
+         || QFileInfo(runtimeDirectory.filePath("lib/i386/jvm.cfg")).isFile())
+        && QFileInfo(runtimeDirectory.filePath("lib/rt.jar")).isFile();
+    return hasVm && (modularLayout || legacyLayout);
+#else
+    return true;
+#endif
+}
+
 QStringList getMinecraftJavaBundle()
 {
     QStringList processpaths;

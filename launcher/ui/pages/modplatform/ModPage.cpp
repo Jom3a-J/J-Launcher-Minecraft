@@ -49,18 +49,25 @@
 #include "ui/dialogs/ResourceDownloadDialog.h"
 
 namespace {
-ResourceDownload::ResourceDescriptor prepareModDescriptor()
+ResourceDownload::ResourceDescriptor prepareModDescriptor(ModPlatform::ResourceType resourceType)
 {
     QMap<QString, QString> urlHandlers;
-    urlHandlers.insert(QRegularExpression::anchoredPattern(R"((?:www\.)?modrinth\.com\/mod\/([^\/]+)\/?)"), "modrinth");
-    urlHandlers.insert(QRegularExpression::anchoredPattern(R"((?:www\.)?curseforge\.com\/minecraft\/mc-mods\/([^\/]+)\/?)"), "curseforge");
+    const bool plugin = resourceType == ModPlatform::ResourceType::Plugin;
+    urlHandlers.insert(QRegularExpression::anchoredPattern(
+                           plugin ? R"((?:www\.)?modrinth\.com\/plugin\/([^\/]+)\/?)"
+                                  : R"((?:www\.)?modrinth\.com\/mod\/([^\/]+)\/?)"),
+                       "modrinth");
+    urlHandlers.insert(QRegularExpression::anchoredPattern(
+                           plugin ? R"((?:www\.)?curseforge\.com\/minecraft\/bukkit-plugins\/([^\/]+)\/?)"
+                                  : R"((?:www\.)?curseforge\.com\/minecraft\/mc-mods\/([^\/]+)\/?)"),
+                       "curseforge");
     urlHandlers.insert(QRegularExpression::anchoredPattern(R"(minecraft\.curseforge\.com\/projects\/([^\/]+)\/?)"), "curseforge");
     return {
         .helpPage = "Mod-platform",
         //: The singular version of 'mods'
-        .resourceString = QObject::tr("mod"),
+        .resourceString = plugin ? QObject::tr("plugin") : QObject::tr("mod"),
         //: The plural version of 'mod'
-        .resourcesString = QObject::tr("mods"),
+        .resourcesString = plugin ? QObject::tr("plugins") : QObject::tr("mods"),
         .supportsFiltering = true,
         .isIndexed = true,
         .urlHandlers = urlHandlers,
@@ -73,10 +80,12 @@ ModPage::ModPage(ResourceDownloadDialog* dialog,
                  BaseInstance& instance,
                  ResourceProviderData p,
                  const ResourceAPI* api,
-                 ModFilterWidget* filterWidget)
-    : ResourcePage(dialog, instance, prepareModDescriptor(), std::move(p)), m_api(api)
+                 ModFilterWidget* filterWidget,
+                 ModPlatform::ResourceType resourceType,
+                 QStringList loaderNames)
+    : ResourcePage(dialog, instance, prepareModDescriptor(resourceType), std::move(p)), m_api(api), m_resourceType(resourceType)
 {
-    auto* model = new ModModel(instance, api, debugName(), metaEntryBase());
+    auto* model = new ModModel(instance, api, debugName(), metaEntryBase(), resourceType, std::move(loaderNames));
     m_model = model;
     m_ui->packView->setModel(m_model);
 
@@ -117,7 +126,9 @@ void ModPage::setFilterWidget(ModFilterWidget* widget)
     m_filter = m_filterWidget->getFilter();
 
     connect(m_filterWidget.get(), &ModFilterWidget::filterChanged, this, &ModPage::triggerSearch);
-    prepareProviderCategories();
+    if (m_resourceType != ModPlatform::ResourceType::Plugin) {
+        prepareProviderCategories();
+    }
 }
 
 /******** Callbacks to events in the UI (set up in the derived classes) ********/

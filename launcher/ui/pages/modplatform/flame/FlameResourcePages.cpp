@@ -82,4 +82,18 @@ ModPage* Flame::createModPage(ResourceDownloadDialog* dialog, BaseInstance& inst
     return new ModPage(dialog, instance, prepareFlame(), &FlameAPI::get(),
                        ModFilterWidget::create(&static_cast<MinecraftInstance&>(instance), false));
 }
+
+ModPage* Flame::createModPage(ResourceDownloadDialog* dialog,
+                              BaseInstance& instance,
+                              ModPlatform::ResourceType resourceType,
+                              const QStringList& loaderNames)
+{
+    return new ModPage(dialog,
+                       instance,
+                       prepareFlame(),
+                       &FlameAPI::get(),
+                       ModFilterWidget::create(&static_cast<MinecraftInstance&>(instance), false),
+                       resourceType,
+                       loaderNames);
+}
 }  // namespace ResourceDownload

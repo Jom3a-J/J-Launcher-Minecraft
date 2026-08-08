@@ -41,6 +41,7 @@
 #include <QDebug>
 #include <QList>
 #include <QString>
+#include <QStringList>
 
 #include <list>
 #include <optional>
@@ -84,6 +85,7 @@ class ResourceAPI {
         std::optional<ModPlatform::SideType> side;
         std::optional<QStringList> categoryIds;
         bool openSource{};
+        std::optional<QStringList> loaderNames;
     };
 
     struct VersionSearchArgs {
@@ -93,6 +95,7 @@ class ResourceAPI {
         std::optional<ModPlatform::ModLoaderTypes> loaders;
         ModPlatform::ResourceType resourceType;
         bool includeChangelog{};
+        std::optional<QStringList> loaderNames;
     };
 
     struct ProjectInfoArgs {

@@ -53,10 +53,16 @@ class NewInstanceDialog : public QDialog, public BasePageProvider {
     Q_OBJECT
 
    public:
+    enum class Mode {
+        NewInstance,
+        ServerModpack
+    };
+
     explicit NewInstanceDialog(const QString& initialGroup,
                                const QString& url = QString(),
                                const QMap<QString, QString>& extraInfo = {},
-                               QWidget* parent = nullptr);
+                               QWidget* parent = nullptr,
+                               Mode mode = Mode::NewInstance);
     ~NewInstanceDialog() override;
 
     void updateDialogState();
@@ -110,4 +116,6 @@ class NewInstanceDialog : public QDialog, public BasePageProvider {
     bool m_nameFieldEditedByUser = false;
 
     QString m_searchTerm;
+
+    Mode m_mode = Mode::NewInstance;
 };

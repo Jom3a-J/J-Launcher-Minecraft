@@ -42,5 +42,6 @@ class JavaUtils : public QObject {
 #endif
 
     static QString getJavaCheckPath();
+    static bool isJavaRuntimeLayoutComplete(const QString& javaPath);
     static const QString javaExecutable;
 };

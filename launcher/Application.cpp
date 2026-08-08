@@ -104,6 +104,7 @@
 
 #include "InstanceList.h"
 #include "MTPixmapCache.h"
+#include "server/ServerManager.h"
 
 #include <minecraft/auth/AccountList.h>
 #include "icons/IconList.h"
@@ -947,6 +948,17 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
         QString pass = settings()->get("ProxyPass").toString();
         updateProxySettings(proxyTypeStr, addr, port, user, pass);
         qInfo() << "<> Network done.";
+    }
+
+    // Local servers use a dedicated directory below the selected launcher data
+    // root. Keep their lifecycle separate from game instances and load the
+    // persisted registry before any server UI can access it.
+    {
+        m_serverManager = std::make_unique<ServerManager>(m_dataPath, this);
+        if (!m_serverManager->load()) {
+            qWarning() << "Could not load the local server registry.";
+        }
+        qInfo() << "<> Local server registry initialized.";
     }
 
     // Instance icons

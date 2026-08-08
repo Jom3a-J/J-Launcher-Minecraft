@@ -46,6 +46,8 @@
 #include "ui_MainWindow.h"
 
 #include <QDir>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QFileInfo>
 #include <QUrl>
 #include <QUrlQuery>
@@ -61,6 +63,7 @@
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QVBoxLayout>
 #include <QMainWindow>
 #include <QMenu>
 #include <QMenuBar>
@@ -103,6 +106,7 @@
 #include "ui/dialogs/IconPickerDialog.h"
 #include "ui/dialogs/ImportResourceDialog.h"
 #include "ui/dialogs/NewInstanceDialog.h"
+#include "ui/pages/server/ServerListPage.h"
 #include "ui/dialogs/NewsDialog.h"
 #include "ui/dialogs/ProgressDialog.h"
 #include "ui/dialogs/skins/SkinManageDialog.h"
@@ -941,6 +945,27 @@ void MainWindow::addInstance(const QString& url, const QMap<QString, QString>& e
 void MainWindow::on_actionAddInstance_triggered()
 {
     addInstance();
+}
+
+void MainWindow::on_actionManageServers_triggered()
+{
+    auto* serverManager = APPLICATION->serverManager();
+    if (!serverManager) {
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Server Manager"));
+    dialog.setMinimumSize(760, 560);
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* serverPage = new ServerListPage(&dialog);
+    serverPage->setServerManager(serverManager);
+    layout->addWidget(serverPage);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::accept);
+    layout->addWidget(buttons);
+    dialog.exec();
 }
 
 void MainWindow::processURLs(QList<QUrl> urls)

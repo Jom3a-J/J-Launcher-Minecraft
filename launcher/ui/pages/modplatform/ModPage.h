@@ -25,7 +25,9 @@ class ModPage : public ResourcePage {
             BaseInstance& instance,
             ResourceProviderData provider,
             const ResourceAPI* api,
-            ModFilterWidget* filterWidget);
+            ModFilterWidget* filterWidget,
+            ModPlatform::ResourceType resourceType = ModPlatform::ResourceType::Mod,
+            QStringList loaderNames = {});
 
    protected:
     void prepareProviderCategories();
@@ -40,6 +42,7 @@ class ModPage : public ResourcePage {
     std::shared_ptr<ModFilterWidget::Filter> m_filter;
     Task::Ptr m_categoriesTask;
     const ResourceAPI* m_api = nullptr;
+    ModPlatform::ResourceType m_resourceType = ModPlatform::ResourceType::Mod;
 };
 
 }  // namespace ResourceDownload

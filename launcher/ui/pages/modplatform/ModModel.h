@@ -28,7 +28,9 @@ class ModModel : public ResourceModel {
     Q_OBJECT
 
    public:
-    ModModel(BaseInstance&, const ResourceAPI* api, const QString& debugName, QString metaEntryBase);
+    ModModel(BaseInstance&, const ResourceAPI* api, const QString& debugName, QString metaEntryBase,
+             ModPlatform::ResourceType resourceType = ModPlatform::ResourceType::Mod,
+             QStringList loaderNames = {});
 
     /* Ask the API for more information */
     void searchWithTerm(const QString& term, unsigned int sort, bool filter_changed);
@@ -52,6 +54,8 @@ class ModModel : public ResourceModel {
 
    protected:
     BaseInstance& m_base_instance;
+    ModPlatform::ResourceType m_resourceType = ModPlatform::ResourceType::Mod;
+    QStringList m_loaderNames;
 
     std::shared_ptr<ModFilterWidget::Filter> m_filter = nullptr;
 
