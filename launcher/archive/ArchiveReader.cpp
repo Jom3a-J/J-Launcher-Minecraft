@@ -224,7 +224,8 @@ bool ArchiveReader::parse(const std::function<bool(File*, bool&)>& doStuff)
     }
 
     bool breakControl = false;
-    while (f->readNextHeader() == ARCHIVE_OK) {
+    int headerStatus = ARCHIVE_OK;
+    while ((headerStatus = f->readNextHeader()) == ARCHIVE_OK) {
         if (f && !doStuff(f.get(), breakControl)) {
             qCritical() << "Failed to parse file:" << f->filename() << "-" << f->error();
             return false;
@@ -235,7 +236,7 @@ bool ArchiveReader::parse(const std::function<bool(File*, bool&)>& doStuff)
     }
 
     archive_read_close(a);
-    return true;
+    return breakControl || headerStatus == ARCHIVE_EOF;
 }
 
 bool ArchiveReader::parse(const std::function<bool(File*)>& doStuff)

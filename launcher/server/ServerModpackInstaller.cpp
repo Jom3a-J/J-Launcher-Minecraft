@@ -2,6 +2,7 @@
 
 #include "server/ServerInstance.h"
 #include "server/ServerManager.h"
+#include "server/ServerPackCompatibility.h"
 
 #include "minecraft/MinecraftInstance.h"
 #include "minecraft/PackProfile.h"
@@ -316,9 +317,9 @@ bool readModrinthRules(const QString &instanceRoot, const QString &gameRoot,
             }
             return false;
         }
-        const QString serverSupport =
-            file.value(QStringLiteral("env")).toObject().value(QStringLiteral("server")).toString(
-                QStringLiteral("required"));
+        const QString serverSupport = file.value(QStringLiteral("env")).toObject()
+                                           .value(QStringLiteral("server"))
+                                           .toString();
         if (serverSupport == QStringLiteral("unsupported")) {
             excludedPaths->insert(path.toLower());
             if (skippedClientFiles) {
@@ -576,6 +577,13 @@ bool ServerModpackInstaller::prepareContent(const QString &instanceRoot,
         }
         return false;
     }
+    const auto compatibility = inspectServerPack(instanceRoot);
+    if (compatibility.isIncompatible()) {
+        if (error) {
+            *error = serverPackCompatibilityDescription(compatibility);
+        }
+        return false;
+    }
     if (!QDir().mkpath(destination)) {
         if (error) {
             *error = QObject::tr("Could not create temporary server content.");
@@ -585,6 +593,18 @@ bool ServerModpackInstaller::prepareContent(const QString &instanceRoot,
 
     QSet<QString> includedPaths;
     QSet<QString> excludedPaths;
+    for (const auto &file : compatibility.files) {
+        if (file.side == ServerPackFileSide::ClientOnly) {
+            excludedPaths.insert(file.path.toLower());
+            if (skippedClientFiles) {
+                skippedClientFiles->append(file.path);
+            }
+        } else if (file.side == ServerPackFileSide::ServerOnly
+                   || file.side == ServerPackFileSide::Universal
+                   || file.side == ServerPackFileSide::Unknown) {
+            includedPaths.insert(file.path);
+        }
+    }
     if (!readModrinthRules(instanceRoot, gameRoot, &includedPaths, &excludedPaths,
                            skippedClientFiles, error)) {
         return false;
@@ -684,26 +704,34 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
         return result;
     }
 
-    const bool hasPublishedServerPack = QFileInfo::exists(
-        QDir(instanceRoot).filePath(
-            QStringLiteral("server-pack/published-server-pack.txt")));
+    const auto compatibility = evaluateServerPack(
+        instanceRoot, profile.minecraftVersion, profile.loaderType,
+        profile.loaderVersion);
+    if (compatibility.isIncompatible()) {
+        result.error = serverPackCompatibilityDescription(compatibility);
+        return result;
+    }
+
+    const bool hasPublishedServerPack = compatibility.hasDedicatedServerPack;
     if (!hasPublishedServerPack) {
-        const bool hasCompatibilityMetadata = QFileInfo::exists(
-                QDir(instanceRoot).filePath(
-                    QStringLiteral("mrpack/modrinth.index.json")))
-            || QFileInfo::exists(QDir(instanceRoot).filePath(
-                QStringLiteral("server-pack/client-only.txt")))
-            || QFileInfo::exists(QDir(instanceRoot).filePath(
-                QStringLiteral("server-pack/include.txt")));
         result.warnings.append(
-            hasCompatibilityMetadata
+            compatibility.sideMetadataPresent
                 ? QObject::tr("The provider did not publish a dedicated server pack. "
                               "The server was derived from the client pack using the "
-                              "available client/server compatibility metadata.")
+                              "available compatibility metadata.")
                 : QObject::tr("The provider did not publish a dedicated server pack and "
-                              "did not supply complete client/server compatibility metadata. "
-                              "The server was derived from the client pack; a client-only mod "
-                              "may still need to be removed if startup fails."));
+                              "did not supply complete compatibility metadata. "
+                              "The server projection is unverified and may need manual review."));
+    }
+    if (compatibility.state == ServerPackCompatibilityState::Unknown) {
+        result.warnings.append(QObject::tr(
+            "Server compatibility is unknown; client-only content could not be proven safe "
+            "for a dedicated server."));
+    }
+    for (const QString &warning : compatibility.warnings) {
+        if (!result.warnings.contains(warning)) {
+            result.warnings.append(warning);
+        }
     }
 
     QTemporaryDir staging;

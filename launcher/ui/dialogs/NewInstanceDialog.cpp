@@ -328,6 +328,7 @@ InstanceTask* NewInstanceDialog::extractTask()
     extracted->setGroup(instGroup());
     extracted->setIcon(iconKey());
     extracted->setTargetDir(instDir());
+    extracted->setCreateServerPair(m_mode == Mode::ServerModpack);
     return extracted;
 }
 

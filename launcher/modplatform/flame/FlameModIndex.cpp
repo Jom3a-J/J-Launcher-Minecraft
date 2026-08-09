@@ -1,5 +1,7 @@
 #include "FlameModIndex.h"
 
+#include "modplatform/flame/CurseForgeHash.h"
+
 #include "FileSystem.h"
 #include "Json.h"
 #include "modplatform/ModIndex.h"
@@ -70,19 +72,6 @@ void FlameMod::loadBody(ModPlatform::IndexedPack& pack)
     }
 }
 
-namespace {
-QString enumToString(int hash_algorithm)
-{
-    switch (hash_algorithm) {
-        default:
-        case 1:
-            return "sha1";
-        case 2:
-            return "md5";
-    }
-}
-}  // namespace
-
 void FlameMod::loadIndexedPackVersions(ModPlatform::IndexedPack& pack, QJsonArray& arr)
 {
     QList<ModPlatform::IndexedVersion> unsortedVersions;
@@ -113,6 +102,7 @@ auto FlameMod::loadIndexedPackVersion(QJsonObject& obj, bool load_changelog) -> 
     auto versionArray = Json::requireArray(obj, "gameVersions");
 
     ModPlatform::IndexedVersion file;
+    file.side = ModPlatform::SideType::NoSide;
     for (auto mcVer : versionArray) {
         auto str = mcVer.toString();
 
@@ -120,7 +110,6 @@ auto FlameMod::loadIndexedPackVersion(QJsonObject& obj, bool load_changelog) -> 
             file.mcVersion.append(str);
         }
 
-        file.side = ModPlatform::SideType::NoSide;
         if (auto loader = str.toLower(); loader == "neoforge") {
             file.loaders |= ModPlatform::NeoForge;
         } else if (loader == "forge") {
@@ -144,6 +133,10 @@ auto FlameMod::loadIndexedPackVersion(QJsonObject& obj, bool load_changelog) -> 
 
     file.addonId = Json::requireInteger(obj, "modId");
     file.fileId = Json::requireInteger(obj, "id");
+    const QJsonValue serverPackFileId = obj.value("serverPackFileId");
+    if (serverPackFileId.isDouble() && serverPackFileId.toInteger() > 0) {
+        file.serverPackFileId = serverPackFileId.toInteger();
+    }
     file.date = Json::requireString(obj, "fileDate");
     file.version = Json::requireString(obj, "displayName");
     file.downloadUrl = obj["downloadUrl"].toString();
@@ -170,11 +163,9 @@ auto FlameMod::loadIndexedPackVersion(QJsonObject& obj, bool load_changelog) -> 
     auto hash_list = obj["hashes"].toArray();
     for (auto h : hash_list) {
         auto hash_entry = h.toObject();
-        auto hash_types = ModPlatform::ProviderCapabilities::hashType(ModPlatform::ResourceProvider::FLAME);
-        auto hash_algo = enumToString(hash_entry["algo"].toInt(1));
-        if (hash_types.contains(hash_algo)) {
-            file.hash = Json::requireString(hash_entry, "value");
-            file.hash_type = hash_algo;
+        if (const auto hash = Flame::parseCurseForgeHash(hash_entry)) {
+            file.hash = hash->value;
+            file.hash_type = hash->algorithmName;
             break;
         }
     }

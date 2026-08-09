@@ -541,6 +541,8 @@ set(FTB_SOURCES
 
 set(FLAME_SOURCES
     # Flame
+    modplatform/flame/CurseForgeHash.cpp
+    modplatform/flame/CurseForgeHash.h
     modplatform/flame/FlameModIndex.cpp
     modplatform/flame/FlameModIndex.h
     modplatform/flame/PackManifest.h
@@ -810,6 +812,8 @@ SET(LAUNCHER_SOURCES
     server/ServerManager.cpp
     server/ServerModpackInstaller.h
     server/ServerModpackInstaller.cpp
+    server/ServerPackCompatibility.h
+    server/ServerPackCompatibility.cpp
     server/ServerInstance.h
     server/ServerInstance.cpp
     server/ServerPackImportTransaction.h

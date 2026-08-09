@@ -53,6 +53,8 @@
 #include "BuildConfig.h"
 #include "ui/dialogs/BlockedModsDialog.h"
 
+#include <QFile>
+
 namespace FTB {
 
 PackInstallTask::PackInstallTask(Modpack pack, QString version, QWidget* parent)
@@ -149,7 +151,7 @@ void PackInstallTask::resolveMods()
 
     Flame::Manifest manifest;
     for (const auto& file : m_version.files) {
-        if (!file.serverOnly && file.url.isEmpty()) {
+        if ((shouldCreateServerPair() || !file.serverOnly) && file.url.isEmpty()) {
             if (file.curseforge.file_id <= 0) {
                 emitFailed(tr("Invalid manifest: There's no information available to download the file '%1'!").arg(file.name));
                 return;
@@ -203,6 +205,9 @@ void PackInstallTask::onResolveModsSucceeded()
             blockedMod.targetFolder = resultsFile.targetFolder;
 
             m_blockedMods.append(blockedMod);
+            if (localFile.serverOnly) {
+                m_serverOnlyBlockedFiles.insert(blockedMod.name);
+            }
 
             anyBlocked = true;
         } else {
@@ -305,22 +310,71 @@ void PackInstallTask::downloadPack()
     setAbortable(false);
 
     auto jobPtr = makeShared<NetJob>(tr("Mod download"), APPLICATION->network());
+    QFile clientOnlyFile;
+    QFile serverIncludeFile;
+    QFile providerMarker;
+    if (shouldCreateServerPair()) {
+        const QString clientOnlyPath =
+            FS::PathCombine(m_stagingPath, "server-pack", "client-only.txt");
+        const QString serverIncludePath =
+            FS::PathCombine(m_stagingPath, "server-pack", "include.txt");
+        FS::ensureFilePathExists(clientOnlyPath);
+        FS::ensureFilePathExists(serverIncludePath);
+        clientOnlyFile.setFileName(clientOnlyPath);
+        serverIncludeFile.setFileName(serverIncludePath);
+        providerMarker.setFileName(
+            FS::PathCombine(m_stagingPath, "server-pack", "provider.txt"));
+        if (!clientOnlyFile.open(QIODevice::WriteOnly | QIODevice::Text)
+            || !serverIncludeFile.open(QIODevice::WriteOnly | QIODevice::Text)
+            || !providerMarker.open(QIODevice::WriteOnly | QIODevice::Text)
+            || providerMarker.write("ftb\n") != 4) {
+            emitFailed(tr("Could not prepare the FTB server compatibility manifest."));
+            return;
+        }
+    }
     for (const auto& file : m_version.files) {
-        if (file.serverOnly || file.url.isEmpty()) {
+        const QString relativePath = FS::PathCombine(file.path, file.name);
+        if (shouldCreateServerPair() && file.clientOnly) {
+            clientOnlyFile.write(QDir::fromNativeSeparators(relativePath).toUtf8());
+            clientOnlyFile.write("\n");
+        }
+        if (shouldCreateServerPair() && !file.clientOnly) {
+            serverIncludeFile.write(QDir::fromNativeSeparators(relativePath).toUtf8());
+            serverIncludeFile.write("\n");
+        }
+        if (file.url.isEmpty()) {
             continue;
         }
 
-        auto path = FS::PathCombine(m_stagingPath, ".minecraft", file.path, file.name);
-        qDebug() << "Will try to download" << file.url << "to" << path;
-
-        const QFileInfo fileInfo(file.name);
-
-        auto dl = Net::Download::makeFile(file.url, path);
-        if (!file.sha1.isEmpty()) {
-            dl->addValidator(new Net::ChecksumValidator(QCryptographicHash::Sha1, file.sha1));
+        if (!file.serverOnly) {
+            auto path = FS::PathCombine(m_stagingPath, ".minecraft", relativePath);
+            qDebug() << "Will try to download" << file.url << "to" << path;
+            auto dl = Net::Download::makeFile(file.url, path);
+            if (!file.sha1.isEmpty()) {
+                dl->addValidator(new Net::ChecksumValidator(QCryptographicHash::Sha1, file.sha1));
+            }
+            jobPtr->addNetAction(dl);
         }
-
-        jobPtr->addNetAction(dl);
+        if (shouldCreateServerPair() && file.serverOnly) {
+            auto path = FS::PathCombine(m_stagingPath, "server-pack", "server-files",
+                                        relativePath);
+            qDebug() << "Will try to download server-only file" << file.url
+                     << "to" << path;
+            auto dl = Net::Download::makeFile(file.url, path);
+            if (!file.sha1.isEmpty()) {
+                dl->addValidator(new Net::ChecksumValidator(QCryptographicHash::Sha1, file.sha1));
+            }
+            jobPtr->addNetAction(dl);
+        }
+    }
+    if (clientOnlyFile.isOpen()) {
+        clientOnlyFile.close();
+    }
+    if (serverIncludeFile.isOpen()) {
+        serverIncludeFile.close();
+    }
+    if (providerMarker.isOpen()) {
+        providerMarker.close();
     }
 
     jobPtr->setMaxConcurrent(1);  // FTB blocks multiple requests at a time
@@ -378,7 +432,11 @@ void PackInstallTask::copyBlockedMods()
             continue;
         }
 
-        auto destPath = FS::PathCombine(m_stagingPath, ".minecraft", mod.targetFolder, mod.name);
+        auto destPath = m_serverOnlyBlockedFiles.contains(mod.name)
+            ? FS::PathCombine(m_stagingPath, "server-pack", "server-files",
+                              FS::PathCombine(mod.targetFolder, mod.name))
+            : FS::PathCombine(m_stagingPath, ".minecraft", mod.targetFolder,
+                              mod.name);
 
         setStatus(tr("Copying Blocked Mods (%1 out of %2 are done)").arg(QString::number(i), QString::number(total)));
 

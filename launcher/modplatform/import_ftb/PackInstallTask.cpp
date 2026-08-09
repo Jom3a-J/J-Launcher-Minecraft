@@ -19,6 +19,7 @@
 #include "PackInstallTask.h"
 
 #include <QtConcurrent>
+#include <QFile>
 
 #include "FileSystem.h"
 #include "minecraft/MinecraftInstance.h"
@@ -96,6 +97,17 @@ void PackInstallTask::copySettings()
             m_instIcon = "ftb_logo";
         }
         m_instance->setIconKey(m_instIcon);
+    }
+    if (shouldCreateServerPair()) {
+        const QString providerMarkerPath =
+            FS::PathCombine(m_stagingPath, "server-pack", "provider.txt");
+        FS::ensureFilePathExists(providerMarkerPath);
+        QFile providerMarker(providerMarkerPath);
+        if (!providerMarker.open(QIODevice::WriteOnly | QIODevice::Text)
+            || providerMarker.write("ftb-app\n") != 8) {
+            emitFailed(tr("Could not record the FTB App compatibility metadata."));
+            return;
+        }
     }
     downloadFiles(m_instance.get());
 }

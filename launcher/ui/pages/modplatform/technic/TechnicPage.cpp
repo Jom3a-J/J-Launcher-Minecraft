@@ -208,6 +208,7 @@ void TechnicPage::suggestCurrent()
         }
 
         current.minecraftVersion = obj["minecraft"].toString();
+        current.serverPackUrl = obj["serverPackUrl"].toString();
         current.websiteUrl = obj["platformUrl"].toString();
         current.author = obj["user"].toString();
         current.description = obj["description"].toString();
@@ -291,11 +292,13 @@ void TechnicPage::selectVersion()
 
     if (!current.isSolder) {
         dialog->setSuggestedPack(current.name, selectedVersion,
-                                 new Technic::SingleZipPackInstallTask(current.url, current.minecraftVersion));
+                                 new Technic::SingleZipPackInstallTask(current.url, current.minecraftVersion,
+                                                                      QUrl(current.serverPackUrl)));
     } else {
+        const QUrl serverPackUrl = selectedVersion == current.currentVersion ? QUrl(current.serverPackUrl) : QUrl();
         dialog->setSuggestedPack(current.name, selectedVersion,
                                  new Technic::SolderPackInstallTask(APPLICATION->network(), current.url, current.slug, selectedVersion,
-                                                                    current.minecraftVersion));
+                                                                    current.minecraftVersion, serverPackUrl));
     }
 }
 

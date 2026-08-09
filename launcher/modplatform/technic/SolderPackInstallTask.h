@@ -49,7 +49,8 @@ class SolderPackInstallTask : public InstanceTask {
                                    const QUrl& solderUrl,
                                    const QString& pack,
                                    const QString& version,
-                                   const QString& minecraftVersion);
+                                   const QString& minecraftVersion,
+                                   const QUrl& serverPackUrl = {});
 
     bool canAbort() const override { return true; }
     bool abort() override;
@@ -77,9 +78,11 @@ class SolderPackInstallTask : public InstanceTask {
     QString m_pack;
     QString m_version;
     QString m_minecraftVersion;
+    QUrl m_serverPackUrl;
+    QString m_serverArchivePath;
     QTemporaryDir m_outputDir;
     int m_modCount;
-    QFuture<bool> m_extractFuture;
-    QFutureWatcher<bool> m_extractFutureWatcher;
+    QFuture<QString> m_extractFuture;
+    QFutureWatcher<QString> m_extractFutureWatcher;
 };
 }  // namespace Technic

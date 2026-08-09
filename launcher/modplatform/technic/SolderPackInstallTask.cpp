@@ -38,6 +38,7 @@
 #include <FileSystem.h>
 #include <Json.h>
 #include <MMCZip.h>
+#include <QFile>
 #include <QtConcurrentRun>
 
 #include "SolderPackManifest.h"
@@ -49,13 +50,15 @@ Technic::SolderPackInstallTask::SolderPackInstallTask(QNetworkAccessManager* net
                                                       const QUrl& solderUrl,
                                                       const QString& pack,
                                                       const QString& version,
-                                                      const QString& minecraftVersion)
+                                                      const QString& minecraftVersion,
+                                                      const QUrl& serverPackUrl)
 {
     m_solderUrl = solderUrl;
     m_pack = pack;
     m_version = version;
     m_network = network;
     m_minecraftVersion = minecraftVersion;
+    m_serverPackUrl = serverPackUrl;
 }
 
 bool Technic::SolderPackInstallTask::abort()
@@ -68,6 +71,18 @@ bool Technic::SolderPackInstallTask::abort()
 
 void Technic::SolderPackInstallTask::executeTask()
 {
+    if (shouldCreateServerPair()) {
+        const QString markerPath = FS::PathCombine(m_stagingPath, "server-pack", "provider.txt");
+        FS::ensureFilePathExists(markerPath);
+        QFile marker(markerPath);
+        if (!marker.open(QIODevice::WriteOnly | QIODevice::Text) || marker.write("technic\n") != 8) {
+            emitFailed(tr("Could not record the Technic compatibility metadata."));
+            return;
+        }
+    }
+    if (shouldCreateServerPair() && (m_serverPackUrl.isEmpty() || !m_serverPackUrl.isValid())) {
+        logWarning(tr("Technic does not publish a version-compatible server pack for this modpack. The launcher will derive server content from the client pack."));
+    }
     setStatus(tr("Resolving modpack files"));
 
     m_filesNetJob.reset(new NetJob(tr("Resolving modpack files"), m_network));
@@ -123,6 +138,10 @@ void Technic::SolderPackInstallTask::fileListSucceeded(QByteArray* response)
     }
 
     m_modCount = build.mods.size();
+    if (shouldCreateServerPair() && m_serverPackUrl.isValid() && !m_serverPackUrl.isEmpty()) {
+        m_serverArchivePath = FS::PathCombine(m_outputDir.path(), "published-server-pack.zip");
+        m_filesNetJob->addNetAction(Net::ApiDownload::makeFile(m_serverPackUrl, m_serverArchivePath));
+    }
 
     connect(m_filesNetJob.get(), &NetJob::succeeded, this, &Technic::SolderPackInstallTask::downloadSucceeded);
     connect(m_filesNetJob.get(), &NetJob::progress, this, &Technic::SolderPackInstallTask::downloadProgressChanged);
@@ -138,7 +157,7 @@ void Technic::SolderPackInstallTask::downloadSucceeded()
 
     setStatus(tr("Extracting modpack"));
     m_filesNetJob.reset();
-    m_extractFuture = QtConcurrent::run([this]() {
+    m_extractFuture = QtConcurrent::run([this]() -> QString {
         int i = 0;
         QString extractDir = FS::PathCombine(m_stagingPath, "minecraft");
         FS::ensureFolderPathExists(extractDir);
@@ -146,14 +165,29 @@ void Technic::SolderPackInstallTask::downloadSucceeded()
         while (m_modCount > i) {
             auto path = FS::PathCombine(m_outputDir.path(), QString("%1").arg(i));
             if (!MMCZip::extractDir(path, extractDir)) {
-                return false;
+                return tr("A downloaded Technic Solder module is corrupt or could not be extracted.");
             }
             i++;
         }
-        return true;
+        if (!m_serverArchivePath.isEmpty()) {
+            QString failedEntry;
+            if (!MMCZip::validateArchive(m_serverArchivePath, &failedEntry)) {
+                return tr("The Technic server-pack archive is corrupt (failed integrity check at %1).")
+                    .arg(failedEntry.isEmpty() ? tr("an unknown file") : failedEntry);
+            }
+            const QString serverRoot = FS::PathCombine(m_stagingPath, "server-pack", "server-files");
+            if (!MMCZip::extractDir(m_serverArchivePath, serverRoot)) {
+                return tr("Failed to extract the Technic server-pack archive.");
+            }
+            QFile marker(FS::PathCombine(m_stagingPath, "server-pack", "published-server-pack.txt"));
+            if (!marker.open(QIODevice::WriteOnly | QIODevice::Text) || marker.write("technic\n") != 8) {
+                return tr("Could not record the downloaded Technic server pack.");
+            }
+        }
+        return {};
     });
-    connect(&m_extractFutureWatcher, &QFutureWatcher<QStringList>::finished, this, &Technic::SolderPackInstallTask::extractFinished);
-    connect(&m_extractFutureWatcher, &QFutureWatcher<QStringList>::canceled, this, &Technic::SolderPackInstallTask::extractAborted);
+    connect(&m_extractFutureWatcher, &QFutureWatcher<QString>::finished, this, &Technic::SolderPackInstallTask::extractFinished);
+    connect(&m_extractFutureWatcher, &QFutureWatcher<QString>::canceled, this, &Technic::SolderPackInstallTask::extractAborted);
     m_extractFutureWatcher.setFuture(m_extractFuture);
 }
 
@@ -178,8 +212,9 @@ void Technic::SolderPackInstallTask::downloadAborted()
 
 void Technic::SolderPackInstallTask::extractFinished()
 {
-    if (!m_extractFuture.result()) {
-        emitFailed(tr("Failed to extract modpack"));
+    const QString error = m_extractFuture.result();
+    if (!error.isEmpty()) {
+        emitFailed(error);
         return;
     }
     QDir extractDir(m_stagingPath);

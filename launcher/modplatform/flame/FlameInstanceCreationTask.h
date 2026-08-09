@@ -57,13 +57,15 @@ class FlameCreationTask final : public InstanceTask {
                       QWidget* parent,
                       QString id,
                       QString versionId,
-                      const QString& originalInstanceId = {})
+                      const QString& originalInstanceId = {},
+                      const QString& serverPackFileId = {})
         : m_parent(parent), m_trustedSource(trustedSource), m_managedId(std::move(id)), m_managedVersionId(std::move(versionId))
     {
         setStagingPath(stagingPath);
         setParentSettings(globalSettings);
 
         m_originalInstanceId = originalInstanceId;
+        m_serverPackFileId = serverPackFileId;
     }
 
     bool abort() override;
@@ -77,6 +79,8 @@ class FlameCreationTask final : public InstanceTask {
     void copyBlockedMods(const QList<BlockedMod>& blockedMods);
     void validateOtherResources();
     QString getVersionForLoader(const QString& uid, const QString& loaderType, const QString& version, const QString& mcVersion);
+    bool resolveServerPackDownload(QEventLoop& loop);
+    bool extractServerPack();
     void finishInstall();
 
    private:
@@ -96,6 +100,12 @@ class FlameCreationTask final : public InstanceTask {
     NetJob::Ptr m_filesJob = nullptr;
 
     QString m_managedId, m_managedVersionId;
+    QString m_serverPackFileId;
+    QUrl m_serverPackDownloadUrl;
+    QString m_serverPackArchivePath;
+    QString m_serverPackHashType;
+    QString m_serverPackHash;
+    QString m_serverPackError;
 
     QList<std::pair<QString, QString>> m_otherResources;
 

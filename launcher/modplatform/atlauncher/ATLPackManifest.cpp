@@ -50,7 +50,6 @@ static ATLauncher::DownloadType parseDownloadType(QString rawType)
 
     return ATLauncher::DownloadType::Unknown;
 }
-
 static ATLauncher::ModType parseModType(QString rawType)
 {
     // See https://wiki.atlauncher.com/mod_types
@@ -187,9 +186,63 @@ static void loadVersionMod(ATLauncher::VersionMod& p, QJsonObject& obj)
     p.warning = obj["warning"].toString("");
 
     p.client = obj["client"].toBool();
+    // ATLauncher declares client and dedicated-server compatibility
+    // independently. Older manifests predate the server field, so preserve
+    // their historical universal behavior when it is absent.
+    p.server = obj.contains("server") ? obj["server"].toBool() : true;
+    p.serverSeparate = obj["serverSeparate"].toBool();
+    p.serverUrl = obj["serverUrl"].toString("");
+    p.serverFile = obj["serverFile"].toString("");
+    p.serverMd5 = obj["serverMd5"].toString("");
+    p.serverDownload_raw = obj["serverDownload"].toString("");
+    p.serverDownload = parseDownloadType(p.serverDownload_raw);
+    p.serverType_raw = obj["serverType"].toString("");
+    p.serverType = parseModType(p.serverType_raw);
+    p.serverOptional = obj.contains("serverOptional")
+        ? obj["serverOptional"].toBool()
+        : p.optional;
 
     // computed
     p.effectively_hidden = p.hidden || p.library;
+}
+
+QList<ATLauncher::VersionMod> ATLauncher::expandModsForPairedServer(
+    const QList<ATLauncher::VersionMod>& mods)
+{
+    QList<VersionMod> expanded;
+    expanded.reserve(mods.size() * 2);
+
+    for (const auto& mod : mods) {
+        if (!mod.serverSeparate || !mod.server) {
+            expanded.append(mod);
+            continue;
+        }
+
+        // The regular artifact is the client side of a separate pair. Mark it
+        // client-only so the server projection excludes it.
+        if (mod.client) {
+            auto clientMod = mod;
+            clientMod.server = false;
+            clientMod.serverSeparate = false;
+            expanded.append(clientMod);
+        }
+
+        auto serverMod = mod;
+        serverMod.url = mod.serverUrl;
+        serverMod.file = mod.serverFile;
+        serverMod.md5 = mod.serverMd5;
+        serverMod.download = mod.serverDownload;
+        serverMod.download_raw = mod.serverDownload_raw;
+        serverMod.type = mod.serverType;
+        serverMod.type_raw = mod.serverType_raw;
+        serverMod.optional = mod.serverOptional;
+        serverMod.client = false;
+        serverMod.server = true;
+        serverMod.serverSeparate = false;
+        expanded.append(serverMod);
+    }
+
+    return expanded;
 }
 
 static void loadVersionMessages(ATLauncher::VersionMessages& m, QJsonObject& obj)

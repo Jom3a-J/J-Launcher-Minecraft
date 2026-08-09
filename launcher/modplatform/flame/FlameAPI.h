@@ -35,6 +35,9 @@ class FlameAPI final : public ResourceAPI {
     std::pair<Task::Ptr, QByteArray*> matchFingerprints(const QList<uint>& fingerprints) const;
     std::pair<Task::Ptr, QByteArray*> getFiles(const QStringList& fileIds) const;
     std::pair<Task::Ptr, QByteArray*> getFile(const QString& addonId, const QString& fileId) const;
+    std::pair<Task::Ptr, QByteArray*> getFileDownloadUrl(const QString& addonId, const QString& fileId) const;
+    static QUrl fileDownloadUrlEndpoint(const QString& addonId, const QString& fileId);
+    static QUrl loadFileDownloadUrl(const QByteArray& response, QString* error = nullptr);
 
     static std::pair<Task::Ptr, QByteArray*> getCategories(ModPlatform::ResourceType type);
     std::pair<Task::Ptr, QByteArray*> getModCategories() const override;

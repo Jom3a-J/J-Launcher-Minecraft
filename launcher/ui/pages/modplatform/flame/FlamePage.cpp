@@ -239,6 +239,9 @@ void FlamePage::suggestCurrent()
     QMap<QString, QString> extra_info;
     extra_info.insert("pack_id", m_current->addonId.toString());
     extra_info.insert("pack_version_id", version.fileId.toString());
+    if (version.serverPackFileId.isValid()) {
+        extra_info.insert("server_pack_file_id", version.serverPackFileId.toString());
+    }
 
     m_dialog->setSuggestedPack(m_current->name, new InstanceImportTask(version.downloadUrl, true, this, std::move(extra_info)));
     QString editedLogoName = "curseforge_" + m_current->logoName;

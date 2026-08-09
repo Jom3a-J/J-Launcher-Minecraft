@@ -142,6 +142,7 @@ struct Dependency {
 struct IndexedVersion {
     QVariant addonId;
     QVariant fileId;
+    QVariant serverPackFileId;
     QString version;
     QString version_number;
     IndexedVersionType version_type;

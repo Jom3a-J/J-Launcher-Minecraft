@@ -36,6 +36,8 @@
 
 #include "ATLPackInstallTask.h"
 
+#include <QCryptographicHash>
+#include <QFile>
 #include <QtConcurrent>
 #include <algorithm>
 #include <utility>
@@ -733,16 +735,66 @@ void PackInstallTask::downloadMods()
     jarmods.clear();
     jobPtr.reset(new NetJob(tr("Mod download"), APPLICATION->network()));
 
+    if (shouldCreateServerPair()) {
+        for (const auto& mod : m_version.mods) {
+            if (!mod.serverSeparate || !mod.server) {
+                continue;
+            }
+            if (mod.serverUrl.isEmpty() || mod.serverFile.isEmpty()
+                || mod.serverDownload == DownloadType::Unknown
+                || mod.serverType == ModType::Unknown) {
+                emitFailed(tr("The ATLauncher pack has incomplete separate server metadata for %1.")
+                               .arg(mod.name));
+                return;
+            }
+        }
+    }
+
+    const QList<VersionMod> modsForInstall = shouldCreateServerPair()
+        ? expandModsForPairedServer(m_version.mods)
+        : m_version.mods;
+
+    QFile clientOnlyFile;
+    QFile providerMarker;
+    if (shouldCreateServerPair()) {
+        const QString clientOnlyPath = FS::PathCombine(
+            m_stagingPath, "server-pack", "client-only.txt");
+        FS::ensureFilePathExists(clientOnlyPath);
+        clientOnlyFile.setFileName(clientOnlyPath);
+        providerMarker.setFileName(
+            FS::PathCombine(m_stagingPath, "server-pack", "provider.txt"));
+        if (!clientOnlyFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            emitFailed(tr("Could not prepare the ATLauncher server compatibility manifest."));
+            return;
+        }
+        if (!providerMarker.open(QIODevice::WriteOnly | QIODevice::Text)
+            || providerMarker.write("atlauncher\n") != 11) {
+            emitFailed(tr("Could not prepare the ATLauncher server compatibility manifest."));
+            return;
+        }
+    }
+
     QList<VersionMod> blockedMods;
-    for (const auto& mod : m_version.mods) {
-        // skip non-client mods
-        if (!mod.client) {
+    for (const auto& mod : modsForInstall) {
+        const bool serverOnly = mod.server && !mod.client;
+        const bool clientOnly = mod.client && !mod.server;
+        if (!mod.client && (!shouldCreateServerPair() || !mod.server)) {
             continue;
         }
 
         // skip optional mods that were not selected
         if (mod.optional && !selectedMods.contains(mod.name)) {
             continue;
+        }
+
+        if (clientOnlyFile.isOpen() && clientOnly) {
+            const QString directory = getDirForModType(mod.type, mod.type_raw);
+            if (!directory.isNull()) {
+                const QString relativePath = QDir::fromNativeSeparators(
+                    FS::PathCombine(directory, mod.file));
+                clientOnlyFile.write(relativePath.toUtf8());
+                clientOnlyFile.write("\n");
+            }
         }
 
         QString url;
@@ -763,9 +815,20 @@ void PackInstallTask::downloadMods()
         }
 
         QFileInfo fileName(mod.file);
-        auto cacheName = fileName.completeBaseName() + "-" + mod.md5 + "." + fileName.suffix();
+        const QString cacheDiscriminator = mod.md5.isEmpty()
+            ? QString::fromLatin1(QCryptographicHash::hash(url.toUtf8(), QCryptographicHash::Sha256)
+                                      .toHex().left(16))
+            : mod.md5;
+        auto cacheName = fileName.completeBaseName() + "-" + cacheDiscriminator
+            + "." + fileName.suffix();
 
         if (mod.type == ModType::Extract || mod.type == ModType::TexturePackExtract || mod.type == ModType::ResourcePackExtract) {
+            if (serverOnly) {
+                emitFailed(tr("The ATLauncher pack requires a server-only extracted file "
+                              "that cannot be projected safely: %1")
+                               .arg(mod.file));
+                return;
+            }
             auto entry = APPLICATION->metacache()->resolveEntry("ATLauncherPacks", cacheName);
             entry->setStale(true);
             modsToExtract.insert(entry->getFullPath(), mod);
@@ -776,6 +839,12 @@ void PackInstallTask::downloadMods()
             }
             jobPtr->addNetAction(dl);
         } else if (mod.type == ModType::Decomp) {
+            if (serverOnly) {
+                emitFailed(tr("The ATLauncher pack requires a server-only decompressed file "
+                              "that cannot be projected safely: %1")
+                               .arg(mod.file));
+                return;
+            }
             auto entry = APPLICATION->metacache()->resolveEntry("ATLauncherPacks", cacheName);
             entry->setStale(true);
             modsToDecomp.insert(entry->getFullPath(), mod);
@@ -800,9 +869,12 @@ void PackInstallTask::downloadMods()
             }
             jobPtr->addNetAction(dl);
 
-            auto path = FS::PathCombine(m_stagingPath, "minecraft", relpath, mod.file);
+            auto path = serverOnly
+                ? FS::PathCombine(m_stagingPath, "server-pack", "server-files",
+                                  FS::PathCombine(relpath, mod.file))
+                : FS::PathCombine(m_stagingPath, "minecraft", relpath, mod.file);
 
-            if (mod.type == ModType::Forge) {
+            if (!serverOnly && mod.type == ModType::Forge) {
                 auto ver = getComponentVersion("net.minecraftforge", mod.version);
                 if (ver) {
                     componentsToInstall.insert("net.minecraftforge", ver);
@@ -813,7 +885,7 @@ void PackInstallTask::downloadMods()
                 jarmods.push_back(path);
             }
 
-            if (mod.type == ModType::Jar) {
+            if (!serverOnly && mod.type == ModType::Jar) {
                 qDebug() << "Jarmod: " + path;
                 jarmods.push_back(path);
             }
@@ -822,6 +894,12 @@ void PackInstallTask::downloadMods()
             qDebug() << "Will download" << url << "to" << path;
             modsToCopy[entry->getFullPath()] = path;
         }
+    }
+    if (clientOnlyFile.isOpen()) {
+        clientOnlyFile.close();
+    }
+    if (providerMarker.isOpen()) {
+        providerMarker.close();
     }
     if (!blockedMods.isEmpty()) {
         QList<BlockedMod> mods;
@@ -859,9 +937,22 @@ void PackInstallTask::downloadMods()
                     continue;
                 }
                 const auto& mod = *modIter;
+                const bool serverOnly = mod.server && !mod.client;
                 if (mod.type == ModType::Extract || mod.type == ModType::TexturePackExtract || mod.type == ModType::ResourcePackExtract) {
+                    if (serverOnly) {
+                        emitFailed(tr("The ATLauncher pack requires a blocked server-only "
+                                      "extracted file that cannot be projected safely: %1")
+                                       .arg(mod.file));
+                        return;
+                    }
                     modsToExtract.insert(blocked.localPath, mod);
                 } else if (mod.type == ModType::Decomp) {
+                    if (serverOnly) {
+                        emitFailed(tr("The ATLauncher pack requires a blocked server-only "
+                                      "decompressed file that cannot be projected safely: %1")
+                                       .arg(mod.file));
+                        return;
+                    }
                     modsToDecomp.insert(blocked.localPath, mod);
                 } else {
                     auto relpath = getDirForModType(mod.type, mod.type_raw);
@@ -869,9 +960,14 @@ void PackInstallTask::downloadMods()
                         continue;
                     }
 
-                    auto path = FS::PathCombine(m_stagingPath, "minecraft", relpath, mod.file);
+                    auto path = serverOnly
+                        ? FS::PathCombine(m_stagingPath, "server-pack",
+                                          "server-files",
+                                          FS::PathCombine(relpath, mod.file))
+                        : FS::PathCombine(m_stagingPath, "minecraft", relpath,
+                                          mod.file);
 
-                    if (mod.type == ModType::Forge) {
+                    if (!serverOnly && mod.type == ModType::Forge) {
                         auto ver = getComponentVersion("net.minecraftforge", mod.version);
                         if (ver) {
                             componentsToInstall.insert("net.minecraftforge", ver);
@@ -882,7 +978,7 @@ void PackInstallTask::downloadMods()
                         jarmods.push_back(path);
                     }
 
-                    if (mod.type == ModType::Jar) {
+                    if (!serverOnly && mod.type == ModType::Jar) {
                         qDebug() << "Jarmod: " + path;
                         jarmods.push_back(path);
                     }

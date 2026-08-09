@@ -15,6 +15,7 @@
 
 #include "SingleZipPackInstallTask.h"
 
+#include <QFile>
 #include <QtConcurrent>
 
 #include "FileSystem.h"
@@ -25,10 +26,12 @@
 
 #include "net/ApiDownload.h"
 
-Technic::SingleZipPackInstallTask::SingleZipPackInstallTask(const QUrl& sourceUrl, const QString& minecraftVersion)
+Technic::SingleZipPackInstallTask::SingleZipPackInstallTask(const QUrl& sourceUrl, const QString& minecraftVersion,
+                                                            const QUrl& serverPackUrl)
 {
     m_sourceUrl = sourceUrl;
     m_minecraftVersion = minecraftVersion;
+    m_serverPackUrl = serverPackUrl;
 }
 
 bool Technic::SingleZipPackInstallTask::abort()
@@ -41,6 +44,18 @@ bool Technic::SingleZipPackInstallTask::abort()
 
 void Technic::SingleZipPackInstallTask::executeTask()
 {
+    if (shouldCreateServerPair()) {
+        const QString markerPath = FS::PathCombine(m_stagingPath, "server-pack", "provider.txt");
+        FS::ensureFilePathExists(markerPath);
+        QFile marker(markerPath);
+        if (!marker.open(QIODevice::WriteOnly | QIODevice::Text) || marker.write("technic\n") != 8) {
+            emitFailed(tr("Could not record the Technic compatibility metadata."));
+            return;
+        }
+    }
+    if (shouldCreateServerPair() && (m_serverPackUrl.isEmpty() || !m_serverPackUrl.isValid())) {
+        logWarning(tr("Technic does not publish a dedicated server pack for this modpack. The launcher will derive server content from the client pack."));
+    }
     setStatus(tr("Downloading modpack:\n%1").arg(m_sourceUrl.toString()));
 
     const QString path = m_sourceUrl.host() + '/' + m_sourceUrl.path();
@@ -49,6 +64,13 @@ void Technic::SingleZipPackInstallTask::executeTask()
     m_filesNetJob.reset(new NetJob(tr("Modpack download"), APPLICATION->network()));
     m_filesNetJob->addNetAction(Net::ApiDownload::makeCached(m_sourceUrl, entry));
     m_archivePath = entry->getFullPath();
+    if (shouldCreateServerPair() && m_serverPackUrl.isValid() && !m_serverPackUrl.isEmpty()) {
+        const QString serverPath = m_serverPackUrl.host() + '/' + m_serverPackUrl.path();
+        auto serverEntry = APPLICATION->metacache()->resolveEntry("general", serverPath);
+        serverEntry->setStale(true);
+        m_filesNetJob->addNetAction(Net::ApiDownload::makeCached(m_serverPackUrl, serverEntry));
+        m_serverArchivePath = serverEntry->getFullPath();
+    }
     auto job = m_filesNetJob.get();
     connect(job, &NetJob::succeeded, this, &Technic::SingleZipPackInstallTask::downloadSucceeded);
     connect(job, &NetJob::progress, this, &Technic::SingleZipPackInstallTask::downloadProgressChanged);
@@ -62,15 +84,39 @@ void Technic::SingleZipPackInstallTask::downloadSucceeded()
     m_abortable = false;
 
     setStatus(tr("Extracting modpack"));
-    QDir extractDir(FS::PathCombine(m_stagingPath, "minecraft"));
     qDebug() << "Attempting to create instance from" << m_archivePath;
 
-    // open the zip and find relevant files in it
-    m_packZip.reset(new MMCZip::ArchiveReader(m_archivePath));
-    m_extractFuture =
-        QtConcurrent::run(QThreadPool::globalInstance(), MMCZip::extractSubDir, m_packZip.get(), QString(""), extractDir.absolutePath());
-    connect(&m_extractFutureWatcher, &QFutureWatcher<QStringList>::finished, this, &Technic::SingleZipPackInstallTask::extractFinished);
-    connect(&m_extractFutureWatcher, &QFutureWatcher<QStringList>::canceled, this, &Technic::SingleZipPackInstallTask::extractAborted);
+    const QString archivePath = m_archivePath;
+    const QString serverArchivePath = m_serverArchivePath;
+    const QString stagingPath = m_stagingPath;
+    m_extractFuture = QtConcurrent::run(QThreadPool::globalInstance(), [archivePath, serverArchivePath, stagingPath]() -> QString {
+        QString failedEntry;
+        if (!MMCZip::validateArchive(archivePath, &failedEntry)) {
+            return QObject::tr("The Technic provider archive is corrupt (failed integrity check at %1).")
+                .arg(failedEntry.isEmpty() ? QObject::tr("an unknown file") : failedEntry);
+        }
+        if (!MMCZip::extractDir(archivePath, FS::PathCombine(stagingPath, "minecraft"))) {
+            return QObject::tr("Failed to extract the Technic modpack archive.");
+        }
+        if (!serverArchivePath.isEmpty()) {
+            failedEntry.clear();
+            if (!MMCZip::validateArchive(serverArchivePath, &failedEntry)) {
+                return QObject::tr("The Technic server-pack archive is corrupt (failed integrity check at %1).")
+                    .arg(failedEntry.isEmpty() ? QObject::tr("an unknown file") : failedEntry);
+            }
+            const QString serverRoot = FS::PathCombine(stagingPath, "server-pack", "server-files");
+            if (!MMCZip::extractDir(serverArchivePath, serverRoot)) {
+                return QObject::tr("Failed to extract the Technic server-pack archive.");
+            }
+            QFile marker(FS::PathCombine(stagingPath, "server-pack", "published-server-pack.txt"));
+            if (!marker.open(QIODevice::WriteOnly | QIODevice::Text) || marker.write("technic\n") != 8) {
+                return QObject::tr("Could not record the downloaded Technic server pack.");
+            }
+        }
+        return {};
+    });
+    connect(&m_extractFutureWatcher, &QFutureWatcher<QString>::finished, this, &Technic::SingleZipPackInstallTask::extractFinished);
+    connect(&m_extractFutureWatcher, &QFutureWatcher<QString>::canceled, this, &Technic::SingleZipPackInstallTask::extractAborted);
     m_extractFutureWatcher.setFuture(m_extractFuture);
     m_filesNetJob.reset();
 }
@@ -90,9 +136,9 @@ void Technic::SingleZipPackInstallTask::downloadProgressChanged(qint64 current, 
 
 void Technic::SingleZipPackInstallTask::extractFinished()
 {
-    m_packZip.reset();
-    if (!m_extractFuture.result()) {
-        emitFailed(tr("Failed to extract modpack"));
+    const QString error = m_extractFuture.result();
+    if (!error.isEmpty()) {
+        emitFailed(error);
         return;
     }
     QDir extractDir(m_stagingPath);

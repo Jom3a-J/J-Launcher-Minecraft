@@ -160,6 +160,45 @@ std::pair<Task::Ptr, QByteArray*> FlameAPI::getFile(const QString& addonId, cons
     return { netJob, response };
 }
 
+std::pair<Task::Ptr, QByteArray*> FlameAPI::getFileDownloadUrl(const QString& addonId, const QString& fileId) const
+{
+    auto netJob = makeShared<NetJob>(QString("Flame::GetFileDownloadUrl"), APPLICATION->network());
+    auto [action, response] = Net::ApiDownload::makeByteArray(fileDownloadUrlEndpoint(addonId, fileId));
+    netJob->addNetAction(action);
+    return { netJob, response };
+}
+
+QUrl FlameAPI::fileDownloadUrlEndpoint(const QString& addonId, const QString& fileId)
+{
+    return QUrl(QString(BuildConfig.FLAME_BASE_URL + "/mods/%1/files/%2/download-url").arg(addonId, fileId));
+}
+
+QUrl FlameAPI::loadFileDownloadUrl(const QByteArray& response, QString* error)
+{
+    if (error) {
+        error->clear();
+    }
+    QJsonParseError parseError{};
+    const QJsonDocument document = QJsonDocument::fromJson(response, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()
+        || !document.object().value(QStringLiteral("data")).isString()) {
+        if (error) {
+            *error = QObject::tr("Could not understand the CurseForge download-URL response.");
+        }
+        return {};
+    }
+
+    const QUrl url(document.object().value(QStringLiteral("data")).toString(), QUrl::TolerantMode);
+    if (!url.isValid() || url.isEmpty() || url.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) != 0
+        || url.host().isEmpty()) {
+        if (error) {
+            *error = QObject::tr("CurseForge returned an invalid or insecure download URL.");
+        }
+        return {};
+    }
+    return url;
+}
+
 QList<ResourceAPI::SortingMethod> FlameAPI::getSortingMethods() const
 {
     // https://docs.curseforge.com/?python#tocS_ModsSearchSortField

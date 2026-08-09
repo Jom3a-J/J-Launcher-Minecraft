@@ -49,6 +49,27 @@
 namespace MMCZip {
 // ours
 using FilterFunction = std::function<bool(const QString&)>;
+
+bool validateArchive(const QString& archivePath, QString* failedEntry)
+{
+    if (failedEntry) {
+        failedEntry->clear();
+    }
+
+    ArchiveReader archive(archivePath);
+    return archive.parse([failedEntry](ArchiveReader::File* file) {
+        int status = ARCHIVE_OK;
+        file->readAll(&status);
+        if (status == ARCHIVE_EOF || status == ARCHIVE_OK) {
+            return true;
+        }
+        if (failedEntry) {
+            *failedEntry = file->filename();
+        }
+        return false;
+    });
+}
+
 #if defined(LAUNCHER_APPLICATION)
 bool mergeZipFiles(ArchiveWriter& into, QFileInfo from, QSet<QString>& contained, const FilterFunction& filter = nullptr)
 {

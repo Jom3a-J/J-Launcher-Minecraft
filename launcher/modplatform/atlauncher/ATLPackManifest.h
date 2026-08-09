@@ -118,10 +118,24 @@ struct VersionMod {
     QString warning;
 
     bool client;
+    bool server;
+    bool serverSeparate;
+    QString serverUrl;
+    QString serverFile;
+    QString serverMd5;
+    DownloadType serverDownload;
+    QString serverDownload_raw;
+    ModType serverType;
+    QString serverType_raw;
+    bool serverOptional;
 
     // computed
     bool effectively_hidden;
 };
+
+/// Converts ATLauncher's separate client/server artifact metadata into the
+/// two concrete files needed by J Launcher's paired instance/server workflow.
+QList<VersionMod> expandModsForPairedServer(const QList<VersionMod>& mods);
 
 struct VersionConfigs {
     int filesize;

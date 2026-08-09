@@ -50,6 +50,7 @@ struct Modpack {
     bool broken = true;
 
     QString url;
+    QString serverPackUrl;
     bool isSolder = false;
     QString minecraftVersion;
 

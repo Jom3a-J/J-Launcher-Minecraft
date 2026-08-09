@@ -54,6 +54,12 @@
 namespace MMCZip {
 using FilterFileFunction = std::function<bool(const QFileInfo&)>;
 
+/**
+ * Read every entry in an archive so format, decompression, and checksum
+ * failures are detected before installation starts writing files.
+ */
+bool validateArchive(const QString& archivePath, QString* failedEntry = nullptr);
+
 #if defined(LAUNCHER_APPLICATION)
 /**
  * take a source jar, add mods to it, resulting in target jar
