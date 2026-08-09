@@ -164,6 +164,7 @@ private slots:
 private:
     void setStatus(ServerStatus status);
     bool createServerProperties();
+    void syncPortFromServerProperties();
     bool acceptEULA();
     bool hasLaunchTarget() const;
     QString loaderScriptPath() const;

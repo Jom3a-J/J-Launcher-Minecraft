@@ -42,6 +42,7 @@
 #include <utility>
 
 #include "Commandline.h"
+#include "Application.h"
 #include "java/JavaUtils.h"
 
 JavaChecker::JavaChecker(QString path, QString args, int minMem, int maxMem, int permGen, int id)
@@ -50,6 +51,15 @@ JavaChecker::JavaChecker(QString path, QString args, int minMem, int maxMem, int
 
 void JavaChecker::executeTask()
 {
+    const QString managedJavaRoot = APPLICATION_DYN ? APPLICATION_DYN->javaPath() : QString();
+    if (!JavaUtils::isJavaPathSafeToProbe(m_path, managedJavaRoot)) {
+        Result result = { m_path, m_id };
+        result.errorLog = tr("The Java executable is missing or its managed runtime is incomplete.");
+        result.validity = Result::Validity::Errored;
+        emit checkFinished(result);
+        emitSucceeded();
+        return;
+    }
     QString checkerJar = JavaUtils::getJavaCheckPath();
 
     if (checkerJar.isEmpty()) {

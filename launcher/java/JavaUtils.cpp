@@ -542,6 +542,35 @@ bool JavaUtils::isJavaRuntimeLayoutComplete(const QString& javaPath)
 #endif
 }
 
+bool JavaUtils::isJavaPathSafeToProbe(const QString& javaPath,
+                                      const QString& managedJavaRoot)
+{
+    const QString trimmedPath = javaPath.trimmed();
+    if (trimmedPath.isEmpty()) {
+        return false;
+    }
+    if (!QDir::isAbsolutePath(trimmedPath)
+        && !trimmedPath.contains('/') && !trimmedPath.contains('\\')) {
+        return true;
+    }
+
+    const QFileInfo executable(trimmedPath);
+    if (!executable.isFile()) {
+        return false;
+    }
+    if (managedJavaRoot.trimmed().isEmpty()) {
+        return true;
+    }
+
+    const QString relative = QDir(QDir::cleanPath(managedJavaRoot))
+                                 .relativeFilePath(executable.absoluteFilePath());
+    const bool managed = !QDir::isAbsolutePath(relative)
+        && relative != QStringLiteral("..")
+        && !relative.startsWith(QStringLiteral("../"))
+        && !relative.startsWith(QStringLiteral("..\\"));
+    return !managed || isJavaRuntimeLayoutComplete(executable.absoluteFilePath());
+}
+
 QStringList getMinecraftJavaBundle()
 {
     QStringList processpaths;

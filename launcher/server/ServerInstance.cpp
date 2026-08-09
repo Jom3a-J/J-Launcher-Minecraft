@@ -106,7 +106,7 @@ void ServerInstance::setLoaderVersion(const QString &version)
 
 void ServerInstance::setPort(int port)
 {
-    m_port = port;
+    m_port = qBound(1, port, 65535);
 
     if (QFile::exists(serverPropertiesPath())) {
         QMap<QString, QString> properties = ServerProperties::load(serverPropertiesPath());
@@ -159,6 +159,7 @@ void ServerInstance::setStartupTimeoutSeconds(int seconds)
 void ServerInstance::setServerDirectory(const QString &dir)
 {
     m_serverDirectory = dir;
+    syncPortFromServerProperties();
 }
 
 bool ServerInstance::start()
@@ -168,10 +169,31 @@ bool ServerInstance::start()
         return false;
     }
 
+    if (m_serverDirectory.trimmed().isEmpty()) {
+        const QString message = tr("A server folder must be configured before starting this server.");
+        appendLog("[ERROR] " + message);
+        setStatus(ServerStatus::Error);
+        emit serverError(message);
+        return false;
+    }
+
     // Ensure server directory exists
+    QFileInfo serverRoot(m_serverDirectory);
+    if ((serverRoot.exists() || serverRoot.isSymLink())
+        && (!serverRoot.isDir() || serverRoot.isSymLink())) {
+        const QString message = tr("The configured server folder is not a usable directory.");
+        appendLog("[ERROR] " + message);
+        setStatus(ServerStatus::Error);
+        emit serverError(message);
+        return false;
+    }
     QDir dir(m_serverDirectory);
-    if (!dir.exists()) {
-        dir.mkpath(".");
+    if (!dir.exists() && !dir.mkpath(".")) {
+        const QString message = tr("The configured server folder could not be created.");
+        appendLog("[ERROR] " + message);
+        setStatus(ServerStatus::Error);
+        emit serverError(message);
+        return false;
     }
 
     if (!m_eulaAccepted) {
@@ -213,10 +235,11 @@ bool ServerInstance::start()
     }
     appendLog(tr("[INFO] Using Java %1: %2").arg(detectedJava).arg(javaPath));
 
+    const QString loader = m_loaderType.trimmed().toLower();
     if (!m_startupTimeoutOverridden) {
-        const bool modded = m_loaderType == QStringLiteral("fabric")
-            || m_loaderType == QStringLiteral("forge")
-            || m_loaderType == QStringLiteral("neoforge");
+        const bool modded = loader == QStringLiteral("fabric")
+            || loader == QStringLiteral("forge")
+            || loader == QStringLiteral("neoforge");
         m_startupTimeoutTimer.setInterval((modded ? 300 : 120) * 1000);
     }
 
@@ -260,7 +283,8 @@ bool ServerInstance::start()
     const QFileInfo javaInfo(javaPath);
     if (javaInfo.isAbsolute()) {
         const QString javaBin = javaInfo.absoluteDir().absolutePath();
-        serverEnvironment.insert("JAVA_HOME", QDir(javaBin).absoluteFilePath(".."));
+        const QString javaHome = QDir::cleanPath(QDir(javaBin).absoluteFilePath(".."));
+        serverEnvironment.insert("JAVA_HOME", javaHome);
         serverEnvironment.insert("PATH", javaBin + QDir::listSeparator() +
                                  serverEnvironment.value("PATH"));
     }
@@ -275,8 +299,8 @@ bool ServerInstance::start()
         jvmArgs << QProcess::splitCommand(m_extraJvmArguments);
     }
 
-    if ((m_loaderType == "forge" || m_loaderType == "neoforge") &&
-        QFile::exists(loaderScriptPath())) {
+    if ((loader == QStringLiteral("forge") || loader == QStringLiteral("neoforge")) &&
+        QFileInfo(loaderScriptPath()).isFile()) {
         const QString loaderArgsPath = loaderArgumentsFile();
         if (!loaderArgsPath.isEmpty()) {
             QStringList args;
@@ -289,8 +313,8 @@ bool ServerInstance::start()
                          QDir(m_serverDirectory).relativeFilePath(loaderArgsPath)));
             args << QStringLiteral("nogui");
             appendLog(tr("[INFO] Launching %1 with the configured Java and memory settings.")
-                          .arg(m_loaderType == "forge" ? QStringLiteral("Forge")
-                                                       : QStringLiteral("NeoForge")));
+                          .arg(loader == QStringLiteral("forge") ? QStringLiteral("Forge")
+                                                                    : QStringLiteral("NeoForge")));
             m_process->start(javaPath, args);
         } else {
             // Some published server packs replace the generated Forge script
@@ -400,7 +424,7 @@ std::shared_ptr<ServerInstance> ServerInstance::fromJson(const QJsonObject &json
     server->m_version = json["version"].toString();
     server->m_loaderType = json["loaderType"].toString();
     server->m_loaderVersion = json["loaderVersion"].toString();
-    server->m_port = json["port"].toInt(25565);
+    server->m_port = qBound(1, json["port"].toInt(25565), 65535);
     server->m_maxMemory = json["maxMemory"].toInt(2048);
     server->m_minMemory = json["minMemory"].toInt(1024);
     server->m_javaPath = json["javaPath"].toString();
@@ -413,34 +437,48 @@ std::shared_ptr<ServerInstance> ServerInstance::fromJson(const QJsonObject &json
     if (server->m_serverDirectory.isEmpty()) {
         server->m_serverDirectory = QDir(dataDir).filePath("servers/" + id);
     }
+    server->syncPortFromServerProperties();
 
     return server;
 }
 
 QString ServerInstance::serverJarPath() const
 {
-    // For Forge/NeoForge after installer, look for run scripts or generated jars
-    if (m_loaderType == "forge" || m_loaderType == "neoforge") {
-        // Check for the generated forge/neoforge server jars
-        QDir dir(m_serverDirectory);
-        QStringList filters;
-        filters << "forge-*.jar" << "neoforge-*.jar";
-        QStringList jars = dir.entryList(filters, QDir::Files);
-        // Exclude installer jars
-        jars.removeAll("forge-installer.jar");
-        jars.removeAll("neoforge-installer.jar");
-        if (!jars.isEmpty()) {
-            return dir.filePath(jars.first());
-        }
-        // Fallback: check for the platform launch script (modern Forge/NeoForge)
-        if (QFile::exists(loaderScriptPath())) {
-            // Modern forge creates @libraries/... args format
-            // For now, return server.jar as placeholder
-            return dir.filePath("server.jar");
+    const QDir dir(m_serverDirectory);
+    const QString directJar = dir.filePath(QStringLiteral("server.jar"));
+    if (QFileInfo(directJar).isFile()) {
+        return directJar;
+    }
+
+    const QString loader = m_loaderType.trimmed().toLower();
+    QStringList filters;
+    if (loader == QStringLiteral("forge")) {
+        filters << QStringLiteral("forge-*.jar");
+    } else if (loader == QStringLiteral("neoforge")) {
+        filters << QStringLiteral("neoforge-*.jar");
+    } else if (loader == QStringLiteral("fabric")) {
+        filters << QStringLiteral("fabric-server*.jar");
+    } else if (loader == QStringLiteral("paper")) {
+        filters << QStringLiteral("paper-*.jar");
+    } else if (loader == QStringLiteral("purpur")) {
+        filters << QStringLiteral("purpur-*.jar");
+    }
+
+    if (filters.isEmpty()) {
+        return directJar;
+    }
+
+    const QFileInfoList jars = dir.entryInfoList(filters, QDir::Files, QDir::Name);
+    for (const QFileInfo &jar : jars) {
+        if (!jar.fileName().contains(QStringLiteral("installer"), Qt::CaseInsensitive)) {
+            return jar.absoluteFilePath();
         }
     }
-    // All other types (vanilla, paper, fabric, purpur) use server.jar
-    return QDir(m_serverDirectory).filePath("server.jar");
+
+    // Modern Forge and NeoForge installations can launch through run scripts
+    // without a standalone server JAR in the server root. Keep the conventional
+    // path for diagnostics and the Java version floor in that case.
+    return directJar;
 }
 
 QString ServerInstance::serverPropertiesPath() const
@@ -492,11 +530,12 @@ QString ServerInstance::contentDirectory() const
 
 bool ServerInstance::hasLaunchTarget() const
 {
-    if ((m_loaderType == "forge" || m_loaderType == "neoforge") &&
-        QFile::exists(loaderScriptPath())) {
+    const QString loader = m_loaderType.trimmed().toLower();
+    if ((loader == QStringLiteral("forge") || loader == QStringLiteral("neoforge")) &&
+        QFileInfo(loaderScriptPath()).isFile()) {
         return true;
     }
-    return QFile::exists(serverJarPath());
+    return QFileInfo(serverJarPath()).isFile();
 }
 
 QString ServerInstance::loaderScriptPath() const
@@ -539,7 +578,8 @@ QString ServerInstance::loaderArgumentsFile() const
     }
 
     QStringList conventionalPaths;
-    if (m_loaderType == QStringLiteral("forge")) {
+    const QString loader = m_loaderType.trimmed().toLower();
+    if (loader == QStringLiteral("forge")) {
         QStringList coordinates;
         if (!m_loaderVersion.isEmpty()) {
             coordinates << m_loaderVersion;
@@ -552,7 +592,7 @@ QString ServerInstance::loaderArgumentsFile() const
                 QStringLiteral("libraries/net/minecraftforge/forge/%1/%2")
                     .arg(coordinate, argumentsFileName));
         }
-    } else if (m_loaderType == QStringLiteral("neoforge") && !m_loaderVersion.isEmpty()) {
+    } else if (loader == QStringLiteral("neoforge") && !m_loaderVersion.isEmpty()) {
         conventionalPaths << serverDir.filePath(
             QStringLiteral("libraries/net/neoforged/neoforge/%1/%2")
                 .arg(m_loaderVersion, argumentsFileName));
@@ -576,6 +616,9 @@ QString ServerInstance::loaderArgumentsFile() const
 
 int ServerInstance::requiredJavaVersion() const
 {
+    if (!QFileInfo(serverJarPath()).isFile()) {
+        return 0;
+    }
     MMCZip::ArchiveReader archive(serverJarPath());
 
     QString mainClass = "net.minecraft.bundler.Main";
@@ -696,6 +739,12 @@ QString ServerInstance::compatibleJavaPath(int requiredVersion, int *detectedVer
 
     int bestVersion = 0;
     for (const QString &candidate : candidates) {
+        const QString managedJavaRoot = APPLICATION_DYN
+            ? APPLICATION_DYN->javaPath()
+            : QString();
+        if (!JavaUtils::isJavaPathSafeToProbe(candidate, managedJavaRoot)) {
+            continue;
+        }
         const int version = javaMajorVersion(candidate);
         if (version == 0) {
             continue;
@@ -865,7 +914,11 @@ bool ServerInstance::importServerPack(const QString &archivePath, QString *error
         }
         return false;
     }
-    return extractServerPack(archivePath, error);
+    if (!extractServerPack(archivePath, error)) {
+        return false;
+    }
+    syncPortFromServerProperties();
+    return true;
 }
 
 bool ServerInstance::extractServerPack(const QString &archivePath, QString *error)
@@ -922,6 +975,24 @@ bool ServerInstance::createServerProperties()
 
     file.close();
     return true;
+}
+
+void ServerInstance::syncPortFromServerProperties()
+{
+    if (m_serverDirectory.trimmed().isEmpty()) {
+        return;
+    }
+    const QFileInfo propertiesFile(serverPropertiesPath());
+    if (!propertiesFile.isFile()) {
+        return;
+    }
+    const QMap<QString, QString> properties = ServerProperties::load(serverPropertiesPath());
+    bool validPort = false;
+    const int configuredPort = properties.value(QStringLiteral("server-port"))
+                                   .toInt(&validPort);
+    if (validPort && configuredPort >= 1 && configuredPort <= 65535) {
+        m_port = configuredPort;
+    }
 }
 
 bool ServerInstance::acceptEULA()
@@ -1037,9 +1108,14 @@ void ServerInstance::onProcessFinished(int exitCode, QProcess::ExitStatus exitSt
                                             : ServerStatus::Stopped));
 
     if (exitedBeforeReady && !m_startupTimedOut) {
-        const QString message =
-            tr("The server process exited before reporting that it was ready (exit code %1).").arg(exitCode);
         const QString details = m_consoleLog.right(6000);
+        const bool incompatibleJava =
+            details.contains(QStringLiteral("UnsupportedClassVersionError"), Qt::CaseInsensitive)
+            || details.contains(QStringLiteral("class file version"), Qt::CaseInsensitive);
+        const QString message = incompatibleJava
+            ? tr("The server exited because the selected Java runtime is incompatible with this Minecraft or loader version. "
+                 "Choose the required Java version or enable automatic Java downloads.")
+            : tr("The server process exited before reporting that it was ready (exit code %1).").arg(exitCode);
         appendLog("[ERROR] " + message);
         emit serverError(message);
         emit serverCrashed(message, details);

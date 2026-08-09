@@ -45,6 +45,7 @@
 #include "SysInfo.h"
 #include "java/JavaInstall.h"
 #include "java/JavaInstallList.h"
+#include "java/JavaRuntimeInstallTask.h"
 #include "java/JavaUtils.h"
 #include "java/JavaVersion.h"
 #include "java/download/ArchiveDownloadTask.h"
@@ -111,9 +112,13 @@ void AutoInstallJava::executeTask()
     QDir javaDir(APPLICATION->javaPath());
     auto relativeBinary = FS::PathCombine(wantedJavaName, "bin", JavaUtils::javaExecutable);
     auto wantedJavaPath = javaDir.absoluteFilePath(relativeBinary);
-    if (QFileInfo::exists(wantedJavaPath)) {
+    if (Java::JavaRuntimeInstallTask::isUsableJava(wantedJavaPath)) {
         setJavaPathFromPartial();
         return;
+    }
+    if (QFileInfo::exists(wantedJavaPath)) {
+        emit logLine(tr("The installed managed Java runtime is incomplete. Downloading a fresh copy."), MessageLevel::Warning);
+        FS::deletePath(javaDir.absoluteFilePath(wantedJavaName));
     }
     auto versionList = APPLICATION->metadataIndex()->get("net.minecraft.java");
     m_current_task = versionList->getLoadTask();
@@ -149,12 +154,11 @@ void AutoInstallJava::setJavaPathFromPartial()
     // and retrieving the path that contains the java name
     auto relativeBinary = FS::PathCombine(javaName, "bin", JavaUtils::javaExecutable);
     auto finalPath = javaDir.absoluteFilePath(relativeBinary);
-    if (QFileInfo::exists(finalPath)) {
+    if (Java::JavaRuntimeInstallTask::isUsableJava(finalPath)) {
         setJavaPath(finalPath);
     } else {
-        emit logLine(tr("No compatible Java version was found (the binary file does not exist). Using the default one."),
-                     MessageLevel::Warning);
-        emitSucceeded();
+        FS::deletePath(javaDir.absoluteFilePath(javaName));
+        emitFailed(tr("The downloaded Java runtime is incomplete. It was removed; please try the launch again."));
     }
     return;
 }

@@ -171,6 +171,10 @@ void JavaListLoadTask::executeTask()
     qDebug() << "Probing the following Java paths: ";
     int id = 0;
     for (QString candidate : candidate_paths) {
+        if (!JavaUtils::isJavaPathSafeToProbe(candidate, APPLICATION->javaPath())) {
+            qWarning() << "Skipping incomplete or missing Java candidate:" << candidate;
+            continue;
+        }
         auto checker = new JavaChecker(candidate, "", 0, 0, 0, id);
         connect(checker, &JavaChecker::checkFinished, this, [this](const JavaChecker::Result& result) { m_results << result; });
         job->addTask(Task::Ptr(checker));

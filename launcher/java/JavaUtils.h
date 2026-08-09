@@ -43,5 +43,7 @@ class JavaUtils : public QObject {
 
     static QString getJavaCheckPath();
     static bool isJavaRuntimeLayoutComplete(const QString& javaPath);
+    static bool isJavaPathSafeToProbe(const QString& javaPath,
+                                      const QString& managedJavaRoot = QString());
     static const QString javaExecutable;
 };

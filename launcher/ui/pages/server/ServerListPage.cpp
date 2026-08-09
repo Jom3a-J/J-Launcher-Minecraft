@@ -2458,6 +2458,17 @@ void ServerListPage::onImportServerPack()
     }
 
     appendConsoleOutput(tr("[INFO] Imported server pack: %1").arg(archive));
+    const bool recordSaved = m_serverManager->save();
+    updateServerList();
+    updateSelectedServerInfo();
+    if (!recordSaved) {
+        QMessageBox::warning(
+            this, tr("Server Pack Imported With Warning"),
+            tr("The server pack files were imported, but the updated server record could not be saved. "
+               "The imported files are already present; check that the J Launcher data folder is writable, "
+               "then save the server settings again."));
+        return;
+    }
     QMessageBox::information(this, tr("Server Pack Imported"),
                              tr("The server pack's mods and supported configuration files were imported. "
                                 "Start or restart the server to load them."));
