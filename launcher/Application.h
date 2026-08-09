@@ -167,7 +167,9 @@ class Application : public QApplication {
     QString getJarPath(QString jarFile);
 
     QString getMSAClientID();
-    QString getFlameAPIKey();
+    QString getFlameAPIKey() const;
+    QString getFlameAPIKeyOverride() const { return m_flameApiKeyOverride; }
+    bool setFlameAPIKeyOverride(const QString& key, QString* error = nullptr);
     QString getModrinthAPIToken();
     QString getUserAgent();
 
@@ -278,6 +280,7 @@ class Application : public QApplication {
 
     QString m_rootPath;
     QString m_dataPath;
+    QString m_flameApiKeyOverride;
     Status m_status = Application::StartingUp;
     Capabilities m_capabilities;
     bool m_portable = false;

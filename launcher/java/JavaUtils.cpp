@@ -46,6 +46,7 @@
 #include "FileSystem.h"
 #include "java/JavaInstallList.h"
 #include "java/JavaUtils.h"
+#include "logs/Privacy.h"
 
 #ifdef Q_OS_WIN
 #ifndef WIN32_LEAN_AND_MEAN
@@ -71,7 +72,8 @@ QString stripVariableEntries(QString name, QString target, QString remove)
     for (QString item : toRemove) {
         bool removed = targetItems.removeOne(item);
         if (!removed)
-            qWarning() << "Entry" << item << "could not be stripped from variable" << name;
+            qWarning() << "Entry" << Privacy::sanitizePath(item)
+                       << "could not be stripped from variable" << name;
     }
     return targetItems.join(delimiter);
 }
@@ -95,7 +97,7 @@ QProcessEnvironment CleanEnviroment()
         auto value = rawenv.value(key);
         // filter out dangerous java crap
         if (ignored.contains(key)) {
-            qDebug() << "Env: ignoring" << key << value;
+            qDebug() << "Env: ignoring" << key;
             continue;
         }
 
@@ -103,13 +105,13 @@ QProcessEnvironment CleanEnviroment()
         // If there is "LD_LIBRARY_PATH" and "LAUNCHER_LD_LIBRARY_PATH", we want to
         // remove all values in "LAUNCHER_LD_LIBRARY_PATH" from "LD_LIBRARY_PATH"
         if (key.startsWith("LAUNCHER_")) {
-            qDebug() << "Env: ignoring" << key << value;
+            qDebug() << "Env: ignoring" << key;
             continue;
         }
         if (stripped.contains(key)) {
             QString newValue = stripVariableEntries(key, value, rawenv.value("LAUNCHER_" + key));
 
-            qDebug() << "Env: stripped" << key << value << "to" << newValue;
+            qDebug() << "Env: stripped" << key;
 
             value = newValue;
         }
@@ -117,9 +119,8 @@ QProcessEnvironment CleanEnviroment()
         // Strip IBus
         // IBus is a Linux IME framework. For some reason, it breaks MC?
         if (key == "XMODIFIERS" && value.contains(IBUS)) {
-            QString save = value;
             value.replace(IBUS, "");
-            qDebug() << "Env: stripped" << IBUS << "from" << save << ":" << value;
+            qDebug() << "Env: stripped" << IBUS;
         }
 #endif
         // qDebug() << "Env: " << key << value;

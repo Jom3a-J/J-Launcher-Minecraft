@@ -35,6 +35,7 @@
 
 #include "AccountList.h"
 #include "AccountData.h"
+#include "logs/Privacy.h"
 #include "tasks/Task.h"
 
 #include <QDir>
@@ -450,7 +451,9 @@ bool AccountList::loadList()
     // Try to open the file and fail if we can't.
     // TODO: We should probably report this error to the user.
     if (!file.open(QIODevice::ReadOnly)) {
-        qCritical() << QString("Failed to read the account list file %1 (%2).").arg(m_listFilePath).arg(file.errorString()).toUtf8();
+        qCritical() << "Failed to read the account list file"
+                    << Privacy::sanitizePath(m_listFilePath) << "("
+                    << Privacy::sanitizeText(file.errorString()) << ")";
         return false;
     }
 
@@ -567,7 +570,9 @@ bool AccountList::saveList()
     // Try to open the file and fail if we can't.
     // TODO: We should probably report this error to the user.
     if (!file.open(QIODevice::WriteOnly)) {
-        qCritical() << QString("Failed to save the account list file %1 (%2).").arg(m_listFilePath).arg(file.errorString()).toUtf8();
+        qCritical() << "Failed to save the account list file"
+                    << Privacy::sanitizePath(m_listFilePath) << "("
+                    << Privacy::sanitizeText(file.errorString()) << ")";
         return false;
     }
 
@@ -575,10 +580,11 @@ bool AccountList::saveList()
     file.write(doc.toJson());
     file.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ReadUser | QFile::WriteUser);
     if (file.commit()) {
-        qDebug() << "Saved account list to" << m_listFilePath;
+        qDebug() << "Saved account list to" << Privacy::sanitizePath(m_listFilePath);
         return true;
     } else {
-        qDebug() << "Failed to save accounts to" << m_listFilePath << "error:" << file.errorString();
+        qDebug() << "Failed to save accounts to" << Privacy::sanitizePath(m_listFilePath)
+                 << "error:" << Privacy::sanitizeText(file.errorString());
         return false;
     }
 }

@@ -42,6 +42,7 @@
 #include "BuildConfig.h"
 #include "Json.h"
 #include "modplatform/atlauncher/ATLShareCode.h"
+#include "logs/Privacy.h"
 
 #include "net/ApiDownload.h"
 
@@ -178,7 +179,8 @@ void AtlOptionalModListModel::shareCodeSuccess(QByteArray* responsePtr)
     auto doc = QJsonDocument::fromJson(responseData, &parse_error);
     if (parse_error.error != QJsonParseError::NoError) {
         qWarning() << "Error while parsing JSON response from ATL at" << parse_error.offset << "reason:" << parse_error.errorString();
-        qWarning() << responseData;
+        qWarning() << "Response body excerpt:"
+                   << Privacy::sanitizeResponseBody(responseData, 2048);
         return;
     }
     auto obj = doc.object();
@@ -187,7 +189,8 @@ void AtlOptionalModListModel::shareCodeSuccess(QByteArray* responsePtr)
     try {
         ATLauncher::loadShareCodeResponse(response, obj);
     } catch (const JSONValidationError& e) {
-        qDebug() << QString::fromUtf8(responseData);
+        qDebug() << "ATLauncher response excerpt:"
+                 << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
         qWarning() << "Error while reading response from ATLauncher:" << e.cause();
         return;
     }

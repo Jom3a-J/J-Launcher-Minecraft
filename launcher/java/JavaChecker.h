@@ -2,6 +2,7 @@
 #include <memory>
 
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QTimer>
 
 #include "JavaVersion.h"
@@ -28,6 +29,7 @@ class JavaChecker : public Task {
 
     explicit JavaChecker(QString path, QString args, int minMem = 0, int maxMem = 0, int permGen = 0, int id = 0);
     ~JavaChecker() override = default;
+    static QString formatEnvironmentForDiagnostics(const QProcessEnvironment& environment);
 
    signals:
     void checkFinished(const Result& result);

@@ -14,6 +14,7 @@
 #include "net/ApiDownload.h"
 #include "net/ApiUpload.h"
 #include "net/NetJob.h"
+#include "logs/Privacy.h"
 
 std::pair<Task::Ptr, QByteArray*> FlameAPI::matchFingerprints(const QList<uint>& fingerprints) const
 {
@@ -52,7 +53,8 @@ QString FlameAPI::getModFileChangelog(int modId, int fileId) const
         if (parse_error.error != QJsonParseError::NoError) {
             qWarning() << "Error while parsing JSON response from Flame::FileChangelog at" << parse_error.offset
                        << "reason:" << parse_error.errorString();
-            qWarning() << *response;
+            qWarning() << "Response body excerpt:"
+                       << Privacy::sanitizeResponseBody(*response, 2048);
 
             netJob->failed(parse_error.errorString());
             return;
@@ -85,7 +87,8 @@ QString FlameAPI::getModDescription(int modId) const
         if (parse_error.error != QJsonParseError::NoError) {
             qWarning() << "Error while parsing JSON response from Flame::ModDescription at" << parse_error.offset
                        << "reason:" << parse_error.errorString();
-            qWarning() << *response;
+            qWarning() << "Response body excerpt:"
+                       << Privacy::sanitizeResponseBody(*response, 2048);
 
             netJob->failed(parse_error.errorString());
             return;
@@ -119,7 +122,6 @@ std::pair<Task::Ptr, QByteArray*> FlameAPI::getProjects(QStringList addonIds) co
     auto [action, response] = Net::ApiUpload::makeByteArray(QString(BuildConfig.FLAME_BASE_URL + "/mods"), body_raw);
     netJob->addNetAction(action);
 
-    QObject::connect(netJob.get(), &NetJob::failed, netJob.get(), [body_raw] { qDebug() << body_raw; });
 
     return { netJob, response };
 }
@@ -142,7 +144,6 @@ std::pair<Task::Ptr, QByteArray*> FlameAPI::getFiles(const QStringList& fileIds)
     auto [action, response] = Net::ApiUpload::makeByteArray(QString(BuildConfig.FLAME_BASE_URL + "/mods/files"), body_raw);
     netJob->addNetAction(action);
 
-    QObject::connect(netJob.get(), &NetJob::failed, netJob.get(), [body_raw] { qDebug() << body_raw; });
 
     return { netJob, response };
 }
@@ -235,7 +236,8 @@ QList<ModPlatform::Category> FlameAPI::loadModCategories(const QByteArray& respo
     if (parse_error.error != QJsonParseError::NoError) {
         qWarning() << "Error while parsing JSON response from categories at" << parse_error.offset
                    << "reason:" << parse_error.errorString();
-        qWarning() << *response;
+        qWarning() << "Response body excerpt:"
+                   << Privacy::sanitizeResponseBody(response, 2048);
         return categories;
     }
 
@@ -253,7 +255,8 @@ QList<ModPlatform::Category> FlameAPI::loadModCategories(const QByteArray& respo
     } catch (Json::JsonException& e) {
         qCritical() << "Failed to parse response from a version request.";
         qCritical() << e.what();
-        qDebug() << doc;
+        qDebug() << "CurseForge response excerpt:"
+                 << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
     }
     return categories;
 };

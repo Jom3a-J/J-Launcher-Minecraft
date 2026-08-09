@@ -36,6 +36,7 @@
 #pragma once
 
 #include "Validator.h"
+#include "logs/Privacy.h"
 
 #include <QCryptographicHash>
 
@@ -71,7 +72,9 @@ class ChecksumValidator : public Validator {
     auto validate(QNetworkReply& reply) -> bool override
     {
         if (!m_expected.isEmpty() && m_expected != hash()) {
-            qWarning() << "Checksum mismatch for URL:" << reply.url().toString() << "expected:" << m_expected << "got:" << hash();
+            qWarning() << "Checksum mismatch for URL:"
+                       << Privacy::sanitizeUrl(reply.url())
+                       << "expected:" << m_expected << "got:" << hash();
             return false;
         }
         return true;

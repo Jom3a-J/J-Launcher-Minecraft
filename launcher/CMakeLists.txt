@@ -415,6 +415,8 @@ set(SETTINGS_SOURCES
     settings/INIFile.h
     settings/INISettingsObject.cpp
     settings/INISettingsObject.h
+    settings/CredentialStore.cpp
+    settings/CredentialStore.h
     settings/OverrideSetting.cpp
     settings/OverrideSetting.h
     settings/PassthroughSetting.cpp
@@ -786,6 +788,11 @@ set(LOGIC_SOURCES
     ${PACKWIZ_SOURCES}
     ${TECHNIC_SOURCES}
     ${ATLAUNCHER_SOURCES}
+)
+
+set(PRIVACY_SOURCES
+    logs/Privacy.cpp
+    logs/Privacy.h
 )
 
 if(APPLE AND Launcher_ENABLE_UPDATER)
@@ -1282,7 +1289,7 @@ endif()
 ####### Targets ########
 
 # Add executable
-add_library(Launcher_logic STATIC ${LOGIC_SOURCES} ${LAUNCHER_SOURCES} ${LAUNCHER_RESOURCES})
+add_library(Launcher_logic STATIC ${LOGIC_SOURCES} ${LAUNCHER_SOURCES} ${PRIVACY_SOURCES} ${LAUNCHER_RESOURCES})
 target_include_directories(Launcher_logic PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(Launcher_logic PUBLIC LAUNCHER_APPLICATION)
 
@@ -1298,6 +1305,10 @@ target_link_libraries(Launcher_logic
     BuildConfig
     Qt${QT_VERSION_MAJOR}::Widgets
 )
+
+if(WIN32)
+    target_link_libraries(Launcher_logic Advapi32)
+endif()
 
 if(TARGET PkgConfig::libqrencode)
     target_link_libraries(Launcher_logic PkgConfig::libqrencode)
@@ -1402,7 +1413,7 @@ endif()
 
 if(Launcher_BUILD_UPDATER)
     # Updater
-    add_library(prism_updater_logic STATIC ${PRISMUPDATER_SOURCES} ${TASKS_SOURCES})
+    add_library(prism_updater_logic STATIC ${PRISMUPDATER_SOURCES} ${TASKS_SOURCES} ${PRIVACY_SOURCES})
     target_include_directories(prism_updater_logic PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
     if(${Launcher_USE_PCH})
@@ -1454,7 +1465,7 @@ endif()
 
 if(WIN32 OR (DEFINED Launcher_BUILD_FILELINKER AND Launcher_BUILD_FILELINKER))
     # File link
-    add_library(filelink_logic STATIC ${LINKEXE_SOURCES})
+    add_library(filelink_logic STATIC ${LINKEXE_SOURCES} ${PRIVACY_SOURCES})
 
     target_include_directories(filelink_logic PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 

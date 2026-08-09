@@ -12,6 +12,7 @@
 #include "modplatform/helpers/HashUtils.h"
 
 #include "tasks/ConcurrentTask.h"
+#include "logs/Privacy.h"
 
 ModrinthCheckUpdate::ModrinthCheckUpdate(QList<Resource*>& resources,
                                          std::vector<Version>& mcVersions,
@@ -124,7 +125,8 @@ void ModrinthCheckUpdate::checkVersionsResponse(QByteArray* response, std::optio
     if (parseError.error != QJsonParseError::NoError) {
         qWarning() << "Error while parsing JSON response from ModrinthCheckUpdate at" << parseError.offset
                    << "reason:" << parseError.errorString();
-        qWarning() << *response;
+        qWarning() << "Response body excerpt:"
+                   << Privacy::sanitizeResponseBody(*response, 2048);
 
         emitFailed(parseError.errorString());
         return;

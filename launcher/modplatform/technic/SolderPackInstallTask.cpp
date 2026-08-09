@@ -43,6 +43,7 @@
 
 #include "SolderPackManifest.h"
 #include "TechnicPackProcessor.h"
+#include "logs/Privacy.h"
 #include "net/ApiDownload.h"
 #include "net/ChecksumValidator.h"
 
@@ -105,7 +106,8 @@ void Technic::SolderPackInstallTask::fileListSucceeded(QByteArray* response)
     QJsonDocument doc = QJsonDocument::fromJson(*response, &parse_error);
     if (parse_error.error != QJsonParseError::NoError) {
         qWarning() << "Error while parsing JSON response from Solder at" << parse_error.offset << "reason:" << parse_error.errorString();
-        qWarning() << *response;
+        qWarning() << "Response body excerpt:"
+                   << Privacy::sanitizeResponseBody(*response, 2048);
         return;
     }
     auto obj = doc.object();
@@ -235,9 +237,10 @@ void Technic::SolderPackInstallTask::extractFinished()
         }
         if (origPermissions != permissions) {
             if (!QFile::setPermissions(filepath, permissions)) {
-                logWarning(tr("Could not fix permissions for %1").arg(filepath));
+                logWarning(tr("Could not fix permissions for %1")
+                               .arg(Privacy::sanitizePath(filepath)));
             } else {
-                qDebug() << "Fixed" << filepath;
+                qDebug() << "Fixed" << Privacy::sanitizePath(filepath);
             }
         }
     }

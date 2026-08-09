@@ -46,6 +46,7 @@
 #include <memory>
 
 #include "BuildConfig.h"
+#include "logs/Privacy.h"
 #include "net/RawHeaderProxy.h"
 
 Net::NetRequest::Ptr ImgurAlbumCreation::make(std::shared_ptr<ImgurAlbumCreation::Result> output, QList<ScreenShot::Ptr> screenshots)
@@ -101,7 +102,8 @@ auto ImgurAlbumCreation::Sink::finalize(QNetworkReply&) -> Task::State
     }
     auto object = doc.object();
     if (!object.value("success").toBool()) {
-        qDebug() << doc.toJson();
+        qDebug() << "Screenshot album creation returned an unsuccessful response; "
+                    "response body omitted.";
         m_fail_reason = "Failed to create album";
         return Task::State::Failed;
     }

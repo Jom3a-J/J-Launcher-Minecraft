@@ -51,6 +51,7 @@
 
 #include "Application.h"
 #include "modplatform/technic/SolderPackManifest.h"
+#include "logs/Privacy.h"
 
 #include "net/ApiDownload.h"
 
@@ -182,7 +183,8 @@ void TechnicPage::suggestCurrent()
         if (parse_error.error != QJsonParseError::NoError) {
             qWarning() << "Error while parsing JSON response from Technic at" << parse_error.offset
                        << "reason:" << parse_error.errorString();
-            qWarning() << response;
+            qWarning() << "Response body excerpt:"
+                       << Privacy::sanitizeResponseBody(response, 2048);
             return;
         }
         if (!obj.contains("url")) {
@@ -321,7 +323,8 @@ void TechnicPage::onSolderLoaded(QByteArray* responsePtr)
     auto doc = QJsonDocument::fromJson(response, &parse_error);
     if (parse_error.error != QJsonParseError::NoError) {
         qWarning() << "Error while parsing JSON response from Solder at" << parse_error.offset << "reason:" << parse_error.errorString();
-        qWarning() << response;
+        qWarning() << "Response body excerpt:"
+                   << Privacy::sanitizeResponseBody(response, 2048);
         fallback();
         return;
     }

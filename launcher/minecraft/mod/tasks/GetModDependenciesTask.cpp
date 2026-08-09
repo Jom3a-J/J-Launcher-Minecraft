@@ -25,6 +25,7 @@
 #include "QObjectPtr.h"
 #include "minecraft/PackProfile.h"
 #include "minecraft/mod/MetadataHandler.h"
+#include "logs/Privacy.h"
 #include "modplatform/ModIndex.h"
 #include "modplatform/ResourceAPI.h"
 #include "tasks/SequentialTask.h"
@@ -147,7 +148,8 @@ Task::Ptr GetModDependenciesTask::getProjectInfoTask(std::shared_ptr<PackDepende
             removePack(pDep->pack->addonId);
             qWarning() << "Error while parsing JSON response for mod info at" << parse_error.offset
                        << "reason:" << parse_error.errorString();
-            qDebug() << *responseInfo;
+            qDebug() << "Provider response body excerpt:"
+                     << Privacy::sanitizeResponseBody(*responseInfo, 2048);
             return;
         }
         try {
@@ -157,7 +159,8 @@ Task::Ptr GetModDependenciesTask::getProjectInfoTask(std::shared_ptr<PackDepende
             getAPI(provider)->loadIndexedPack(*pDep->pack, obj);
         } catch (const JSONValidationError& e) {
             removePack(pDep->pack->addonId);
-            qDebug() << doc;
+            qDebug() << "Provider response excerpt:"
+                     << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
             qWarning() << "Error while reading mod info:" << e.cause();
         }
     });

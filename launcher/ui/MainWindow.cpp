@@ -80,6 +80,7 @@
 #include <BaseInstance.h>
 #include <BuildConfig.h>
 #include <DesktopServices.h>
+#include "logs/Privacy.h"
 #include <InstanceList.h>
 #include <MMCZip.h>
 #include <icons/IconList.h>
@@ -975,7 +976,7 @@ void MainWindow::processURLs(QList<QUrl> urls)
         if (url.isEmpty() || url.toString().trimmed().isEmpty())
             continue;
 
-        qDebug() << "Processing" << url;
+        qDebug() << "Processing" << Privacy::sanitizeUrl(url);
 
         // The isLocalFile() check below doesn't work as intended without an explicit scheme.
         if (url.scheme().isEmpty())
@@ -1005,7 +1006,8 @@ void MainWindow::processURLs(QList<QUrl> urls)
                 }
 
                 if (query.allQueryItemValues("addonId").isEmpty() || query.allQueryItemValues("fileId").isEmpty()) {
-                    qDebug() << "Invalid curseforge link:" << url;
+                    qDebug() << "Invalid curseforge link:"
+                             << Privacy::sanitizeUrl(url);
                     continue;
                 }
 
@@ -1020,7 +1022,8 @@ void MainWindow::processURLs(QList<QUrl> urls)
                 connect(job.get(), &Task::failed, this,
                         [this](QString reason) { CustomMessageBox::selectable(this, tr("Error"), reason, QMessageBox::Critical)->show(); });
                 connect(job.get(), &Task::succeeded, this, [this, array, addonId, fileId, &dl_url, &version] {
-                    qDebug() << "Returned CFURL Json:\n" << array->toStdString().c_str();
+                    qDebug() << "Returned CurseForge response:"
+                             << Privacy::sanitizeResponseBody(*array, 2048);
                     auto doc = Json::requireDocument(*array);
                     auto data = doc.object()["data"].toObject();
                     // No way to find out if it's a mod or a modpack before here

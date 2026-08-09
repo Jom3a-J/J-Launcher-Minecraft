@@ -52,6 +52,7 @@
 
 #include "settings/INISettingsObject.h"
 #include "tasks/Task.h"
+#include "logs/Privacy.h"
 
 #include "net/ApiDownload.h"
 
@@ -86,7 +87,8 @@ void InstanceImportTask::executeTask()
         m_archivePath = m_sourceUrl.toLocalFile();
         processZipPack();
     } else {
-        setStatus(tr("Downloading modpack:\n%1").arg(m_sourceUrl.toString()));
+        setStatus(tr("Downloading modpack:\n%1")
+                      .arg(Privacy::sanitizeUrl(m_sourceUrl)));
 
         downloadFromUrl();
     }
@@ -130,7 +132,8 @@ void InstanceImportTask::processZipPack()
 {
     setStatus(tr("Attempting to determine instance type"));
     QDir extractDir(m_stagingPath);
-    qDebug() << "Attempting to create instance from" << m_archivePath;
+    qDebug() << "Attempting to create instance from"
+             << Privacy::sanitizePath(m_archivePath);
 
     // open the zip and find relevant files in it
     MMCZip::ArchiveReader packZip(m_archivePath);
@@ -233,9 +236,10 @@ void InstanceImportTask::extractFinished()
         }
         if (origPermissions != permissions) {
             if (!QFile::setPermissions(filepath, permissions)) {
-                logWarning(tr("Could not fix permissions for %1").arg(filepath));
+                logWarning(tr("Could not fix permissions for %1").arg(
+                    Privacy::sanitizePath(filepath)));
             } else {
-                qDebug() << "Fixed" << filepath;
+                qDebug() << "Fixed" << Privacy::sanitizePath(filepath);
             }
         }
     }

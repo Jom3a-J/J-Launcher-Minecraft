@@ -22,6 +22,7 @@
 #include "settings/SettingsObject.h"
 #include "java/JavaUtils.h"
 #include "java/JavaRuntimeInstallTask.h"
+#include "logs/Privacy.h"
 #include <QFile>
 #include <QDir>
 #include <QDirIterator>
@@ -1044,9 +1045,10 @@ void ServerInstance::onProcessReadyReadStandardError()
 
 void ServerInstance::handleConsoleLine(const QString &line, bool error)
 {
-    const QString formatted = error ? "[ERROR] " + line : line;
+    const QString safeLine = Privacy::sanitizeText(line, 8192);
+    const QString formatted = error ? "[ERROR] " + safeLine : safeLine;
     appendLog(formatted);
-    if (error) emit errorReceived(line); else emit outputReceived(line);
+    if (error) emit errorReceived(safeLine); else emit outputReceived(safeLine);
 
     if (m_status == ServerStatus::Starting && isReadyOutput(line)) {
         m_startupTimeoutTimer.stop();
@@ -1294,7 +1296,7 @@ bool ServerInstance::cancelDownload()
 
 void ServerInstance::appendLog(const QString &line)
 {
-    m_consoleLog.append(line + "\n");
+    m_consoleLog.append(Privacy::sanitizeText(line, 8192) + "\n");
     // Cap log size at ~100,000 characters
     if (m_consoleLog.size() > 100000) {
         m_consoleLog = m_consoleLog.right(80000);

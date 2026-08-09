@@ -15,6 +15,7 @@
 #include "modplatform/helpers/HashUtils.h"
 #include "modplatform/modrinth/ModrinthAPI.h"
 #include "modplatform/modrinth/ModrinthPackIndex.h"
+#include "logs/Privacy.h"
 
 EnsureMetadataTask::EnsureMetadataTask(Resource* resource, QDir dir, ModPlatform::ResourceProvider prov)
     : Task(), m_indexDir(dir), m_provider(prov), m_hashingTask(nullptr), m_currentTask(nullptr)
@@ -224,7 +225,8 @@ Task::Ptr EnsureMetadataTask::modrinthVersionsTask()
         if (parse_error.error != QJsonParseError::NoError) {
             qWarning() << "Error while parsing JSON response from Modrinth::CurrentVersions at" << parse_error.offset
                        << "reason:" << parse_error.errorString();
-            qWarning() << *response;
+            qWarning() << "Response body excerpt:"
+                       << Privacy::sanitizeResponseBody(*response, 2048);
 
             failed(parse_error.errorString());
             return;
@@ -243,14 +245,16 @@ Task::Ptr EnsureMetadataTask::modrinthVersionsTask()
                     m_tempVersions.insert(hash, Modrinth::loadIndexedPackVersion(entry));
                 } catch (Json::JsonException& e) {
                     qDebug() << e.cause();
-                    qDebug() << entries;
+                    qDebug() << "Modrinth response entry excerpt:"
+                             << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
 
                     emitFail(resource);
                 }
             }
         } catch (Json::JsonException& e) {
             qDebug() << e.cause();
-            qDebug() << doc;
+            qDebug() << "Modrinth response excerpt:"
+                     << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
         }
     });
 
@@ -284,7 +288,8 @@ Task::Ptr EnsureMetadataTask::modrinthProjectsTask()
         if (parse_error.error != QJsonParseError::NoError) {
             qWarning() << "Error while parsing JSON response from Modrinth projects task at" << parse_error.offset
                        << "reason:" << parse_error.errorString();
-            qWarning() << *response;
+            qWarning() << "Response body excerpt:"
+                       << Privacy::sanitizeResponseBody(*response, 2048);
             return;
         }
 
@@ -297,7 +302,8 @@ Task::Ptr EnsureMetadataTask::modrinthProjectsTask()
                 entries = Json::requireArray(doc);
         } catch (Json::JsonException& e) {
             qDebug() << e.cause();
-            qDebug() << doc;
+            qDebug() << "Modrinth response excerpt:"
+                     << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
         }
 
         for (auto entry : entries) {
@@ -309,7 +315,8 @@ Task::Ptr EnsureMetadataTask::modrinthProjectsTask()
                 Modrinth::loadIndexedPack(pack, entry_obj);
             } catch (Json::JsonException& e) {
                 qDebug() << e.cause();
-                qDebug() << doc;
+                qDebug() << "Modrinth response entry excerpt:"
+                         << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
 
                 // Skip this entry, since it has problems
                 continue;
@@ -350,7 +357,8 @@ Task::Ptr EnsureMetadataTask::flameVersionsTask()
         if (parse_error.error != QJsonParseError::NoError) {
             qWarning() << "Error while parsing JSON response from Flame::CurrentVersions at" << parse_error.offset
                        << "reason:" << parse_error.errorString();
-            qWarning() << *response;
+            qWarning() << "Response body excerpt:"
+                       << Privacy::sanitizeResponseBody(*response, 2048);
 
             failed(parse_error.errorString());
             return;
@@ -391,7 +399,8 @@ Task::Ptr EnsureMetadataTask::flameVersionsTask()
 
         } catch (Json::JsonException& e) {
             qDebug() << e.cause();
-            qDebug() << doc;
+            qDebug() << "CurseForge response excerpt:"
+                     << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
         }
     });
 
@@ -432,7 +441,8 @@ Task::Ptr EnsureMetadataTask::flameProjectsTask()
         if (parse_error.error != QJsonParseError::NoError) {
             qWarning() << "Error while parsing JSON response from Flame projects task at" << parse_error.offset
                        << "reason:" << parse_error.errorString();
-            qWarning() << *response;
+            qWarning() << "Response body excerpt:"
+                       << Privacy::sanitizeResponseBody(*response, 2048);
             return;
         }
 
@@ -458,7 +468,8 @@ Task::Ptr EnsureMetadataTask::flameProjectsTask()
 
                 } catch (Json::JsonException& e) {
                     qDebug() << e.cause();
-                    qDebug() << entries;
+                    qDebug() << "CurseForge response entry excerpt:"
+                             << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
 
                     emitFail(resource);
                 }
@@ -466,7 +477,8 @@ Task::Ptr EnsureMetadataTask::flameProjectsTask()
             }
         } catch (Json::JsonException& e) {
             qDebug() << e.cause();
-            qDebug() << doc;
+            qDebug() << "CurseForge response excerpt:"
+                     << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
         }
     });
 

@@ -44,6 +44,7 @@
 #include <QRegularExpression>
 #include <QUrlQuery>
 #include "logs/AnonymizeLog.h"
+#include "logs/Privacy.h"
 
 const std::array<PasteUpload::PasteTypeInfo, 4> PasteUpload::PasteTypes = { { { "0x0.st", "https://0x0.st", "" },
                                                                               { "hastebin", "https://hst.sh", "/documents" },
@@ -108,12 +109,16 @@ auto PasteUpload::Sink::finalize(QNetworkReply& reply) -> Task::State
     int statusCode = reply.attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
 
     if (reply.error() != QNetworkReply::NetworkError::NoError) {
-        m_fail_reason = QObject::tr("Network error: %1").arg(reply.errorString());
+        m_fail_reason = QObject::tr("Network error: %1")
+                            .arg(Privacy::sanitizeText(reply.errorString()));
         return Task::State::Failed;
     } else if (statusCode != 200 && statusCode != 201) {
         QString reasonPhrase = reply.attribute(QNetworkRequest::HttpReasonPhraseAttribute).toString();
         m_fail_reason =
-            QObject::tr("Error: %1 returned unexpected status code %2 %3").arg(m_d->url().toString()).arg(statusCode).arg(reasonPhrase);
+            QObject::tr("Error: %1 returned unexpected status code %2 %3")
+                .arg(Privacy::sanitizeUrl(m_d->url()))
+                .arg(statusCode)
+                .arg(Privacy::sanitizeText(reasonPhrase));
         return Task::State::Failed;
     }
 
@@ -136,8 +141,9 @@ auto PasteUpload::Sink::finalize(QNetworkReply& reply) -> Task::State
                 QString key = doc.object()["key"].toString();
                 m_d->m_pasteLink = m_d->m_baseUrl + "/" + key;
             } else {
-                qDebug() << "Log upload failed:" << doc.toJson();
-                m_fail_reason = QObject::tr("Error: %1 returned a malformed response body").arg(m_d->url().toString());
+                qDebug() << "Log upload failed; response body omitted.";
+                m_fail_reason = QObject::tr("Error: %1 returned a malformed response body")
+                                    .arg(Privacy::sanitizeUrl(m_d->url()));
                 return Task::State::Failed;
             }
             break;
@@ -159,12 +165,15 @@ auto PasteUpload::Sink::finalize(QNetworkReply& reply) -> Task::State
                     m_d->m_pasteLink = obj["url"].toString();
                 } else {
                     QString error = obj["error"].toString();
-                    m_fail_reason = QObject::tr("Error: %1 returned an error: %2").arg(m_d->url().toString(), error);
+                    m_fail_reason = QObject::tr("Error: %1 returned an error: %2")
+                                        .arg(Privacy::sanitizeUrl(m_d->url()),
+                                             Privacy::sanitizeText(error));
                     return Task::State::Failed;
                 }
             } else {
-                qDebug() << "Log upload failed:" << doc.toJson();
-                m_fail_reason = QObject::tr("Error: %1 returned a malformed response body").arg(m_d->url().toString());
+                qDebug() << "Log upload failed; response body omitted.";
+                m_fail_reason = QObject::tr("Error: %1 returned a malformed response body")
+                                    .arg(Privacy::sanitizeUrl(m_d->url()));
                 return Task::State::Failed;
             }
             break;
@@ -188,12 +197,16 @@ auto PasteUpload::Sink::finalize(QNetworkReply& reply) -> Task::State
                     QString error = obj["error"].toString();
                     QString message = (obj.contains("message") && obj["message"].isString()) ? obj["message"].toString() : "none";
                     m_fail_reason =
-                        QObject::tr("Error: %1 returned an error code: %2\nError message: %3").arg(m_d->url().toString(), error, message);
+                        QObject::tr("Error: %1 returned an error code: %2\nError message: %3")
+                            .arg(Privacy::sanitizeUrl(m_d->url()),
+                                 Privacy::sanitizeText(error),
+                                 Privacy::sanitizeText(message));
                     return Task::State::Failed;
                 }
             } else {
-                qDebug() << "Log upload failed:" << doc.toJson();
-                m_fail_reason = QObject::tr("Error: %1 returned a malformed response body").arg(m_d->url().toString());
+                qDebug() << "Log upload failed; response body omitted.";
+                m_fail_reason = QObject::tr("Error: %1 returned a malformed response body")
+                                    .arg(Privacy::sanitizeUrl(m_d->url()));
                 return Task::State::Failed;
             }
             break;

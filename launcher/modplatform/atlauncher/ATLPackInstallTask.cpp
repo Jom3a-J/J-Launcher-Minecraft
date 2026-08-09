@@ -61,6 +61,7 @@
 #include "Application.h"
 #include "BuildConfig.h"
 #include "ui/dialogs/BlockedModsDialog.h"
+#include "logs/Privacy.h"
 
 namespace {
 bool isPathTraversal(const QString& basePath, const QString& entryName)
@@ -124,7 +125,8 @@ void PackInstallTask::onDownloadSucceeded(QByteArray* responsePtr)
     QJsonDocument doc = QJsonDocument::fromJson(response, &parseError);
     if (parseError.error != QJsonParseError::NoError) {
         qWarning() << "Error while parsing JSON response from ATLauncher at" << parseError.offset << "reason:" << parseError.errorString();
-        qWarning() << response;
+        qWarning() << "Response body excerpt:"
+                   << Privacy::sanitizeResponseBody(response, 2048);
         return;
     }
     auto obj = doc.object();
@@ -237,7 +239,7 @@ void PackInstallTask::deleteExistingFiles()
         if (base == "config") {
             return FS::PathCombine(minecraftPath, "config");
         }
-        qWarning() << "Unrecognised base path" << base;
+        qWarning() << "Unrecognised base path" << Privacy::sanitizePath(base);
         return minecraftPath;
     };
 
@@ -553,7 +555,8 @@ bool PackInstallTask::createLibrariesComponent(const QString& instanceRoot, Pack
 
     QFile file(patchFileName);
     if (!file.open(QFile::WriteOnly)) {
-        qCritical() << "Error opening" << file.fileName() << "for reading:" << file.errorString();
+        qCritical() << "Error opening" << Privacy::sanitizePath(file.fileName())
+                    << "for reading:" << Privacy::sanitizeText(file.errorString());
         return false;
     }
     file.write(OneSixVersionFormat::versionFileToJson(f).toJson());
@@ -642,7 +645,8 @@ bool PackInstallTask::createPackComponent(const QString& instanceRoot, PackProfi
 
     QFile file(patchFileName);
     if (!file.open(QFile::WriteOnly)) {
-        qCritical() << "Error opening" << file.fileName() << "for writing:" << file.errorString();
+        qCritical() << "Error opening" << Privacy::sanitizePath(file.fileName())
+                    << "for writing:" << Privacy::sanitizeText(file.errorString());
         return false;
     }
     file.write(OneSixVersionFormat::versionFileToJson(f).toJson());
@@ -881,17 +885,18 @@ void PackInstallTask::downloadMods()
                     continue;
                 }
 
-                qDebug() << "Jarmod: " + path;
+                qDebug() << "Jarmod:" << Privacy::sanitizePath(path);
                 jarmods.push_back(path);
             }
 
             if (!serverOnly && mod.type == ModType::Jar) {
-                qDebug() << "Jarmod: " + path;
+                qDebug() << "Jarmod:" << Privacy::sanitizePath(path);
                 jarmods.push_back(path);
             }
 
             // Download after Forge handling, to avoid downloading Forge twice.
-            qDebug() << "Will download" << url << "to" << path;
+            qDebug() << "Will download" << Privacy::sanitizeUrl(url)
+                     << "to" << Privacy::sanitizePath(path);
             modsToCopy[entry->getFullPath()] = path;
         }
     }
@@ -974,12 +979,12 @@ void PackInstallTask::downloadMods()
                             continue;
                         }
 
-                        qDebug() << "Jarmod: " + path;
+                        qDebug() << "Jarmod:" << Privacy::sanitizePath(path);
                         jarmods.push_back(path);
                     }
 
                     if (!serverOnly && mod.type == ModType::Jar) {
-                        qDebug() << "Jarmod: " + path;
+                        qDebug() << "Jarmod:" << Privacy::sanitizePath(path);
                         jarmods.push_back(path);
                     }
 

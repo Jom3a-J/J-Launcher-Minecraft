@@ -17,6 +17,7 @@
 
 #include "net/ApiDownload.h"
 #include "net/NetJob.h"
+#include "logs/Privacy.h"
 
 #include "modplatform/ModIndex.h"
 #include "settings/INISettingsObject.h"
@@ -113,7 +114,8 @@ void ModrinthCreationTask::executeTask()
                 const auto& oldFile = *oldFilesIterator;
 
                 if (oldFile.hash == file.hash) {
-                    qDebug() << "Removed file at" << file.path << "from list of downloads";
+                    qDebug() << "Removed file at" << Privacy::sanitizePath(file.path)
+                             << "from list of downloads";
                     filesIterator = m_files.erase(filesIterator);
                     oldFilesIterator = oldFiles.erase(oldFilesIterator);
                     goto begin;  // Sorry :c
@@ -288,7 +290,9 @@ void ModrinthCreationTask::createInstance()
             emitFailed(tr("The file '%1' is missing a download link. This is invalid in the pack format.").arg(fileName));
             return;
         }
-        qDebug() << "Will try to download" << file.downloads.front() << "to" << filePath;
+        qDebug() << "Will try to download"
+                 << Privacy::sanitizeUrl(file.downloads.front())
+                 << "to" << Privacy::sanitizePath(filePath);
 
         Net::ModrinthDownloadMeta meta{ .reason = m_oldInstance.has_value() ? "update" : "modpack",
                                         .gameVersion = m_minecraftVersion,
@@ -540,7 +544,7 @@ bool ModrinthCreationTask::parseManifest(const QString& indexPath, std::vector<F
 
                 auto downloadArr = modInfo["downloads"].toArray();
                 for (auto download : downloadArr) {
-                    qWarning() << download.toString();
+                    qWarning() << Privacy::sanitizeUrl(download.toString());
                     bool isLast = download.toString() == downloadArr.last().toString();
 
                     auto downloadUrl = QUrl(download.toString());

@@ -39,6 +39,7 @@
 
 #include <QWidget>
 
+#include "net/NetJob.h"
 #include "ui/pages/BasePage.h"
 
 namespace Ui {
@@ -65,8 +66,11 @@ class APIPage : public QWidget, public BasePage {
     void updateBaseURLNote(int index);
     void updateBaseURLPlaceholder(int index);
     void loadSettings();
-    void applySettings();
+    bool applySettings();
+    void updateFlameKeyStorageNote();
+    void testFlameKey();
 
    private:
     Ui::APIPage* ui;
+    NetJob::Ptr m_flameKeyTestJob;
 };

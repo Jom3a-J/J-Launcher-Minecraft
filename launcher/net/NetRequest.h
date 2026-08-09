@@ -77,6 +77,7 @@ class NetRequest : public Task {
 
     QUrl url() const;
     void setUrl(QUrl url) { m_url = url; }
+    static QString formatRequestForLogging(const QNetworkRequest& request);
     int replyStatusCode() const;
     QNetworkReply::NetworkError error() const;
     QString errorString() const;
@@ -116,6 +117,8 @@ class NetRequest : public Task {
     std::vector<std::unique_ptr<Net::HeaderProxy>> m_headerProxies;
 
     int m_retryCount = 0;
+    int m_redirectCount = 0;
+    bool m_redirectRejected = false;
     QTimer m_retryTimer;
 };
 }  // namespace Net

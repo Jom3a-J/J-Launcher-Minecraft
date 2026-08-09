@@ -46,6 +46,7 @@
 #include <QUrl>
 #include <cstdint>
 #include <memory>
+#include <array>
 
 #if defined(LAUNCHER_APPLICATION)
 #include "Application.h"
@@ -55,12 +56,64 @@
 
 #include "MMCTime.h"
 #include "StringUtils.h"
+#include "logs/Privacy.h"
 
 namespace Net {
+
+namespace {
+constexpr int MaxRedirects = 10;
+
+int effectivePort(const QUrl& url)
+{
+    if (url.port() != -1) {
+        return url.port();
+    }
+    if (url.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0) {
+        return 443;
+    }
+    if (url.scheme().compare(QStringLiteral("http"), Qt::CaseInsensitive) == 0) {
+        return 80;
+    }
+    return -1;
+}
+
+bool sameOrigin(const QUrl& first, const QUrl& second)
+{
+    return first.scheme().compare(second.scheme(), Qt::CaseInsensitive) == 0
+        && first.host().compare(second.host(), Qt::CaseInsensitive) == 0
+        && effectivePort(first) == effectivePort(second);
+}
+
+bool containsCredentials(const QNetworkRequest& request)
+{
+    static const std::array<QByteArray, 5> credentialHeaders = {
+        QByteArrayLiteral("authorization"),
+        QByteArrayLiteral("proxy-authorization"),
+        QByteArrayLiteral("cookie"),
+        QByteArrayLiteral("set-cookie"),
+        QByteArrayLiteral("x-api-key"),
+    };
+
+    for (const auto& header : request.rawHeaderList()) {
+        const auto lowerHeader = header.toLower();
+        for (const auto credentialHeader : credentialHeaders) {
+            if (lowerHeader == credentialHeader) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+}  // namespace
 
 NetRequest::NetRequest() : Task()
 {
     connect(&m_retryTimer, &QTimer::timeout, this, &NetRequest::executeTask);
+}
+
+QString NetRequest::formatRequestForLogging(const QNetworkRequest& request)
+{
+    return Privacy::formatNetworkRequest(request);
 }
 
 void NetRequest::addValidator(Validator* v)
@@ -70,10 +123,12 @@ void NetRequest::addValidator(Validator* v)
 
 void NetRequest::executeTask()
 {
-    setStatus(tr("Requesting %1").arg(StringUtils::truncateUrlHumanFriendly(m_url, 80)));
+    setStatus(tr("Requesting %1").arg(Privacy::sanitizeUrl(m_url, 80)));
 
     if (getState() == Task::State::AbortedByUser) {
-        qCWarning(logCat) << getUid().toString() << "Attempt to start an aborted Request:" << m_url.toString();
+        qCWarning(logCat) << getUid().toString()
+                           << "Attempt to start an aborted Request:"
+                           << Privacy::sanitizeUrl(m_url);
         emit aborted();
         emit finished();
         return;
@@ -83,17 +138,17 @@ void NetRequest::executeTask()
     m_state = m_sink->init(request);
     switch (m_state) {
         case State::Succeeded:
-            qCDebug(logCat) << getUid().toString() << "Request cache hit" << m_url.toString();
+            qCDebug(logCat) << getUid().toString() << "Request cache hit"
+                            << Privacy::sanitizeUrl(m_url);
             emit succeeded();
             emit finished();
             return;
         case State::Running:
-            qCDebug(logCat) << getUid().toString() << "Running" << m_url.toString();
             break;
         case State::Inactive:
         case State::Failed:
             m_failReason = m_sink->failReason();
-            emit failed(m_sink->failReason());
+            emit failed(m_failReason);
             emit finished();
             return;
         case State::AbortedByUser:
@@ -112,6 +167,8 @@ void NetRequest::executeTask()
     for (auto& header_proxy : m_headerProxies) {
         header_proxy->writeHeaders(request);
     }
+    qCDebug(logCat) << getUid().toString() << "Running"
+                    << formatRequestForLogging(request);
 
 #if defined(LAUNCHER_APPLICATION)
     request.setTransferTimeout(APPLICATION->settings()->get("RequestTimeout").toInt() * 1000);
@@ -167,7 +224,8 @@ void NetRequest::onProgress(qint64 bytesReceived, qint64 bytesTotal)
 void NetRequest::downloadError(QNetworkReply::NetworkError error)
 {
     if (error == QNetworkReply::OperationCanceledError) {
-        qCCritical(logCat) << getUid().toString() << "Aborted" << m_url.toString();
+        qCCritical(logCat) << getUid().toString() << "Aborted"
+                           << Privacy::sanitizeUrl(m_url);
         m_state = State::Failed;
     } else if (replyStatusCode() == 429 /* HTTP Too Many Requests*/ && m_options & Option::AutoRetry) {
         qCDebug(logCat) << getUid().toString() << "Rate Limited!";
@@ -191,11 +249,17 @@ void NetRequest::downloadError(QNetworkReply::NetworkError error)
             }
         }
         // error happened during download.
-        qCCritical(logCat) << getUid().toString() << "Failed" << m_url.toString() << "with error" << error;
+        qCCritical(logCat) << getUid().toString() << "Failed"
+                           << Privacy::sanitizeUrl(m_url) << "with error"
+                           << error;
         if (m_reply)
-            qCCritical(logCat) << getUid().toString() << "HTTP status:" << replyStatusCode() << errorString();
+            qCCritical(logCat) << getUid().toString() << "HTTP status:"
+                               << replyStatusCode()
+                               << Privacy::sanitizeText(errorString());
         if (m_errorResponse.size() > 0)
-            qCCritical(logCat) << getUid().toString() << "Response from server:" << m_errorResponse;
+            qCCritical(logCat) << getUid().toString()
+                               << "Sanitized response excerpt:"
+                               << Privacy::sanitizeResponseBody(m_errorResponse);
         m_state = State::Failed;
     }
 }
@@ -204,63 +268,80 @@ void NetRequest::sslErrors(const QList<QSslError>& errors)
 {
     int i = 1;
     for (auto error : errors) {
-        qCCritical(logCat).nospace() << getUid().toString() << " Request " << m_url.toString() << " SSL Error #" << i << ": "
-                                     << error.errorString();
+        qCCritical(logCat).nospace()
+            << getUid().toString() << " Request "
+            << Privacy::sanitizeUrl(m_url) << " SSL Error #" << i << ": "
+            << Privacy::sanitizeText(error.errorString());
         auto cert = error.certificate();
-        qCCritical(logCat) << getUid().toString() << "Certificate in question:\n" << cert.toText();
+        qCCritical(logCat) << getUid().toString()
+                           << "Certificate in question:\n"
+                           << Privacy::sanitizeText(cert.toText(), 4096);
         i++;
     }
 }
 
 auto NetRequest::handleRedirect() -> bool
 {
-    QUrl redirect = m_reply->header(QNetworkRequest::LocationHeader).toUrl();
-    if (!redirect.isValid()) {
-        if (!m_reply->hasRawHeader("Location")) {
-            // no redirect -> it's fine to continue
-            return false;
-        }
-        // there is a Location header, but it's not correct. we need to apply some workarounds...
-        QByteArray redirectBA = m_reply->rawHeader("Location");
-        if (redirectBA.size() == 0) {
-            // empty, yet present redirect header? WTF?
-            return false;
-        }
-        QString redirectStr = QString::fromUtf8(redirectBA);
-
-        if (redirectStr.startsWith("//")) {
-            /*
-             * IF the URL begins with //, we need to insert the URL scheme.
-             * See: https://bugreports.qt.io/browse/QTBUG-41061
-             * See: http://tools.ietf.org/html/rfc3986#section-4.2
-             */
-            redirectStr = m_reply->url().scheme() + ":" + redirectStr;
-        } else if (redirectStr.startsWith("/")) {
-            /*
-             * IF the URL begins with /, we need to process it as a relative URL
-             */
-            auto url = m_reply->url();
-            url.setPath(redirectStr, QUrl::TolerantMode);
-            redirectStr = url.toString();
-        }
-
-        /*
-         * Next, make sure the URL is parsed in tolerant mode. Qt doesn't parse the location header in tolerant mode, which causes issues.
-         * FIXME: report Qt bug for this
-         */
-        redirect = QUrl(redirectStr, QUrl::TolerantMode);
-        if (!redirect.isValid()) {
-            qCWarning(logCat) << getUid().toString() << "Failed to parse redirect URL:" << redirectStr;
-            downloadError(QNetworkReply::ProtocolFailure);
-            return false;
-        }
-        qCDebug(logCat) << getUid().toString() << "Fixed location header:" << redirect;
-    } else {
-        qCDebug(logCat) << getUid().toString() << "Location header:" << redirect;
+    if (!m_reply->hasRawHeader("Location")) {
+        return false;
     }
 
-    m_url = QUrl(redirect.toString());
-    qCDebug(logCat) << getUid().toString() << "Following redirect to" << m_url.toString();
+    const QByteArray redirectBytes = m_reply->rawHeader("Location");
+    if (redirectBytes.isEmpty()) {
+        m_state = State::Failed;
+        m_redirectRejected = true;
+        m_failReason = tr("Redirect rejected: the destination was empty.");
+        qCWarning(logCat) << getUid().toString() << m_failReason;
+        return false;
+    }
+
+    const QUrl currentUrl = m_reply->url().isValid() ? m_reply->url() : m_url;
+    QUrl redirect(QString::fromUtf8(redirectBytes), QUrl::TolerantMode);
+    if (!redirect.isValid()) {
+        m_state = State::Failed;
+        m_redirectRejected = true;
+        m_failReason = tr("Redirect rejected: the destination was invalid.");
+        qCWarning(logCat) << getUid().toString() << m_failReason;
+        return false;
+    }
+    redirect = currentUrl.resolved(redirect);
+    if (!redirect.isValid() || redirect.scheme().isEmpty() || redirect.host().isEmpty()) {
+        m_state = State::Failed;
+        m_redirectRejected = true;
+        m_failReason = tr("Redirect rejected: the destination was invalid.");
+        qCWarning(logCat) << getUid().toString() << m_failReason;
+        return false;
+    }
+
+    if (currentUrl.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0
+        && redirect.scheme().compare(QStringLiteral("http"), Qt::CaseInsensitive) == 0) {
+        m_state = State::Failed;
+        m_redirectRejected = true;
+        m_failReason = tr("Redirect rejected: HTTPS cannot be downgraded to HTTP.");
+        qCWarning(logCat) << getUid().toString() << m_failReason;
+        return false;
+    }
+
+    if (containsCredentials(m_reply->request()) && !sameOrigin(currentUrl, redirect)) {
+        m_state = State::Failed;
+        m_redirectRejected = true;
+        m_failReason = tr("Redirect rejected: credentials cannot cross origins.");
+        qCWarning(logCat) << getUid().toString() << m_failReason;
+        return false;
+    }
+
+    if (m_redirectCount >= MaxRedirects) {
+        m_state = State::Failed;
+        m_redirectRejected = true;
+        m_failReason = tr("Redirect rejected: too many redirects.");
+        qCWarning(logCat) << getUid().toString() << m_failReason;
+        return false;
+    }
+
+    m_redirectCount++;
+    m_url = redirect;
+    qCDebug(logCat) << getUid().toString() << "Following redirect to"
+                    << Privacy::sanitizeUrl(m_url);
     executeTask();
 
     return true;
@@ -295,27 +376,41 @@ void NetRequest::downloadFinished()
 
     // handle HTTP redirection first
     if (handleRedirect()) {
-        qCDebug(logCat) << getUid().toString() << "Request redirected:" << m_url.toString();
+        qCDebug(logCat) << getUid().toString() << "Request redirected:"
+                        << Privacy::sanitizeUrl(m_url);
+        return;
+    }
+
+    if (m_redirectRejected) {
+        m_sink->abort();
+        emit failed(m_failReason);
+        emit finished();
         return;
     }
 
     // if the download failed before this point ...
     if (m_state == State::Succeeded)  // pretend to succeed so we continue processing :)
     {
-        qCDebug(logCat) << getUid().toString() << "Request failed but we are allowed to proceed:" << m_url.toString();
+        qCDebug(logCat) << getUid().toString()
+                        << "Request failed but we are allowed to proceed:"
+                        << Privacy::sanitizeUrl(m_url);
         m_sink->abort();
         emit succeeded();
         emit finished();
         return;
     } else if (m_state == State::Failed) {
-        qCDebug(logCat) << getUid().toString() << "Request failed in previous step:" << m_url.toString();
+        qCDebug(logCat) << getUid().toString()
+                        << "Request failed in previous step:"
+                        << Privacy::sanitizeUrl(m_url);
         m_sink->abort();
         m_failReason = m_reply->errorString();
-        emit failed(m_reply->errorString());
+        emit failed(m_failReason);
         emit finished();
         return;
     } else if (m_state == State::AbortedByUser) {
-        qCDebug(logCat) << getUid().toString() << "Request aborted in previous step:" << m_url.toString();
+        qCDebug(logCat) << getUid().toString()
+                        << "Request aborted in previous step:"
+                        << Privacy::sanitizeUrl(m_url);
         m_sink->abort();
         emit aborted();
         emit finished();
@@ -328,10 +423,12 @@ void NetRequest::downloadFinished()
         qCDebug(logCat) << getUid().toString() << "Writing extra" << data.size() << "bytes";
         m_state = m_sink->write(data);
         if (m_state != State::Succeeded) {
-            qCDebug(logCat) << getUid().toString() << "Request failed to write:" << m_url.toString();
+            qCDebug(logCat) << getUid().toString()
+                            << "Request failed to write:"
+                            << Privacy::sanitizeUrl(m_url);
             m_sink->abort();
             m_failReason = m_sink->failReason();
-            emit failed(m_sink->failReason());
+            emit failed(m_failReason);
             emit finished();
             return;
         }
@@ -340,15 +437,18 @@ void NetRequest::downloadFinished()
     // otherwise, finalize the whole graph
     m_state = m_sink->finalize(*m_reply.get());
     if (m_state != State::Succeeded) {
-        qCDebug(logCat) << getUid().toString() << "Request failed to finalize:" << m_url.toString();
+        qCDebug(logCat) << getUid().toString()
+                        << "Request failed to finalize:"
+                        << Privacy::sanitizeUrl(m_url);
         m_sink->abort();
         m_failReason = m_sink->failReason();
-        emit failed(m_sink->failReason());
+        emit failed(m_failReason);
         emit finished();
         return;
     }
 
-    qCDebug(logCat) << getUid().toString() << "Request succeeded:" << m_url.toString();
+    qCDebug(logCat) << getUid().toString() << "Request succeeded:"
+                    << Privacy::sanitizeUrl(m_url);
     emit succeeded();
     emit finished();
 }
@@ -359,10 +459,16 @@ void NetRequest::downloadReadyRead()
         auto data = m_reply->readAll();
         m_state = m_sink->write(data);
         if (replyStatusCode() >= 400) {
-            m_errorResponse.append(data);
+            constexpr qsizetype MaxErrorResponseBytes = 64 * 1024;
+            const qsizetype remaining = MaxErrorResponseBytes - m_errorResponse.size();
+            if (remaining > 0) {
+                m_errorResponse.append(data.left(remaining));
+            }
         }
         if (m_state == State::Failed) {
-            qCCritical(logCat) << getUid().toString() << "Failed to process response chunk:" << m_sink->failReason();
+            qCCritical(logCat) << getUid().toString()
+                               << "Failed to process response chunk:"
+                               << Privacy::sanitizeText(m_sink->failReason());
         }
         // qDebug() << "Request" << m_url.toString() << "gained" << data.size() << "bytes";
     } else {

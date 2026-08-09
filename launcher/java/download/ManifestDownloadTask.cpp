@@ -20,6 +20,7 @@
 #include "Application.h"
 #include "FileSystem.h"
 #include "Json.h"
+#include "logs/Privacy.h"
 #include "net/ChecksumValidator.h"
 #include "net/NetJob.h"
 
@@ -61,7 +62,8 @@ void ManifestDownloadTask::executeTask()
         QJsonDocument doc = QJsonDocument::fromJson(*files, &parse_error);
         if (parse_error.error != QJsonParseError::NoError) {
             qWarning() << "Error while parsing JSON response at" << parse_error.offset << "reason:" << parse_error.errorString();
-            qWarning() << *files;
+            qWarning() << "Java manifest response excerpt:"
+                       << Privacy::sanitizeResponseBody(*files, 2048);
             emitFailed(parse_error.errorString());
             return;
         }

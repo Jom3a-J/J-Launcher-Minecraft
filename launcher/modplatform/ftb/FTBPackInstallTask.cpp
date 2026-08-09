@@ -48,6 +48,7 @@
 #include "modplatform/flame/PackManifest.h"
 #include "net/ChecksumValidator.h"
 #include "settings/INISettingsObject.h"
+#include "logs/Privacy.h"
 
 #include "Application.h"
 #include "BuildConfig.h"
@@ -123,7 +124,8 @@ void PackInstallTask::onManifestDownloadSucceeded(QByteArray* responsePtr)
     const QJsonDocument doc = QJsonDocument::fromJson(response, &parseError);
     if (parseError.error != QJsonParseError::NoError) {
         qWarning() << "Error while parsing JSON response from FTB at " << parseError.offset << " reason: " << parseError.errorString();
-        qWarning() << response;
+        qWarning() << "Response body excerpt:"
+                   << Privacy::sanitizeResponseBody(response, 2048);
         return;
     }
 
@@ -348,7 +350,8 @@ void PackInstallTask::downloadPack()
 
         if (!file.serverOnly) {
             auto path = FS::PathCombine(m_stagingPath, ".minecraft", relativePath);
-            qDebug() << "Will try to download" << file.url << "to" << path;
+            qDebug() << "Will try to download" << Privacy::sanitizeUrl(file.url)
+                     << "to" << Privacy::sanitizePath(path);
             auto dl = Net::Download::makeFile(file.url, path);
             if (!file.sha1.isEmpty()) {
                 dl->addValidator(new Net::ChecksumValidator(QCryptographicHash::Sha1, file.sha1));
@@ -358,8 +361,9 @@ void PackInstallTask::downloadPack()
         if (shouldCreateServerPair() && file.serverOnly) {
             auto path = FS::PathCombine(m_stagingPath, "server-pack", "server-files",
                                         relativePath);
-            qDebug() << "Will try to download server-only file" << file.url
-                     << "to" << path;
+            qDebug() << "Will try to download server-only file"
+                     << Privacy::sanitizeUrl(file.url)
+                     << "to" << Privacy::sanitizePath(path);
             auto dl = Net::Download::makeFile(file.url, path);
             if (!file.sha1.isEmpty()) {
                 dl->addValidator(new Net::ChecksumValidator(QCryptographicHash::Sha1, file.sha1));
@@ -440,10 +444,12 @@ void PackInstallTask::copyBlockedMods()
 
         setStatus(tr("Copying Blocked Mods (%1 out of %2 are done)").arg(QString::number(i), QString::number(total)));
 
-        qDebug() << "Will try to copy" << mod.localPath << "to" << destPath;
+        qDebug() << "Will try to copy" << Privacy::sanitizePath(mod.localPath)
+                 << "to" << Privacy::sanitizePath(destPath);
 
         if (!FS::copy(mod.localPath, destPath)()) {
-            qDebug() << "Copy of" << mod.localPath << "to" << destPath << "Failed";
+            qDebug() << "Copy of" << Privacy::sanitizePath(mod.localPath)
+                     << "to" << Privacy::sanitizePath(destPath) << "Failed";
         }
 
         i++;

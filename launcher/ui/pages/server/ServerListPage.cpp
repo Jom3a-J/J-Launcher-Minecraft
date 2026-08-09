@@ -35,6 +35,7 @@
 #include "QObjectPtr.h"
 #include "settings/INISettingsObject.h"
 #include "tasks/ConcurrentTask.h"
+#include "logs/Privacy.h"
 #include <QMessageBox>
 #include <QFileDialog>
 #include <QFile>
@@ -230,7 +231,7 @@ QIcon serverFileIcon(const QFileInfo &file)
 QString structuredCrashDetails(const std::shared_ptr<ServerInstance> &server, const QString &message,
                               const QString &rawLog)
 {
-    if (!server) return rawLog;
+    if (!server) return Privacy::sanitizeText(rawLog, 8192);
     const QString loader = server->loaderVersion().isEmpty()
         ? server->loaderType()
         : server->loaderType() + " " + server->loaderVersion();
@@ -243,18 +244,20 @@ QString structuredCrashDetails(const std::shared_ptr<ServerInstance> &server, co
     QStringList finalLines;
     const QStringList allLines = rawLog.split('\n', Qt::SkipEmptyParts);
     for (int index = qMax(0, allLines.size() - 25); index < allLines.size(); ++index) {
-        finalLines << allLines.at(index);
+        finalLines << Privacy::sanitizeText(allLines.at(index), 8192);
     }
 
     QStringList report;
     report << QObject::tr("Crash summary")
            << QObject::tr("Time: %1").arg(QDateTime::currentDateTime().toString(Qt::ISODate))
-           << QObject::tr("Message: %1").arg(message)
+           << QObject::tr("Message: %1").arg(Privacy::sanitizeText(message))
            << QObject::tr("Likely cause: %1").arg(ServerDiagnostics::crashCauseExplanation(
                   ServerDiagnostics::classifyCrash(rawLog)))
            << QObject::tr("Minecraft: %1").arg(server->version())
            << QObject::tr("Server type: %1").arg(loader)
-           << QObject::tr("Java: %1").arg(server->javaPath().isEmpty() ? QObject::tr("system default") : server->javaPath())
+           << QObject::tr("Java: %1").arg(server->javaPath().isEmpty()
+                                              ? QObject::tr("system default")
+                                              : Privacy::sanitizePath(server->javaPath()))
            << QObject::tr("Memory: %1 MiB minimum / %2 MiB maximum").arg(server->minMemory()).arg(server->maxMemory())
            << QObject::tr("Installed content (%1): %2").arg(content.size()).arg(content.isEmpty() ? QObject::tr("none") : content.join(", "))
            << QString()
@@ -266,7 +269,8 @@ QString structuredCrashDetails(const std::shared_ptr<ServerInstance> &server, co
 QString crashSummary(const QString& message, const QString& rawLog)
 {
     return QObject::tr("%1 — %2\nLikely cause: %3")
-        .arg(QDateTime::currentDateTime().toString(Qt::ISODate), message,
+        .arg(QDateTime::currentDateTime().toString(Qt::ISODate),
+             Privacy::sanitizeText(message),
              ServerDiagnostics::crashCauseExplanation(
                  ServerDiagnostics::classifyCrash(rawLog)));
 }
@@ -1146,7 +1150,7 @@ void ServerListPage::onInstallModpack()
             task->failReason().isEmpty()
                 ? tr("The modpack instance could not be created.")
                 : tr("The modpack instance could not be created:\n%1")
-                      .arg(task->failReason()));
+                      .arg(Privacy::sanitizeText(task->failReason())));
         return;
     }
 
@@ -1308,7 +1312,8 @@ void ServerListPage::onBrowseMods()
 
     if (downloads->getState() == Task::State::Failed) {
         QMessageBox::critical(this, pluginServer ? tr("Download Plugins") : tr("Download Mods"),
-                              tr("One or more files could not be downloaded:\n%1").arg(downloads->failReason()));
+                              tr("One or more files could not be downloaded:\n%1").arg(
+                                  Privacy::sanitizeText(downloads->failReason())));
     } else if (downloads->getState() == Task::State::AbortedByUser) {
         QMessageBox::information(this, pluginServer ? tr("Download Plugins") : tr("Download Mods"),
                                  tr("Download stopped by user."));
@@ -2485,8 +2490,9 @@ void ServerListPage::onSendCommand()
         QString command = ui->commandInput->text().trimmed();
         if (!command.isEmpty()) {
             server->writeStdin(command);
-            server->appendLog("> " + command);
-            appendConsoleOutput("> " + command);
+            const QString safeCommand = Privacy::sanitizeCommandForDisplay(command);
+            server->appendLog(safeCommand);
+            appendConsoleOutput(safeCommand);
             ui->commandInput->clear();
         }
     }
@@ -2546,7 +2552,9 @@ void ServerListPage::onServerSelectionChanged()
             if (m_currentConnectedServer) {
                 // Clear console and load cached log
                 ui->consoleOutput->clear();
-                ui->consoleOutput->setPlainText(m_currentConnectedServer->consoleLog());
+                ui->consoleOutput->setPlainText(
+                    Privacy::sanitizeText(m_currentConnectedServer->consoleLog(),
+                                          100000));
                 // Scroll to bottom
                 ui->consoleOutput->moveCursor(QTextCursor::End);
 
@@ -3007,10 +3015,12 @@ void ServerListPage::refreshOverview()
                 .arg(backupCount)
                 .arg(worldCount)
                 .arg(tr("Calculating...").toHtmlEscaped()));
-        const QString java = server->javaPath().isEmpty() ? tr("Automatic") : server->javaPath();
+        const QString java = server->javaPath().isEmpty()
+            ? tr("Automatic")
+            : Privacy::sanitizePath(server->javaPath());
         m_overviewSummaryLabel->setToolTip(
             tr("Server folder: %1\nJava: %2\nConfigured memory: %3-%4 MB")
-                .arg(server->serverDirectory(), java)
+                .arg(Privacy::sanitizePath(server->serverDirectory()), java)
                 .arg(server->minMemory())
                 .arg(server->maxMemory()));
     }
@@ -3520,7 +3530,7 @@ void ServerListPage::updateSelectedServerInfo()
 
 void ServerListPage::appendConsoleOutput(const QString &text)
 {
-    ui->consoleOutput->appendPlainText(text);
+    ui->consoleOutput->appendPlainText(Privacy::sanitizeText(text, 8192));
     if (!m_pauseConsoleScrollCheck || !m_pauseConsoleScrollCheck->isChecked()) {
         QScrollBar *scrollBar = ui->consoleOutput->verticalScrollBar();
         scrollBar->setValue(scrollBar->maximum());

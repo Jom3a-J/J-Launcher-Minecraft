@@ -6,6 +6,7 @@
 #include <QProgressBar>
 #include <QVBoxLayout>
 
+#include "logs/Privacy.h"
 #include "tasks/Task.h"
 
 ProgressWidget::ProgressWidget(QWidget* parent, bool show_label) : QWidget(parent)
@@ -94,7 +95,7 @@ void ProgressWidget::hide()
 void ProgressWidget::handleTaskFinish()
 {
     if (!m_task->wasSuccessful() && m_label)
-        m_label->setText(m_task->failReason());
+        m_label->setText(Privacy::sanitizeText(m_task->failReason()));
 
     if (m_hide_if_inactive)
         hide();

@@ -14,6 +14,7 @@
  */
 
 #include "TaskStepWrapper.h"
+#include "logs/Privacy.h"
 #include "tasks/Task.h"
 
 void TaskStepWrapper::executeTask()
@@ -38,10 +39,12 @@ void TaskStepWrapper::updateFinished()
         m_task.reset();
         emitSucceeded();
     } else {
-        QString reason = tr("Instance update failed because: %1\n\n").arg(m_task->failReason());
+        const QString rawReason = m_task->failReason();
+        const QString reason = tr("Instance update failed because: %1\n\n").arg(
+            Privacy::sanitizeText(rawReason));
         m_task.reset();
         emit logLine(reason, MessageLevel::Fatal);
-        emitFailed(reason);
+        emitFailed(tr("Instance update failed because: %1\n\n").arg(rawReason));
     }
 }
 

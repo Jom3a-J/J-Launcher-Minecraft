@@ -74,6 +74,7 @@
 #include "minecraft/World.h"
 #include "minecraft/mod/tasks/LocalResourceParse.h"
 #include "net/ApiDownload.h"
+#include "logs/Privacy.h"
 #include "net/ChecksumValidator.h"
 #include "ui/dialogs/UntrustedModsDialog.h"
 #include "ui/pages/modplatform/OptionalModDialog.h"
@@ -189,7 +190,8 @@ void FlameCreationTask::executeTask()
             if (oldFile != oldFiles.end()) {
                 // We found a match, but is it a different version?
                 if (oldFile->fileId == file->fileId) {
-                    qDebug() << "Removed file at" << file->targetFolder << "with id" << file->fileId << "from list of downloads";
+                    qDebug() << "Removed file at" << Privacy::sanitizePath(file->targetFolder)
+                             << "with id" << file->fileId << "from list of downloads";
 
                     oldFiles.remove(file.key());
                     filesIterator = files.erase(filesIterator);
@@ -230,7 +232,8 @@ void FlameCreationTask::executeTask()
                     if (parseError.error != QJsonParseError::NoError) {
                         qWarning() << "Error while parsing JSON response from Flame files task at" << parseError.offset
                                    << "reason:" << parseError.errorString();
-                        qWarning() << *rawResponse;
+                        qWarning() << "Response body excerpt:"
+                                   << Privacy::sanitizeResponseBody(*rawResponse, 2048);
                         return;
                     }
 
@@ -685,7 +688,8 @@ void FlameCreationTask::setupDownloadJob()
         }
 
         if (!result.version.downloadUrl.isEmpty()) {
-            qDebug() << "Will download" << result.version.downloadUrl << "to" << path;
+            qDebug() << "Will download" << Privacy::sanitizeUrl(result.version.downloadUrl)
+                     << "to" << Privacy::sanitizePath(path);
             auto dl = Net::ApiDownload::makeFile(result.version.downloadUrl, path);
             if (auto* validator = Flame::createCurseForgeChecksumValidator(result.version.hash_type, result.version.hash)) {
                 dl->addValidator(validator);

@@ -40,6 +40,7 @@
 #include <QFileInfo>
 #include <QStandardPaths>
 #include "java/JavaUtils.h"
+#include "logs/Privacy.h"
 
 void CheckJava::executeTask()
 {
@@ -67,7 +68,8 @@ void CheckJava::executeTask()
         emitFailed(QString("Java path is not valid."));
         return;
     } else {
-        emit logLine("Java path is:\n  " + m_javaPath, MessageLevel::Launcher);
+        emit logLine("Java path is:\n  " + Privacy::sanitizePath(m_javaPath),
+                     MessageLevel::Launcher);
     }
 
     if (JavaUtils::getJavaCheckPath().isEmpty()) {

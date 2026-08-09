@@ -44,6 +44,7 @@
 #include <QStandardPaths>
 #include <variant>
 #include "MessageLevel.h"
+#include "logs/Privacy.h"
 #include "tasks/Task.h"
 
 void LaunchTask::init()
@@ -233,7 +234,8 @@ bool LaunchTask::parseXmlLogs(QString const& line, MessageLevel level)
     auto items = parser->parseAvailable();
     if (auto err = parser->getError(); err.has_value()) {
         auto& model = *getLogModel();
-        model.append(MessageLevel::Error, tr("[Log4j Parse Error] Failed to parse log4j log event: %1").arg(err.value().errMessage));
+        model.append(MessageLevel::Error, tr("[Log4j Parse Error] Failed to parse log4j log event: %1").arg(
+            Privacy::sanitizeText(err.value().errMessage)));
         return false;
     }
 
@@ -250,7 +252,7 @@ bool LaunchTask::parseXmlLogs(QString const& line, MessageLevel level)
                            .arg(entry.levelText)
                            .arg(entry.logger)
                            .arg(entry.message);
-            msg = censorPrivateInfo(msg);
+            msg = Privacy::sanitizeText(censorPrivateInfo(msg));
             model->append(entry.level, msg);
         } else if (std::holds_alternative<LogParser::PlainText>(item)) {
             auto msg = std::get<LogParser::PlainText>(item).message;
@@ -260,7 +262,7 @@ bool LaunchTask::parseXmlLogs(QString const& line, MessageLevel level)
             if (newLevel == MessageLevel::Unknown)
                 newLevel = LogParser::guessLevel(line, model->previousLevel());
 
-            msg = censorPrivateInfo(msg);
+            msg = Privacy::sanitizeText(censorPrivateInfo(msg));
 
             model->append(newLevel, msg);
         }
@@ -283,7 +285,7 @@ void LaunchTask::onLogLine(QString line, MessageLevel level)
     }
 
     // censor private user info
-    line = censorPrivateInfo(line);
+    line = Privacy::sanitizeText(censorPrivateInfo(line));
 
     getLogModel()->append(level, line);
 }

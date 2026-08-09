@@ -19,6 +19,7 @@
 #include <Application.h>
 #include <BuildConfig.h>
 #include <Json.h>
+#include "logs/Privacy.h"
 
 #include "net/ApiDownload.h"
 #include "ui/widgets/ProjectItem.h"
@@ -118,7 +119,8 @@ void ListModel::requestFinished(QByteArray* responsePtr)
     QJsonDocument doc = QJsonDocument::fromJson(response, &parse_error);
     if (parse_error.error != QJsonParseError::NoError) {
         qWarning() << "Error while parsing JSON response from ATL at" << parse_error.offset << "reason:" << parse_error.errorString();
-        qWarning() << response;
+        qWarning() << "Response body excerpt:"
+                   << Privacy::sanitizeResponseBody(response, 2048);
         return;
     }
 
@@ -133,7 +135,8 @@ void ListModel::requestFinished(QByteArray* responsePtr)
         try {
             ATLauncher::loadIndexedPack(pack, packObj);
         } catch (const JSONValidationError& e) {
-            qDebug() << QString::fromUtf8(response);
+            qDebug() << "ATLauncher response excerpt:"
+                     << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
             qWarning() << "Error while reading pack manifest from ATLauncher:" << e.cause();
             return;
         }

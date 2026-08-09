@@ -25,6 +25,7 @@
 #include "Application.h"
 
 #include "net/ApiDownload.h"
+#include "logs/Privacy.h"
 
 Technic::SingleZipPackInstallTask::SingleZipPackInstallTask(const QUrl& sourceUrl, const QString& minecraftVersion,
                                                             const QUrl& serverPackUrl)
@@ -56,7 +57,8 @@ void Technic::SingleZipPackInstallTask::executeTask()
     if (shouldCreateServerPair() && (m_serverPackUrl.isEmpty() || !m_serverPackUrl.isValid())) {
         logWarning(tr("Technic does not publish a dedicated server pack for this modpack. The launcher will derive server content from the client pack."));
     }
-    setStatus(tr("Downloading modpack:\n%1").arg(m_sourceUrl.toString()));
+    setStatus(tr("Downloading modpack:\n%1")
+                  .arg(Privacy::sanitizeUrl(m_sourceUrl)));
 
     const QString path = m_sourceUrl.host() + '/' + m_sourceUrl.path();
     auto entry = APPLICATION->metacache()->resolveEntry("general", path);
@@ -84,7 +86,8 @@ void Technic::SingleZipPackInstallTask::downloadSucceeded()
     m_abortable = false;
 
     setStatus(tr("Extracting modpack"));
-    qDebug() << "Attempting to create instance from" << m_archivePath;
+    qDebug() << "Attempting to create instance from"
+             << Privacy::sanitizePath(m_archivePath);
 
     const QString archivePath = m_archivePath;
     const QString serverArchivePath = m_serverArchivePath;
@@ -161,7 +164,7 @@ void Technic::SingleZipPackInstallTask::extractFinished()
             if (!QFile::setPermissions(filepath, permissions)) {
                 logWarning(tr("Could not fix permissions for %1").arg(filepath));
             } else {
-                qDebug() << "Fixed" << filepath;
+                qDebug() << "Fixed" << Privacy::sanitizePath(filepath);
             }
         }
     }
