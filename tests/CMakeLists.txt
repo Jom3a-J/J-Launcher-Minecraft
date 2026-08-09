@@ -63,3 +63,33 @@ ecm_add_test(CatPack_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR
 
 ecm_add_test(XmlLogs_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME XmlLogs)
+
+add_executable(FakeMinecraftServer server/FakeMinecraftServer.cpp)
+
+ecm_add_test(ServerManager_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME ServerManager)
+add_dependencies(ServerManager FakeMinecraftServer)
+
+ecm_add_test(ServerPackCompatibility_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME ServerPackCompatibility)
+
+ecm_add_test(ServerInstance_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME ServerInstance)
+add_dependencies(ServerInstance FakeMinecraftServer)
+
+ecm_add_test(ServerSettingsPage_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME ServerSettingsPage)
+set_tests_properties(ServerSettingsPage PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+ecm_add_test(ATLPackManifest_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME ATLPackManifest)
+
+ecm_add_test(UniversalResourceDownloader_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME UniversalResourceDownloader)
+
+ecm_add_test(NetRequest_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME NetRequest)
+set_tests_properties(NetRequest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+ecm_add_test(Privacy_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME Privacy)
