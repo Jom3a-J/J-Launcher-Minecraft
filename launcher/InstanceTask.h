@@ -40,6 +40,9 @@ class InstanceTask : public Task {
 
     QString originalInstanceID() const { return m_originalInstanceId; };
 
+    void setCreateServerPair(bool create) { m_createServerPair = create; }
+    bool shouldCreateServerPair() const { return m_createServerPair; }
+
     QString modifiedName() const;
     QString originalName() const;
     QString name() const;
@@ -66,6 +69,7 @@ class InstanceTask : public Task {
 
     bool m_overrideExisting = false;
     bool m_confirmUpdate = true;
+    bool m_createServerPair = false;
 
     QString m_originalInstanceId;
 

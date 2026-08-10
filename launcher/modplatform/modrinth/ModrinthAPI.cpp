@@ -9,6 +9,7 @@
 #include "net/ApiDownload.h"
 #include "net/ApiUpload.h"
 #include "net/NetJob.h"
+#include "logs/Privacy.h"
 
 std::pair<Task::Ptr, QByteArray*> ModrinthAPI::currentVersion(const QString& hash, const QString& hash_format) const
 {
@@ -142,7 +143,8 @@ QList<ModPlatform::Category> ModrinthAPI::loadCategories(const QByteArray& respo
     if (parse_error.error != QJsonParseError::NoError) {
         qWarning() << "Error while parsing JSON response from categories at" << parse_error.offset
                    << "reason:" << parse_error.errorString();
-        qWarning() << *response;
+        qWarning() << "Response body excerpt:"
+                   << Privacy::sanitizeResponseBody(response, 2048);
         return categories;
     }
 
@@ -160,7 +162,8 @@ QList<ModPlatform::Category> ModrinthAPI::loadCategories(const QByteArray& respo
     } catch (Json::JsonException& e) {
         qCritical() << "Failed to parse response from a version request.";
         qCritical() << e.what();
-        qDebug() << doc;
+        qDebug() << "Modrinth response excerpt:"
+                 << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
     }
     return categories;
 }

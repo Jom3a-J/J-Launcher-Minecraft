@@ -37,6 +37,7 @@
 #include "Application.h"
 #include "BuildConfig.h"
 #include "Json.h"
+#include "logs/Privacy.h"
 #include "settings/SettingsObject.h"
 
 #include "net/ApiDownload.h"
@@ -175,7 +176,8 @@ void Technic::ListModel::searchRequestFinished(QByteArray* responsePtr)
     QJsonDocument doc = QJsonDocument::fromJson(response, &parse_error);
     if (parse_error.error != QJsonParseError::NoError) {
         qWarning() << "Error while parsing JSON response from Technic at" << parse_error.offset << "reason:" << parse_error.errorString();
-        qWarning() << response;
+        qWarning() << "Response body excerpt:"
+                   << Privacy::sanitizeResponseBody(response, 2048);
         return;
     }
 

@@ -104,9 +104,11 @@
 
 #include "InstanceList.h"
 #include "MTPixmapCache.h"
+#include "server/ServerManager.h"
 
 #include <minecraft/auth/AccountList.h>
 #include "icons/IconList.h"
+#include "logs/Privacy.h"
 #include "net/HttpMetaCache.h"
 
 #include "updater/ExternalUpdater.h"
@@ -116,6 +118,7 @@
 #include "tools/MCEditTool.h"
 
 #include "settings/INISettingsObject.h"
+#include "settings/CredentialStore.h"
 #include "settings/Setting.h"
 
 #include "meta/Index.h"
@@ -232,13 +235,14 @@ void appDebugOutput(QtMsgType type, const QMessageLogContext& context, const QSt
 {
     static std::mutex loggerMutex;
     const std::lock_guard<std::mutex> lock(loggerMutex);  // synchronized, QFile logFile is not thread-safe
+    const auto safeMsg = Privacy::sanitizeText(msg, 256 * 1024);
 
     if (isANSIColorConsole) {
         // ensure default is set for log file
         qSetMessagePattern(defaultLogFormat);
     }
 
-    QString out = qFormatLogMessage(type, context, msg);
+    QString out = qFormatLogMessage(type, context, safeMsg);
     if (APPLICATION->logModel) {
         APPLICATION->logModel->append(MessageLevel::fromQtMsgType(type), out);
     }
@@ -250,7 +254,7 @@ void appDebugOutput(QtMsgType type, const QMessageLogContext& context, const QSt
     if (isANSIColorConsole) {
         // format ansi for console;
         qSetMessagePattern(ansiLogFormat);
-        out = qFormatLogMessage(type, context, msg);
+        out = qFormatLogMessage(type, context, safeMsg);
         out += QChar::LineFeed;
     }
 
@@ -534,7 +538,7 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
         auto logRulesFile = QStringLiteral("qtlogging.ini");
         auto logRulesPath = FS::PathCombine(dataPath, logRulesFile);
 
-        qInfo() << "Testing" << logRulesPath << "...";
+        qInfo() << "Testing" << Privacy::sanitizePath(logRulesPath) << "...";
         foundLoggingRules = QFile::exists(logRulesPath);
 
         // search the dataPath()
@@ -542,7 +546,7 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
         if (!foundLoggingRules && !isPortable() && dirParam.isEmpty() && dataDirEnv.isEmpty()) {
             logRulesPath = QStandardPaths::locate(QStandardPaths::AppDataLocation, FS::PathCombine("..", logRulesFile));
             if (!logRulesPath.isEmpty()) {
-                qInfo() << "Found" << logRulesPath << "...";
+                qInfo() << "Found" << Privacy::sanitizePath(logRulesPath) << "...";
                 foundLoggingRules = true;
             }
         }
@@ -553,13 +557,13 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
 #else
             logRulesPath = FS::PathCombine(m_rootPath, logRulesFile);
 #endif
-            qInfo() << "Testing" << logRulesPath << "...";
+            qInfo() << "Testing" << Privacy::sanitizePath(logRulesPath) << "...";
             foundLoggingRules = QFile::exists(logRulesPath);
         }
 
         if (foundLoggingRules) {
             // load and set logging rules
-            qInfo() << "Loading logging rules from:" << logRulesPath;
+            qInfo() << "Loading logging rules from:" << Privacy::sanitizePath(logRulesPath);
             QSettings loggingRules(logRulesPath, QSettings::IniFormat);
             loggingRules.beginGroup("Rules");
             QStringList rule_names = loggingRules.childKeys();
@@ -599,19 +603,23 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
         qInfo() << "Build Artifact             :" << BuildConfig.BUILD_ARTIFACT;
         qInfo() << "Updates Enabled            :" << (updaterEnabled() ? "Yes" : "No");
         if (adjustedBy.size()) {
-            qInfo() << "Work dir before adjustment :" << origcwdPath;
-            qInfo() << "Work dir after adjustment  :" << QDir::currentPath();
+            qInfo() << "Work dir before adjustment :"
+                    << Privacy::sanitizePath(origcwdPath);
+            qInfo() << "Work dir after adjustment  :"
+                    << Privacy::sanitizePath(QDir::currentPath());
             qInfo() << "Adjusted by                :" << adjustedBy;
         } else {
-            qInfo() << "Work dir                   :" << QDir::currentPath();
+            qInfo() << "Work dir                   :"
+                    << Privacy::sanitizePath(QDir::currentPath());
         }
-        qInfo() << "Binary path                :" << binPath;
-        qInfo() << "Application root path      :" << m_rootPath;
+        qInfo() << "Binary path                :" << Privacy::sanitizePath(binPath);
+        qInfo() << "Application root path      :" << Privacy::sanitizePath(m_rootPath);
         if (!m_instanceIdToLaunch.isEmpty()) {
             qInfo() << "ID of instance to launch   :" << m_instanceIdToLaunch;
         }
         if (!m_serverToJoin.isEmpty()) {
-            qInfo() << "Address of server to join  :" << m_serverToJoin;
+            qInfo() << "Address of server to join  :"
+                    << Privacy::sanitizeText(m_serverToJoin);
         } else if (!m_worldToJoin.isEmpty()) {
             qInfo() << "Name of the world to join  :" << m_worldToJoin;
         }
@@ -625,11 +633,14 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
             if (check.write(payload) == payload.size()) {
                 check.close();
             } else {
-                qWarning() << "Could not write into" << liveCheckFile << "error:" << check.errorString();
+                qWarning() << "Could not write into"
+                           << Privacy::sanitizePath(liveCheckFile)
+                           << "error:" << Privacy::sanitizeText(check.errorString());
                 check.remove();  // also closes file!
             }
         } else {
-            qWarning() << "Could not open" << liveCheckFile << "for writing:" << check.errorString();
+            qWarning() << "Could not open" << Privacy::sanitizePath(liveCheckFile)
+                       << "for writing:" << Privacy::sanitizeText(check.errorString());
         }
     }
 
@@ -885,16 +896,50 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
         // Custom Microsoft Authentication Client ID
         m_settings->registerSetting("MSAClientIDOverride", "");
 
-        // Custom Flame API Key
+        // Migrate legacy plaintext CurseForge API keys into secure storage.
         {
             m_settings->registerSetting("CFKeyOverride", "");
             m_settings->registerSetting("FlameKeyOverride", "");
 
-            QString flameKey = m_settings->get("CFKeyOverride").toString();
-
-            if (!flameKey.isEmpty())
-                m_settings->set("FlameKeyOverride", flameKey);
-            m_settings->reset("CFKeyOverride");
+            QString credentialReadError;
+            m_flameApiKeyOverride = CredentialStore::read(
+                QStringLiteral("CurseForgeApiKey"), &credentialReadError);
+            if (!credentialReadError.isEmpty()) {
+                qWarning() << "Could not read the stored CurseForge API key securely;"
+                              " preserving the legacy value for this session if available."
+                           << Privacy::sanitizeText(credentialReadError);
+            }
+            QString flameKey =
+                m_settings->get("FlameKeyOverride").toString().trimmed();
+            if (flameKey.isEmpty()) {
+                flameKey = m_settings->get("CFKeyOverride").toString().trimmed();
+            }
+            if (m_flameApiKeyOverride.isEmpty() && !flameKey.isEmpty()) {
+                if (!CredentialStore::isPersistent()) {
+                    m_flameApiKeyOverride = flameKey;
+                } else {
+                    QString credentialWriteError;
+                    if (CredentialStore::write(QStringLiteral("CurseForgeApiKey"),
+                                               flameKey, &credentialWriteError)) {
+                        m_flameApiKeyOverride = flameKey;
+                        m_settings->reset("CFKeyOverride");
+                        m_settings->reset("FlameKeyOverride");
+                    } else {
+                        m_flameApiKeyOverride = flameKey;
+                        qWarning() << "Could not migrate the CurseForge API key to secure storage;"
+                                      " preserving the legacy value for this session."
+                                   << Privacy::sanitizeText(credentialWriteError);
+                    }
+                }
+            } else if (!m_flameApiKeyOverride.isEmpty() && CredentialStore::isPersistent()
+                       && credentialReadError.isEmpty()) {
+                // A successfully read persistent credential supersedes any legacy copy.
+                m_settings->reset("CFKeyOverride");
+                m_settings->reset("FlameKeyOverride");
+            } else if (!flameKey.isEmpty()) {
+                // Session-only stores must not destroy the only persistent legacy copy.
+                m_flameApiKeyOverride = flameKey;
+            }
         }
         m_settings->registerSetting("FallbackMRBlockedMods", true);
         m_settings->registerSetting("ModrinthToken", "");
@@ -949,6 +994,17 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
         qInfo() << "<> Network done.";
     }
 
+    // Local servers use a dedicated directory below the selected launcher data
+    // root. Keep their lifecycle separate from game instances and load the
+    // persisted registry before any server UI can access it.
+    {
+        m_serverManager = std::make_unique<ServerManager>(m_dataPath, this);
+        if (!m_serverManager->load()) {
+            qWarning() << "Could not load the local server registry.";
+        }
+        qInfo() << "<> Local server registry initialized.";
+    }
+
     // Instance icons
     {
         auto setting = APPLICATION->settings()->getSetting("IconsDir");
@@ -985,7 +1041,7 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
         // instance path: check for problems with '!' in instance path and warn the user in the log
         // and remember that we have to show him a dialog when the gui starts (if it does so)
         QString instDir = m_settings->get("InstanceDir").toString();
-        qInfo() << "Instance path              :" << instDir;
+        qInfo() << "Instance path              :" << Privacy::sanitizePath(instDir);
         if (FS::checkProblemticPathJava(QDir(instDir))) {
             qWarning() << "Your instance path contains \'!\' and this is known to cause java problems!";
         }
@@ -1362,7 +1418,8 @@ void Application::performMainStartupAction()
             if (!m_serverToJoin.isEmpty()) {
                 // FIXME: validate the server string
                 targetToJoin.reset(new MinecraftTarget(MinecraftTarget::parse(m_serverToJoin, false)));
-                qDebug() << "   Launching with server" << m_serverToJoin;
+                qDebug() << "   Launching with server"
+                         << Privacy::sanitizeText(m_serverToJoin);
             } else if (!m_worldToJoin.isEmpty()) {
                 targetToJoin.reset(new MinecraftTarget(MinecraftTarget::parse(m_worldToJoin, true)));
                 qDebug() << "   Launching with world" << m_worldToJoin;
@@ -1417,7 +1474,11 @@ void Application::performMainStartupAction()
     }
 
     if (!m_urlsToImport.isEmpty()) {
-        qDebug() << "<> Importing from url:" << m_urlsToImport;
+        QStringList safeImportUrls;
+        for (const QUrl& url : m_urlsToImport) {
+            safeImportUrls << Privacy::sanitizeUrl(url);
+        }
+        qDebug() << "<> Importing from url:" << safeImportUrls;
         m_mainWindow->processURLs(m_urlsToImport);
     }
 }
@@ -1903,14 +1964,30 @@ QString Application::getMSAClientID()
     return BuildConfig.MSA_CLIENT_ID;
 }
 
-QString Application::getFlameAPIKey()
+QString Application::getFlameAPIKey() const
 {
-    QString keyOverride = m_settings->get("FlameKeyOverride").toString();
-    if (!keyOverride.isEmpty()) {
-        return keyOverride;
+    if (!m_flameApiKeyOverride.isEmpty()) {
+        return m_flameApiKeyOverride;
     }
 
     return BuildConfig.FLAME_API_KEY;
+}
+
+bool Application::setFlameAPIKeyOverride(const QString& key, QString* error)
+{
+    const QString normalized = key.trimmed();
+    const bool stored = normalized.isEmpty()
+        ? CredentialStore::remove(QStringLiteral("CurseForgeApiKey"), error)
+        : CredentialStore::write(QStringLiteral("CurseForgeApiKey"), normalized,
+                                 error);
+    if (!stored) {
+        return false;
+    }
+    m_flameApiKeyOverride = normalized;
+    m_settings->reset("CFKeyOverride");
+    m_settings->reset("FlameKeyOverride");
+    updateCapabilities();
+    return true;
 }
 
 QString Application::getModrinthAPIToken()
@@ -2013,7 +2090,9 @@ bool Application::handleDataMigration(const QString& currentData,
             setDoNotMigrate();
         } else {
             QString reason = task.failReason();
-            QMessageBox::critical(nullptr, BuildConfig.LAUNCHER_DISPLAYNAME, tr("Migration failed! Reason: %1").arg(reason));
+            QMessageBox::critical(nullptr, BuildConfig.LAUNCHER_DISPLAYNAME,
+                                   tr("Migration failed! Reason: %1").arg(
+                                       Privacy::sanitizeText(reason)));
         }
     } else {
         qWarning() << "<> Migration was skipped, due to existing data";

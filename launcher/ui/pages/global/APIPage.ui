@@ -367,12 +367,36 @@
            </widget>
           </item>
           <item>
-           <widget class="QLineEdit" name="flameKey">
-            <property name="enabled">
-             <bool>true</bool>
+           <layout class="QHBoxLayout" name="flameKeyLayout">
+            <item>
+             <widget class="QLineEdit" name="flameKey">
+              <property name="enabled">
+               <bool>true</bool>
+              </property>
+              <property name="placeholderText">
+               <string>Use Default</string>
+              </property>
+              <property name="echoMode">
+               <enum>QLineEdit::Password</enum>
+              </property>
+             </widget>
+            </item>
+            <item>
+             <widget class="QPushButton" name="testFlameKeyButton">
+              <property name="text">
+               <string>Test API Key</string>
+              </property>
+             </widget>
+            </item>
+           </layout>
+          </item>
+          <item>
+           <widget class="QLabel" name="flameKeyStatus">
+            <property name="text">
+             <string/>
             </property>
-            <property name="placeholderText">
-             <string>Use Default</string>
+            <property name="wordWrap">
+             <bool>true</bool>
             </property>
            </widget>
           </item>

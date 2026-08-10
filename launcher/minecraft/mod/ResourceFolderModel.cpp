@@ -16,6 +16,7 @@
 
 #include "Application.h"
 #include "FileSystem.h"
+#include "logs/Privacy.h"
 
 #include "minecraft/mod/tasks/ResourceFolderLoadTask.h"
 
@@ -195,14 +196,16 @@ void ResourceFolderModel::installResourceWithFlameMetadata(const QString& path, 
             if (parseError.error != QJsonParseError::NoError) {
                 qWarning() << "Error while parsing JSON response for mod info at" << parseError.offset
                            << "reason:" << parseError.errorString();
-                qDebug() << *response;
+                qDebug() << "Provider response body excerpt:"
+                         << Privacy::sanitizeResponseBody(*response, 2048);
                 return;
             }
             try {
                 auto obj = Json::requireObject(Json::requireObject(doc), "data");
                 FlameMod::loadIndexedPack(pack, obj);
             } catch (const JSONValidationError& e) {
-                qDebug() << doc;
+                qDebug() << "Provider response excerpt:"
+                         << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
                 qWarning() << "Error while reading mod info:" << e.cause();
             }
             LocalResourceUpdateTask updateMetadata(indexDir(), pack, vers);

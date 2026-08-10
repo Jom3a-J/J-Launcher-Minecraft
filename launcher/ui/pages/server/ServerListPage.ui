@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>ServerListPage</class>
+ <widget class="QWidget" name="ServerListPage">
+  <property name="geometry"><rect><x>0</x><y>0</y><width>900</width><height>620</height></rect></property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <item>
+    <layout class="QHBoxLayout" name="headerLayout">
+     <item><widget class="QLabel" name="titleLabel"><property name="text"><string>Minecraft Servers</string></property><property name="font"><font><pointsize>14</pointsize><weight>75</weight><bold>true</bold></font></property></widget></item>
+     <item><widget class="QLabel" name="serverStatsLabel"><property name="text"><string>0 server(s) • 0 running</string></property></widget></item>
+     <item><spacer name="headerSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property></spacer></item>
+     <item><widget class="QPushButton" name="createFromModpackButton"><property name="text"><string>Create from Modpack</string></property></widget></item>
+     <item><widget class="QPushButton" name="createServerButton"><property name="text"><string>Create Server</string></property></widget></item>
+    </layout>
+   </item>
+   <item>
+    <widget class="QSplitter" name="serverSplitter">
+     <property name="orientation"><enum>Qt::Horizontal</enum></property>
+     <property name="childrenCollapsible"><bool>false</bool></property>
+     <widget class="QWidget" name="serverListPanel">
+      <layout class="QVBoxLayout" name="serverListPanelLayout">
+        <property name="leftMargin"><number>0</number></property>
+        <property name="topMargin"><number>0</number></property>
+        <property name="rightMargin"><number>6</number></property>
+        <property name="bottomMargin"><number>0</number></property>
+       <item><widget class="QLabel" name="serverListTitle"><property name="text"><string>Servers</string></property><property name="font"><font><weight>75</weight><bold>true</bold></font></property></widget></item>
+       <item><widget class="QLineEdit" name="serverSearchInput"><property name="placeholderText"><string>Search name, version, or type…</string></property><property name="clearButtonEnabled"><bool>true</bool></property></widget></item>
+       <item><widget class="QListWidget" name="serverList"><property name="alternatingRowColors"><bool>true</bool></property></widget></item>
+      </layout>
+     </widget>
+     <widget class="QWidget" name="serverDetailPanel">
+      <layout class="QVBoxLayout" name="serverDetailLayout">
+        <property name="leftMargin"><number>6</number></property>
+        <property name="topMargin"><number>0</number></property>
+        <property name="rightMargin"><number>0</number></property>
+        <property name="bottomMargin"><number>0</number></property>
+       <item><widget class="QLabel" name="detailTitleLabel"><property name="text"><string>Selected Server</string></property><property name="font"><font><weight>75</weight><bold>true</bold></font></property></widget></item>
+       <item><widget class="QLabel" name="selectedServerInfoLabel"><property name="text"><string>Select a server to view its details and controls.</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+       <item>
+        <layout class="QHBoxLayout" name="primaryActionLayout">
+         <item><widget class="QPushButton" name="startServerButton"><property name="text"><string>Start</string></property><property name="enabled"><bool>false</bool></property></widget></item>
+         <item><widget class="QPushButton" name="stopServerButton"><property name="text"><string>Stop</string></property><property name="enabled"><bool>false</bool></property></widget></item>
+         <item><widget class="QPushButton" name="restartServerButton"><property name="text"><string>Restart</string></property><property name="enabled"><bool>false</bool></property></widget></item>
+         <item><spacer name="primaryActionSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property></spacer></item>
+          <item><widget class="QPushButton" name="deleteServerButton"><property name="text"><string>Delete</string></property><property name="enabled"><bool>false</bool></property></widget></item>
+        </layout>
+       </item>
+       <item>
+        <widget class="QTabWidget" name="serverTabs">
+         <property name="currentIndex"><number>0</number></property>
+          <widget class="QWidget" name="consoleTab">
+          <attribute name="title"><string>Console</string></attribute>
+          <layout class="QVBoxLayout" name="consoleTabLayout">
+           <item><widget class="QPlainTextEdit" name="consoleOutput"><property name="readOnly"><bool>true</bool></property><property name="font"><font><family>Courier New</family><pointsize>9</pointsize></font></property></widget></item>
+           <item><layout class="QHBoxLayout" name="commandLayout"><item><widget class="QLineEdit" name="commandInput"><property name="placeholderText"><string>Enter command…</string></property></widget></item><item><widget class="QPushButton" name="sendCommandButton"><property name="text"><string>Send</string></property><property name="enabled"><bool>false</bool></property></widget></item></layout></item>
+           </layout>
+          </widget>
+          <widget class="QWidget" name="overviewTab">
+           <attribute name="title"><string>Overview</string></attribute>
+           <layout class="QVBoxLayout" name="overviewTabLayout">
+            <item><widget class="QLabel" name="overviewInfoLabel"><property name="text"><string>Select a server to view its statistics.</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+            <item><layout class="QGridLayout" name="overviewStatsGrid">
+             <item row="0" column="0"><widget class="QGroupBox" name="overviewStatusCard"><property name="title"><string>Status</string></property><layout class="QVBoxLayout" name="overviewStatusCardLayout"><item><widget class="QLabel" name="overviewStatusValue"><property name="text"><string>—</string></property><property name="alignment"><set>Qt::AlignCenter</set></property><property name="font"><font><pointsize>14</pointsize><weight>75</weight><bold>true</bold></font></property></widget></item></layout></widget></item>
+             <item row="0" column="1"><widget class="QGroupBox" name="overviewMemoryCard"><property name="title"><string>Memory</string></property><layout class="QVBoxLayout" name="overviewMemoryCardLayout"><item><widget class="QLabel" name="overviewMemoryValue"><property name="text"><string>—</string></property><property name="alignment"><set>Qt::AlignCenter</set></property><property name="font"><font><pointsize>14</pointsize><weight>75</weight><bold>true</bold></font></property></widget></item></layout></widget></item>
+             <item row="0" column="2"><widget class="QGroupBox" name="overviewContentCard"><property name="title"><string>Installed Content</string></property><layout class="QVBoxLayout" name="overviewContentCardLayout"><item><widget class="QLabel" name="overviewContentValue"><property name="text"><string>—</string></property><property name="alignment"><set>Qt::AlignCenter</set></property><property name="font"><font><pointsize>14</pointsize><weight>75</weight><bold>true</bold></font></property></widget></item></layout></widget></item>
+             <item row="1" column="0"><widget class="QGroupBox" name="overviewBackupsCard"><property name="title"><string>Backups</string></property><layout class="QVBoxLayout" name="overviewBackupsCardLayout"><item><widget class="QLabel" name="overviewBackupsValue"><property name="text"><string>—</string></property><property name="alignment"><set>Qt::AlignCenter</set></property><property name="font"><font><pointsize>14</pointsize><weight>75</weight><bold>true</bold></font></property></widget></item></layout></widget></item>
+             <item row="1" column="1"><widget class="QGroupBox" name="overviewWorldsCard"><property name="title"><string>World Folders</string></property><layout class="QVBoxLayout" name="overviewWorldsCardLayout"><item><widget class="QLabel" name="overviewWorldsValue"><property name="text"><string>—</string></property><property name="alignment"><set>Qt::AlignCenter</set></property><property name="font"><font><pointsize>14</pointsize><weight>75</weight><bold>true</bold></font></property></widget></item></layout></widget></item>
+             <item row="1" column="2"><widget class="QGroupBox" name="overviewStorageCard"><property name="title"><string>Server Storage</string></property><layout class="QVBoxLayout" name="overviewStorageCardLayout"><item><widget class="QLabel" name="overviewStorageValue"><property name="text"><string>—</string></property><property name="alignment"><set>Qt::AlignCenter</set></property><property name="font"><font><pointsize>14</pointsize><weight>75</weight><bold>true</bold></font></property></widget></item></layout></widget></item>
+            </layout></item>
+            <item><widget class="QGroupBox" name="overviewDetailsGroup"><property name="title"><string>Server Details</string></property><layout class="QVBoxLayout" name="overviewDetailsLayout"><item><widget class="QLabel" name="overviewDetailsLabel"><property name="text"><string>—</string></property><property name="wordWrap"><bool>true</bool></property></widget></item></layout></widget></item>
+            <item><layout class="QHBoxLayout" name="overviewActions"><item><widget class="QPushButton" name="refreshOverviewButton"><property name="text"><string>Refresh Statistics</string></property><property name="enabled"><bool>false</bool></property></widget></item><item><spacer name="overviewSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property></spacer></item></layout></item>
+            <item><spacer name="overviewVerticalSpacer"><property name="orientation"><enum>Qt::Vertical</enum></property></spacer></item>
+           </layout>
+          </widget>
+           <widget class="QWidget" name="filesTab">
+           <attribute name="title"><string>Files</string></attribute>
+          <layout class="QVBoxLayout" name="filesTabLayout">
+            <item><widget class="QLabel" name="filesInfoLabel"><property name="text"><string>Select a server to browse its files.</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+            <item><widget class="QTreeWidget" name="serverFilesTree"><property name="columnCount"><number>3</number></property><column><property name="text"><string>Name</string></property></column><column><property name="text"><string>Type</string></property></column><column><property name="text"><string>Size</string></property></column></widget></item>
+            <item><layout class="QHBoxLayout" name="filesActions"><item><widget class="QPushButton" name="refreshFilesButton"><property name="text"><string>Refresh</string></property><property name="enabled"><bool>false</bool></property></widget></item><item><widget class="QPushButton" name="openFolderButton"><property name="text"><string>Open Server Folder</string></property><property name="enabled"><bool>false</bool></property></widget></item><item><widget class="QPushButton" name="importPackButton"><property name="text"><string>Import Server Pack</string></property><property name="enabled"><bool>false</bool></property></widget></item><item><spacer name="filesSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property></spacer></item></layout></item>
+           </layout>
+          </widget>
+          <widget class="QWidget" name="backupsTab">
+           <attribute name="title"><string>Backups</string></attribute>
+           <layout class="QVBoxLayout" name="backupsTabLayout">
+            <item><widget class="QLabel" name="backupsInfoLabel"><property name="text"><string>Create and restore complete server backups, including worlds, player data, settings, and installed content. Stop the server before making changes.</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+            <item><widget class="QTreeWidget" name="backupsTree"><property name="columnCount"><number>3</number></property><property name="alternatingRowColors"><bool>true</bool></property><column><property name="text"><string>Name</string></property></column><column><property name="text"><string>Created</string></property></column><column><property name="text"><string>Size</string></property></column></widget></item>
+            <item><layout class="QHBoxLayout" name="backupCreateActions"><item><widget class="QLineEdit" name="backupNameInput"><property name="placeholderText"><string>Backup name, e.g. Before update</string></property></widget></item><item><widget class="QPushButton" name="createBackupButton"><property name="text"><string>Create Backup</string></property><property name="enabled"><bool>false</bool></property></widget></item></layout></item>
+            <item><layout class="QGridLayout" name="backupActions"><item row="0" column="0"><widget class="QPushButton" name="refreshBackupsButton"><property name="text"><string>Refresh</string></property><property name="enabled"><bool>false</bool></property></widget></item><item row="0" column="1"><widget class="QPushButton" name="openBackupsFolderButton"><property name="text"><string>Open Backup Folder</string></property><property name="enabled"><bool>false</bool></property></widget></item><item row="1" column="0"><widget class="QPushButton" name="restoreBackupButton"><property name="text"><string>Restore Selected Backup</string></property><property name="enabled"><bool>false</bool></property></widget></item><item row="1" column="1"><widget class="QPushButton" name="removeBackupButton"><property name="text"><string>Remove Selected Backup</string></property><property name="enabled"><bool>false</bool></property></widget></item></layout></item>
+           </layout>
+          </widget>
+          <widget class="QWidget" name="installedContentTab">
+           <attribute name="title"><string>Mods</string></attribute>
+           <layout class="QVBoxLayout" name="installedContentTabLayout">
+            <item><widget class="QLabel" name="installedContentInfoLabel"><property name="text"><string>Select a modded or plugin server to view installed content.</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+            <item><widget class="QTreeWidget" name="installedContentTree"><property name="columnCount"><number>4</number></property><property name="alternatingRowColors"><bool>true</bool></property><property name="rootIsDecorated"><bool>false</bool></property><property name="selectionMode"><enum>QAbstractItemView::SingleSelection</enum></property><column><property name="text"><string>Name</string></property></column><column><property name="text"><string>Version</string></property></column><column><property name="text"><string>Status</string></property></column><column><property name="text"><string>Size</string></property></column></widget></item>
+             <item><layout class="QGridLayout" name="installedContentActions"><item row="0" column="0"><widget class="QPushButton" name="browseModsButton"><property name="text"><string>Download Mods</string></property><property name="enabled"><bool>false</bool></property></widget></item><item row="0" column="1"><widget class="QPushButton" name="addLocalContentButton"><property name="text"><string>Add Local JAR</string></property><property name="enabled"><bool>false</bool></property></widget></item><item row="0" column="2"><widget class="QPushButton" name="openContentFolderButton"><property name="text"><string>Open Mods Folder</string></property><property name="enabled"><bool>false</bool></property></widget></item><item row="1" column="0"><widget class="QPushButton" name="refreshInstalledButton"><property name="text"><string>Refresh</string></property></widget></item><item row="1" column="1"><widget class="QPushButton" name="toggleInstalledButton"><property name="text"><string>Enable / Disable</string></property><property name="enabled"><bool>false</bool></property></widget></item><item row="1" column="2"><widget class="QPushButton" name="removeInstalledButton"><property name="text"><string>Remove</string></property><property name="enabled"><bool>false</bool></property></widget></item></layout></item>
+           </layout>
+          </widget>
+          <widget class="QWidget" name="settingsTab">
+          <attribute name="title"><string>Settings</string></attribute>
+          <layout class="QVBoxLayout" name="settingsTabLayout">
+           <item><widget class="QScrollArea" name="settingsScrollArea"><property name="widgetResizable"><bool>true</bool></property><widget class="QWidget" name="settingsContentContainer"><property name="geometry"><rect><x>0</x><y>0</y><width>580</width><height>420</height></rect></property><layout class="QVBoxLayout" name="settingsContentLayout"><item><widget class="QLabel" name="settingsPlaceholderLabel"><property name="text"><string>Select a stopped server to edit its settings.</string></property><property name="alignment"><set>Qt::AlignCenter</set></property></widget></item></layout></widget></widget></item>
+          </layout>
+         </widget>
+        </widget>
+       </item>
+      </layout>
+     </widget>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

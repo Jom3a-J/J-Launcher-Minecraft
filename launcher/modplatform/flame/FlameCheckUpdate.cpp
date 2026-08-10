@@ -17,6 +17,7 @@
 #include "net/ApiDownload.h"
 #include "net/NetJob.h"
 #include "tasks/Task.h"
+#include "logs/Privacy.h"
 
 bool FlameCheckUpdate::abort()
 {
@@ -67,7 +68,8 @@ void FlameCheckUpdate::getLatestVersionCallback(Resource* resource, QByteArray* 
     if (parseError.error != QJsonParseError::NoError) {
         qWarning() << "Error while parsing JSON response from latest mod version at" << parseError.offset
                    << "reason:" << parseError.errorString();
-        qWarning() << *response;
+        qWarning() << "Response body excerpt:"
+                   << Privacy::sanitizeResponseBody(*response, 2048);
         return;
     }
 
@@ -85,7 +87,8 @@ void FlameCheckUpdate::getLatestVersionCallback(Resource* resource, QByteArray* 
     } catch (Json::JsonException& e) {
         qCritical() << "Failed to parse response from a version request.";
         qCritical() << e.what();
-        qDebug() << doc;
+        qDebug() << "CurseForge response excerpt:"
+                 << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
     }
     auto latestVer =
         FlameAPI::get().getLatestVersion(pack->versions, m_loadersList, resource->metadata()->loaders, !m_loadersList.isEmpty());
@@ -159,7 +162,8 @@ void FlameCheckUpdate::collectBlockedMods()
         if (parseError.error != QJsonParseError::NoError) {
             qWarning() << "Error while parsing JSON response from Flame projects task at" << parseError.offset
                        << "reason:" << parseError.errorString();
-            qWarning() << *response;
+            qWarning() << "Response body excerpt:"
+                       << Privacy::sanitizeResponseBody(*response, 2048);
             return;
         }
 
@@ -188,12 +192,14 @@ void FlameCheckUpdate::collectBlockedMods()
                                      recoverUrl);
                 } catch (Json::JsonException& e) {
                     qDebug() << e.cause();
-                    qDebug() << entries;
+                    qDebug() << "CurseForge response entry excerpt:"
+                             << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
                 }
             }
         } catch (Json::JsonException& e) {
             qDebug() << e.cause();
-            qDebug() << doc;
+            qDebug() << "CurseForge response excerpt:"
+                     << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
         }
     });
 

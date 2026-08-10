@@ -299,6 +299,70 @@ void ResourceDownloadDialog::selectedPageChanged(BasePage* previous, BasePage* s
     result->setSearchTerm(prevPage->getSearchTerm());
 }
 
+ModDownloadDialog::ModDownloadDialog(QWidget* parent,
+                                     ModFolderModel* mods,
+                                     MinecraftInstance* instance,
+                                     bool suppressInitialSearch,
+                                     ModPlatform::ResourceType resourceType,
+                                     QStringList loaderNames)
+    : ResourceDownloadDialog(parent,
+                             mods,
+                             instance,
+                             resourceType == ModPlatform::ResourceType::Plugin ? tr("plugins") : tr("mods"),
+                             resourceType == ModPlatform::ResourceType::Plugin ? QStringLiteral("PluginDownloadGeometry")
+                                                                                 : QStringLiteral("ModDownloadGeometry"),
+                             suppressInitialSearch),
+      m_resourceType(resourceType),
+      m_loaderNames(std::move(loaderNames))
+{
+    initPages(getPages());
+}
+
+QString ModDownloadDialog::resourcesString() const
+{
+    return m_resourceType == ModPlatform::ResourceType::Plugin ? tr("plugins") : tr("mods");
+}
+
+QString ModDownloadDialog::geometrySaveKey() const
+{
+    return m_resourceType == ModPlatform::ResourceType::Plugin ? QStringLiteral("PluginDownloadGeometry")
+                                                                 : QStringLiteral("ModDownloadGeometry");
+}
+
+QList<BasePage*> ModDownloadDialog::getPages()
+{
+    if (!m_pages.isEmpty()) {
+        return m_pages;
+    }
+
+    QList<BasePage*> pages;
+    const bool pluginMode = m_resourceType == ModPlatform::ResourceType::Plugin;
+    const auto loaders = m_instance->getPackProfile()->getSupportedModLoaders().value_or(ModPlatform::ModLoaderTypes(0));
+
+    if (pluginMode || ModrinthAPI::validateModLoaders(loaders)) {
+        auto* page = Modrinth::createModPage(this, *m_instance, m_resourceType, m_loaderNames);
+        page->setSuppressInitialSearch(m_suppressInitialSearch);
+        pages.append(page);
+    }
+    if (APPLICATION->capabilities() & Application::SupportsFlame
+        && (pluginMode || FlameAPI::validateModLoaders(loaders))) {
+        auto* page = Flame::createModPage(this, *m_instance, m_resourceType, m_loaderNames);
+        page->setSuppressInitialSearch(m_suppressInitialSearch);
+        pages.append(page);
+    }
+
+    m_pages = pages;
+    return m_pages;
+}
+
+GetModDependenciesTask::Ptr ModDownloadDialog::getModDependenciesTask()
+{
+    if (m_resourceType == ModPlatform::ResourceType::Plugin) {
+        return nullptr;
+    }
+    return ResourceDownloadDialog::getModDependenciesTask();
+}
+
 void ResourceDownloadDialog::setResourceMetadata(const std::shared_ptr<Metadata::ModStruct>& meta)
 {
     switch (meta->provider) {

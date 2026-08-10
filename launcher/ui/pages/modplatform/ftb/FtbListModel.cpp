@@ -19,6 +19,7 @@
 #include "Application.h"
 #include "BuildConfig.h"
 #include "Json.h"
+#include "logs/Privacy.h"
 
 #include <QPainter>
 
@@ -122,7 +123,8 @@ void ListModel::requestFinished(QByteArray* responsePtr)
     QJsonDocument doc = QJsonDocument::fromJson(response, &parse_error);
     if (parse_error.error != QJsonParseError::NoError) {
         qWarning() << "Error while parsing JSON response from FTB at " << parse_error.offset << " reason: " << parse_error.errorString();
-        qWarning() << response;
+        qWarning() << "Response body excerpt:"
+                   << Privacy::sanitizeResponseBody(response, 2048);
         return;
     }
 
@@ -173,7 +175,8 @@ void ListModel::packRequestFinished(QByteArray* responsePtr)
 
     if (parse_error.error != QJsonParseError::NoError) {
         qWarning() << "Error while parsing JSON response from FTB at " << parse_error.offset << " reason: " << parse_error.errorString();
-        qWarning() << response;
+        qWarning() << "Response body excerpt:"
+                   << Privacy::sanitizeResponseBody(response, 2048);
         return;
     }
 
@@ -183,7 +186,8 @@ void ListModel::packRequestFinished(QByteArray* responsePtr)
     try {
         FTB::loadModpack(pack, obj);
     } catch (const JSONValidationError& e) {
-        qDebug() << QString::fromUtf8(response);
+        qDebug() << "FTB response excerpt:"
+                 << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
         qWarning() << "Error while reading pack manifest from FTB: " << e.cause();
         return;
     }

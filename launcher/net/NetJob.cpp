@@ -38,6 +38,7 @@
 #include "NetJob.h"
 #include <QNetworkReply>
 #include "net/NetRequest.h"
+#include "logs/Privacy.h"
 #include "tasks/ConcurrentTask.h"
 #if defined(LAUNCHER_APPLICATION)
 #include "Application.h"
@@ -143,7 +144,8 @@ auto NetJob::getFailedFiles() -> QList<QString>
 {
     QList<QString> failed;
     for (auto index : m_failed) {
-        failed.append(static_cast<Net::NetRequest*>(index.get())->url().toString());
+        failed.append(Privacy::sanitizeUrl(
+            static_cast<Net::NetRequest*>(index.get())->url()));
     }
     return failed;
 }

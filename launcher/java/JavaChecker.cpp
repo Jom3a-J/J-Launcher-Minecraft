@@ -42,14 +42,31 @@
 #include <utility>
 
 #include "Commandline.h"
+#include "Application.h"
 #include "java/JavaUtils.h"
+#include "logs/Privacy.h"
 
 JavaChecker::JavaChecker(QString path, QString args, int minMem, int maxMem, int permGen, int id)
     : m_path(std::move(path)), m_args(std::move(args)), m_minMem(minMem), m_maxMem(maxMem), m_permGen(permGen), m_id(id)
 {}
 
+QString JavaChecker::formatEnvironmentForDiagnostics(
+    const QProcessEnvironment& environment)
+{
+    return Privacy::formatEnvironmentForDiagnostics(environment).join('\n');
+}
+
 void JavaChecker::executeTask()
 {
+    const QString managedJavaRoot = APPLICATION_DYN ? APPLICATION_DYN->javaPath() : QString();
+    if (!JavaUtils::isJavaPathSafeToProbe(m_path, managedJavaRoot)) {
+        Result result = { m_path, m_id };
+        result.errorLog = tr("The Java executable is missing or its managed runtime is incomplete.");
+        result.validity = Result::Validity::Errored;
+        emit checkFinished(result);
+        emitSucceeded();
+        return;
+    }
     QString checkerJar = JavaUtils::getJavaCheckPath();
 
     if (checkerJar.isEmpty()) {
@@ -80,8 +97,10 @@ void JavaChecker::executeTask()
     m_process->setArguments(args);
     m_process->setProgram(m_path);
     m_process->setProcessChannelMode(QProcess::SeparateChannels);
-    m_process->setProcessEnvironment(CleanEnviroment());
-    qDebug() << "Running java checker:" << m_path << args.join(" ");
+    const QProcessEnvironment cleanEnvironment = CleanEnviroment();
+    m_process->setProcessEnvironment(cleanEnvironment);
+    qDebug() << "Running java checker:" << Privacy::sanitizePath(m_path)
+             << Privacy::sanitizeText(args.join(" "));
 
     connect(m_process.get(), &QProcess::finished, this, &JavaChecker::finished, Qt::QueuedConnection);
     connect(m_process.get(), &QProcess::errorOccurred, this, &JavaChecker::error, Qt::QueuedConnection);
@@ -118,10 +137,10 @@ void JavaChecker::finished(int exitcode, QProcess::ExitStatus status)
         m_path,
         m_id,
     };
-    result.errorLog = m_stderr;
-    result.outLog = m_stdout;
-    qDebug() << "STDOUT" << m_stdout;
-    qWarning() << "STDERR" << m_stderr;
+    result.errorLog = Privacy::sanitizeText(m_stderr, 8192);
+    result.outLog = Privacy::sanitizeText(m_stdout, 8192);
+    qDebug() << "STDOUT" << result.outLog;
+    qWarning() << "STDERR" << result.errorLog;
     qDebug() << "Java checker finished with status" << status << "exit code" << exitcode;
 
     if (status == QProcess::CrashExit || exitcode == 1) {
@@ -177,18 +196,17 @@ void JavaChecker::finished(int exitcode, QProcess::ExitStatus status)
 void JavaChecker::error(QProcess::ProcessError err)
 {
     if (err == QProcess::FailedToStart) {
-        qDebug() << "Java checker has failed to start:" << m_process->errorString();
-        qDebug() << "Process environment:";
-        qDebug() << m_process->environment();
-        qDebug() << "Native environment:";
-        qDebug() << QProcessEnvironment::systemEnvironment().toStringList();
+        qDebug() << "Java checker has failed to start:"
+                 << Privacy::sanitizeText(m_process->errorString());
+        qDebug() << "Safe Java process environment:"
+                 << formatEnvironmentForDiagnostics(m_process->processEnvironment());
         m_killTimer.stop();
 
         Result result = {
             .path = m_path,
             .id = m_id,
         };
-        result.errorLog = m_process->errorString();
+        result.errorLog = Privacy::sanitizeText(m_process->errorString());
         result.validity = Result::Validity::Errored;
         emit checkFinished(result);
     }

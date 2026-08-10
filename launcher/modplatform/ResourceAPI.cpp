@@ -7,6 +7,7 @@
 #include "modplatform/ModIndex.h"
 
 #include "net/ApiDownload.h"
+#include "logs/Privacy.h"
 
 Task::Ptr ResourceAPI::searchProjects(SearchArgs&& args, Callback<QList<ModPlatform::IndexedPack::Ptr>>&& callbacks) const
 {
@@ -29,7 +30,8 @@ Task::Ptr ResourceAPI::searchProjects(SearchArgs&& args, Callback<QList<ModPlatf
         if (parse_error.error != QJsonParseError::NoError) {
             qWarning() << "Error while parsing JSON response from" << debugName() << "at" << parse_error.offset
                        << "reason:" << parse_error.errorString();
-            qWarning() << *response;
+            qWarning() << "Response body excerpt:"
+                       << Privacy::sanitizeResponseBody(*response, 2048);
 
             callbacks.on_fail(parse_error.errorString(), -1);
 
@@ -94,7 +96,8 @@ Task::Ptr ResourceAPI::getProjectVersions(VersionSearchArgs&& args, Callback<QVe
         if (parse_error.error != QJsonParseError::NoError) {
             qWarning() << "Error while parsing JSON response for getting versions at" << parse_error.offset
                        << "reason:" << parse_error.errorString();
-            qWarning() << *response;
+            qWarning() << "Response body excerpt:"
+                       << Privacy::sanitizeResponseBody(*response, 2048);
             return;
         }
 
@@ -121,7 +124,8 @@ Task::Ptr ResourceAPI::getProjectVersions(VersionSearchArgs&& args, Callback<QVe
             };
             std::sort(unsortedVersions.begin(), unsortedVersions.end(), orderSortPredicate);
         } catch (const JSONValidationError& e) {
-            qDebug() << doc;
+            qDebug() << "Provider response excerpt:"
+                     << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
             qWarning() << "Error while reading" << debugName() << "resource version:" << e.cause();
         }
 
@@ -159,7 +163,8 @@ Task::Ptr ResourceAPI::getProjectInfo(ProjectInfoArgs&& args, Callback<ModPlatfo
         if (parse_error.error != QJsonParseError::NoError) {
             qWarning() << "Error while parsing JSON response for mod info at" << parse_error.offset
                        << "reason:" << parse_error.errorString();
-            qWarning() << *response;
+            qWarning() << "Response body excerpt:"
+                       << Privacy::sanitizeResponseBody(*response, 2048);
             return;
         }
         try {
@@ -169,7 +174,8 @@ Task::Ptr ResourceAPI::getProjectInfo(ProjectInfoArgs&& args, Callback<ModPlatfo
             loadIndexedPack(*pack, obj);
             loadExtraPackInfo(*pack, obj);
         } catch (const JSONValidationError& e) {
-            qDebug() << doc;
+            qDebug() << "Provider response excerpt:"
+                     << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
             qWarning() << "Error while reading" << debugName() << "resource info:" << e.cause();
         }
         callbacks.on_succeed(pack);
@@ -214,7 +220,8 @@ Task::Ptr ResourceAPI::getDependencyVersion(DependencySearchArgs&& args, Callbac
         if (parse_error.error != QJsonParseError::NoError) {
             qWarning() << "Error while parsing JSON response for getting dependency version at" << parse_error.offset
                        << "reason:" << parse_error.errorString();
-            qWarning() << *response;
+            qWarning() << "Response body excerpt:"
+                       << Privacy::sanitizeResponseBody(*response, 2048);
             return;
         }
 

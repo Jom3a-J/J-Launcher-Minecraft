@@ -46,11 +46,13 @@
 #include "FileSystem.h"
 #include "InstanceList.h"
 #include "Json.h"
+#include "MMCZip.h"
 
 #include "minecraft/MinecraftInstance.h"
 #include "minecraft/PackProfile.h"
 
 #include "modplatform/helpers/OverrideUtils.h"
+#include "modplatform/flame/CurseForgeHash.h"
 
 #include "settings/INISettingsObject.h"
 
@@ -59,7 +61,12 @@
 #include "ui/dialogs/CustomMessageBox.h"
 
 #include <QDebug>
+#include <QDir>
+#include <QEventLoop>
+#include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <utility>
 
 #include "HardwareInfo.h"
@@ -67,6 +74,8 @@
 #include "minecraft/World.h"
 #include "minecraft/mod/tasks/LocalResourceParse.h"
 #include "net/ApiDownload.h"
+#include "logs/Privacy.h"
+#include "net/ChecksumValidator.h"
 #include "ui/dialogs/UntrustedModsDialog.h"
 #include "ui/pages/modplatform/OptionalModDialog.h"
 
@@ -181,7 +190,8 @@ void FlameCreationTask::executeTask()
             if (oldFile != oldFiles.end()) {
                 // We found a match, but is it a different version?
                 if (oldFile->fileId == file->fileId) {
-                    qDebug() << "Removed file at" << file->targetFolder << "with id" << file->fileId << "from list of downloads";
+                    qDebug() << "Removed file at" << Privacy::sanitizePath(file->targetFolder)
+                             << "with id" << file->fileId << "from list of downloads";
 
                     oldFiles.remove(file.key());
                     filesIterator = files.erase(filesIterator);
@@ -222,7 +232,8 @@ void FlameCreationTask::executeTask()
                     if (parseError.error != QJsonParseError::NoError) {
                         qWarning() << "Error while parsing JSON response from Flame files task at" << parseError.offset
                                    << "reason:" << parseError.errorString();
-                        qWarning() << *rawResponse;
+                        qWarning() << "Response body excerpt:"
+                                   << Privacy::sanitizeResponseBody(*rawResponse, 2048);
                         return;
                     }
 
@@ -386,6 +397,11 @@ void FlameCreationTask::createInstance()
 
     } catch (const JSONValidationError& e) {
         emitFailed(tr("Could not understand pack manifest:\n") + e.cause());
+        return;
+    }
+
+    QEventLoop serverPackLoop;
+    if (!resolveServerPackDownload(serverPackLoop)) {
         return;
     }
 
@@ -608,6 +624,38 @@ void FlameCreationTask::setupDownloadJob()
     m_filesJob.reset(new NetJob(tr("Mod Download Flame"), APPLICATION->network()));
     auto results = m_modIdResolver->getResults().files;
 
+    QFile clientOnlyFile;
+    QFile serverOnlyFile;
+    QFile serverIncludeFile;
+    QFile serverUnknownFile;
+    if (shouldCreateServerPair()) {
+        const QString clientOnlyPath = FS::PathCombine(m_stagingPath, "server-pack", "client-only.txt");
+        const QString serverOnlyPath = FS::PathCombine(m_stagingPath, "server-pack", "server-only.txt");
+        const QString serverIncludePath = FS::PathCombine(m_stagingPath, "server-pack", "include.txt");
+        const QString serverUnknownPath = FS::PathCombine(m_stagingPath, "server-pack", "unknown.txt");
+        FS::ensureFilePathExists(clientOnlyPath);
+        FS::ensureFilePathExists(serverOnlyPath);
+        FS::ensureFilePathExists(serverIncludePath);
+        FS::ensureFilePathExists(serverUnknownPath);
+        clientOnlyFile.setFileName(clientOnlyPath);
+        serverOnlyFile.setFileName(serverOnlyPath);
+        serverIncludeFile.setFileName(serverIncludePath);
+        serverUnknownFile.setFileName(serverUnknownPath);
+        if (!clientOnlyFile.open(QIODevice::WriteOnly | QIODevice::Text)
+            || !serverOnlyFile.open(QIODevice::WriteOnly | QIODevice::Text)
+            || !serverIncludeFile.open(QIODevice::WriteOnly | QIODevice::Text)
+            || !serverUnknownFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            emitFailed(tr("Could not prepare the CurseForge server compatibility manifest."));
+            return;
+        }
+        QFile providerMarker(FS::PathCombine(m_stagingPath, "server-pack", "provider.txt"));
+        if (!providerMarker.open(QIODevice::WriteOnly | QIODevice::Text)
+            || providerMarker.write("curseforge\n") != 11) {
+            emitFailed(tr("Could not record the CurseForge compatibility metadata."));
+            return;
+        }
+    }
+
     for (const auto& result : results) {
         auto fileName = result.version.fileName;
         fileName = FS::RemoveInvalidPathChars(fileName);
@@ -617,18 +665,66 @@ void FlameCreationTask::setupDownloadJob()
             relpath += ".disabled";
         }
 
+        const QString serverRelativePath = QDir::fromNativeSeparators(FS::PathCombine(result.targetFolder, fileName));
+
         relpath = FS::PathCombine("minecraft", relpath);
         auto path = FS::PathCombine(m_stagingPath, relpath);
 
+        if (clientOnlyFile.isOpen() && result.version.side == ModPlatform::SideType::ClientSide) {
+            clientOnlyFile.write(serverRelativePath.toUtf8());
+            clientOnlyFile.write("\n");
+        }
+        if (serverIncludeFile.isOpen()
+            && (result.required || m_selectedOptionalMods.contains(FS::PathCombine(result.targetFolder, fileName)))
+            && result.version.side != ModPlatform::SideType::ClientSide) {
+            auto* destination = &serverIncludeFile;
+            if (result.version.side == ModPlatform::SideType::ServerSide) {
+                destination = &serverOnlyFile;
+            } else if (result.version.side == ModPlatform::SideType::NoSide) {
+                destination = &serverUnknownFile;
+            }
+            destination->write(serverRelativePath.toUtf8());
+            destination->write("\n");
+        }
+
         if (!result.version.downloadUrl.isEmpty()) {
-            qDebug() << "Will download" << result.version.downloadUrl << "to" << path;
+            qDebug() << "Will download" << Privacy::sanitizeUrl(result.version.downloadUrl)
+                     << "to" << Privacy::sanitizePath(path);
             auto dl = Net::ApiDownload::makeFile(result.version.downloadUrl, path);
+            if (auto* validator = Flame::createCurseForgeChecksumValidator(result.version.hash_type, result.version.hash)) {
+                dl->addValidator(validator);
+            }
             m_filesJob->addNetAction(dl);
         }
     }
 
+    if (clientOnlyFile.isOpen()) {
+        clientOnlyFile.close();
+    }
+    if (serverIncludeFile.isOpen()) {
+        serverIncludeFile.close();
+    }
+    if (serverOnlyFile.isOpen()) {
+        serverOnlyFile.close();
+    }
+    if (serverUnknownFile.isOpen()) {
+        serverUnknownFile.close();
+    }
+
+    if (shouldCreateServerPair() && !m_serverPackDownloadUrl.isEmpty()) {
+        m_serverPackArchivePath = FS::PathCombine(m_stagingPath, "server-pack", "published-server-pack.zip");
+        auto serverPackDownload = Net::ApiDownload::makeFile(m_serverPackDownloadUrl, m_serverPackArchivePath);
+        if (auto* validator = Flame::createCurseForgeChecksumValidator(m_serverPackHashType, m_serverPackHash)) {
+            serverPackDownload->addValidator(validator);
+        }
+        m_filesJob->addNetAction(serverPackDownload);
+    }
+
     connect(m_filesJob.get(), &NetJob::finished, this, [this]() {
         m_filesJob.reset();
+        if (!extractServerPack()) {
+            return;
+        }
         validateOtherResources();
     });
     connect(m_filesJob.get(), &NetJob::failed, this, [this](QString reason) {
@@ -643,6 +739,142 @@ void FlameCreationTask::setupDownloadJob()
 
     setStatus(tr("Downloading mods..."));
     m_filesJob->start();
+}
+
+bool FlameCreationTask::resolveServerPackDownload(QEventLoop& loop)
+{
+    m_serverPackDownloadUrl.clear();
+    m_serverPackHashType.clear();
+    m_serverPackHash.clear();
+    m_serverPackError.clear();
+    if (!shouldCreateServerPair()) {
+        return true;
+    }
+    if (m_managedId.isEmpty() || m_serverPackFileId.isEmpty()) {
+        logWarning(tr("CurseForge does not publish a dedicated server pack for this version. "
+                      "The launcher will derive the server content from the client pack and "
+                      "exclude files marked as client-only."));
+        return true;
+    }
+
+    auto [job, response] = FlameAPI::get().getFile(m_managedId, m_serverPackFileId);
+    connect(job.get(), &Task::succeeded, this, [this, response, &loop]() {
+        QJsonParseError parseError{};
+        const QJsonDocument document = QJsonDocument::fromJson(*response, &parseError);
+        if (parseError.error != QJsonParseError::NoError || !document.object().value("data").isObject()) {
+            m_serverPackError = tr("Could not understand the CurseForge server-pack response.");
+            loop.quit();
+            return;
+        }
+        try {
+            const QJsonObject fileObject = document.object().value("data").toObject();
+            const qint64 addonId = Json::requireInteger(fileObject, "modId");
+            const qint64 fileId = Json::requireInteger(fileObject, "id");
+            bool validAddonId = false;
+            bool validFileId = false;
+            const qint64 requestedAddonId = m_managedId.toLongLong(&validAddonId);
+            const qint64 requestedFileId = m_serverPackFileId.toLongLong(&validFileId);
+            if (!validAddonId || !validFileId || addonId != requestedAddonId || fileId != requestedFileId) {
+                m_serverPackError = tr("CurseForge returned metadata for a different server pack.");
+            }
+
+            const QJsonValue isServerPack = fileObject.value(QStringLiteral("isServerPack"));
+            if (m_serverPackError.isEmpty() && isServerPack.isBool() && !isServerPack.toBool()) {
+                m_serverPackError = tr("The file referenced by CurseForge is not marked as a server pack.");
+            }
+
+            const QJsonValue parentFileId = fileObject.value(QStringLiteral("parentProjectFileId"));
+            bool validParentId = false;
+            const qint64 requestedParentId = m_managedVersionId.toLongLong(&validParentId);
+            if (m_serverPackError.isEmpty() && validParentId && parentFileId.isDouble()
+                && parentFileId.toInteger() > 0 && parentFileId.toInteger() != requestedParentId) {
+                m_serverPackError = tr("The CurseForge server pack belongs to a different modpack version.");
+            }
+            if (m_serverPackError.isEmpty()) {
+                const QJsonValue hashesValue = fileObject.value(QStringLiteral("hashes"));
+                if (!hashesValue.isUndefined() && !hashesValue.isArray()) {
+                    m_serverPackError = tr("CurseForge returned malformed server-pack hash metadata.");
+                } else if (hashesValue.isUndefined() || hashesValue.toArray().isEmpty()) {
+                    logWarning(tr("CurseForge did not publish a supported hash for the dedicated server pack. "
+                                  "The archive will be structurally validated but remains unverified."));
+                } else {
+                    bool foundSupportedHash = false;
+                    for (const QJsonValue& hashValue : hashesValue.toArray()) {
+                        if (const auto parsedHash = Flame::parseCurseForgeHash(hashValue.toObject())) {
+                            m_serverPackHashType = parsedHash->algorithmName;
+                            m_serverPackHash = parsedHash->value;
+                            foundSupportedHash = true;
+                            break;
+                        }
+                    }
+                    if (!foundSupportedHash) {
+                        m_serverPackError = tr("CurseForge returned no valid supported SHA-1 or MD5 hash for the dedicated server pack.");
+                    }
+                }
+            }
+        } catch (const JSONValidationError& e) {
+            m_serverPackError = tr("Could not understand the CurseForge server-pack metadata:\n") + e.cause();
+        }
+        loop.quit();
+    });
+    connect(job.get(), &Task::failed, this, [this, &loop](const QString& reason) {
+        m_serverPackError = tr("Could not resolve the CurseForge server pack:\n%1").arg(reason);
+        loop.quit();
+    });
+    job->start();
+    loop.exec();
+    if (!m_serverPackError.isEmpty()) {
+        emitFailed(m_serverPackError);
+        return false;
+    }
+
+    auto [downloadUrlJob, downloadUrlResponse] = FlameAPI::get().getFileDownloadUrl(m_managedId, m_serverPackFileId);
+    connect(downloadUrlJob.get(), &Task::succeeded, this, [this, downloadUrlResponse, &loop]() {
+        QString parseError;
+        m_serverPackDownloadUrl = FlameAPI::loadFileDownloadUrl(*downloadUrlResponse, &parseError);
+        if (m_serverPackDownloadUrl.isEmpty()) {
+            m_serverPackError = parseError.isEmpty()
+                                    ? tr("The CurseForge server pack is not available for third-party download.")
+                                    : parseError;
+        }
+        loop.quit();
+    });
+    connect(downloadUrlJob.get(), &Task::failed, this, [this, &loop](const QString& reason) {
+        m_serverPackError = tr("Could not get the CurseForge server-pack download URL:\n%1").arg(reason);
+        loop.quit();
+    });
+    downloadUrlJob->start();
+    loop.exec();
+    if (!m_serverPackError.isEmpty()) {
+        emitFailed(m_serverPackError);
+        return false;
+    }
+    return true;
+}
+
+bool FlameCreationTask::extractServerPack()
+{
+    if (!shouldCreateServerPair() || m_serverPackDownloadUrl.isEmpty()) {
+        return true;
+    }
+
+    QString failedEntry;
+    if (!MMCZip::validateArchive(m_serverPackArchivePath, &failedEntry)) {
+        emitFailed(tr("The CurseForge server-pack archive is corrupt (failed integrity check at %1).")
+                       .arg(failedEntry.isEmpty() ? tr("an unknown file") : failedEntry));
+        return false;
+    }
+    const QString serverRoot = FS::PathCombine(m_stagingPath, "server-pack", "server-files");
+    if (!MMCZip::extractDir(m_serverPackArchivePath, serverRoot)) {
+        emitFailed(tr("Failed to extract the CurseForge server-pack archive."));
+        return false;
+    }
+    QFile marker(FS::PathCombine(m_stagingPath, "server-pack", "published-server-pack.txt"));
+    if (!marker.open(QIODevice::WriteOnly | QIODevice::Text) || marker.write("curseforge\n") != 11) {
+        emitFailed(tr("Could not record the downloaded CurseForge server pack."));
+        return false;
+    }
+    return true;
 }
 
 /// @brief copy the matched blocked mods to the instance staging area

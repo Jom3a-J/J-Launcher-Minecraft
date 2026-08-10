@@ -25,8 +25,46 @@
 
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <utility>
 
 namespace Net {
+
+inline bool isCurseForgeApiRequest(const QUrl& url)
+{
+    const QUrl apiBase(BuildConfig.FLAME_BASE_URL);
+    return url.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0
+        && url.host().compare(apiBase.host(), Qt::CaseInsensitive) == 0
+        && url.port(443) == apiBase.port(443);
+}
+
+inline bool isModrinthApiRequest(const QUrl& url)
+{
+    const auto isConfiguredEndpoint = [&url](const QUrl& configuredBase) {
+        return url.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0
+            && url.host().compare(configuredBase.host(), Qt::CaseInsensitive) == 0
+            && url.port(443) == configuredBase.port(443);
+    };
+    return isConfiguredEndpoint(QUrl(BuildConfig.MODRINTH_PROD_URL))
+        || isConfiguredEndpoint(QUrl(BuildConfig.MODRINTH_STAGING_URL));
+}
+
+class CurseForgeApiKeyHeaderProxy final : public HeaderProxy {
+   public:
+    explicit CurseForgeApiKeyHeaderProxy(QByteArray apiKey)
+        : m_apiKey(std::move(apiKey))
+    {}
+
+    QList<HeaderPair> headers(const QNetworkRequest& request) const override
+    {
+        if (m_apiKey.isEmpty() || !isCurseForgeApiRequest(request.url())) {
+            return {};
+        }
+        return { { .headerName = "x-api-key", .headerValue = m_apiKey } };
+    }
+
+   private:
+    QByteArray m_apiKey;
+};
 
 struct ModrinthDownloadMeta {
     QString reason;
@@ -67,10 +105,9 @@ class ApiHeaderProxy : public HeaderProxy {
         QList<HeaderPair> hdrs;
         const auto host = request.url().host();
 
-        if (APPLICATION->capabilities() & Application::SupportsFlame &&
-            (host == QUrl(BuildConfig.FLAME_BASE_URL).host() || host == BuildConfig.FLAME_DOWNLOAD_HOST)) {
+        if (APPLICATION->capabilities() & Application::SupportsFlame && isCurseForgeApiRequest(request.url())) {
             hdrs.append({ .headerName = "x-api-key", .headerValue = APPLICATION->getFlameAPIKey().toUtf8() });
-        } else if (host == QUrl(BuildConfig.MODRINTH_PROD_URL).host() || host == QUrl(BuildConfig.MODRINTH_STAGING_URL).host()) {
+        } else if (isModrinthApiRequest(request.url())) {
             QString token = APPLICATION->getModrinthAPIToken();
             if (!token.isNull()) {
                 hdrs.append({ .headerName = "Authorization", .headerValue = token.toUtf8() });

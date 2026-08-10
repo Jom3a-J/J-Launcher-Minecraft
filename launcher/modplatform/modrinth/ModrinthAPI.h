@@ -117,6 +117,8 @@ class ModrinthAPI final : public ResourceAPI {
         switch (type) {
             case ModPlatform::ResourceType::Mod:
                 return "mod";
+            case ModPlatform::ResourceType::Plugin:
+                return "plugin";
             case ModPlatform::ResourceType::ResourcePack:
                 return "resourcepack";
             case ModPlatform::ResourceType::ShaderPack:
@@ -139,6 +141,13 @@ class ModrinthAPI final : public ResourceAPI {
 
         if (args.loaders.has_value() && args.loaders.value() != 0) {
             facets_list.append(QString("[%1]").arg(getModLoaderFilters(args.loaders.value())));
+        }
+        if (args.loaderNames.has_value() && !args.loaderNames->isEmpty()) {
+            QStringList namedLoaders;
+            for (const auto& loader : *args.loaderNames) {
+                namedLoaders.append(QString("\"categories:%1\"").arg(loader));
+            }
+            facets_list.append(QString("[%1]").arg(namedLoaders.join(',')));
         }
         if (args.versions.has_value() && !args.versions.value().empty()) {
             facets_list.append(QString("[%1]").arg(getGameVersionsArray(args.versions.value())));
@@ -201,7 +210,9 @@ class ModrinthAPI final : public ResourceAPI {
         if (args.mcVersions.has_value()) {
             get_arguments.append(QString("game_versions=[%1]").arg(getGameVersionsString(args.mcVersions.value())));
         }
-        if (args.loaders.has_value()) {
+        if (args.loaderNames.has_value() && !args.loaderNames->isEmpty()) {
+            get_arguments.append(QString("loaders=[\"%1\"]").arg(args.loaderNames->join("\",\"")));
+        } else if (args.loaders.has_value()) {
             get_arguments.append(QString("loaders=[\"%1\"]").arg(getModLoaderStrings(args.loaders.value()).join("\",\"")));
         }
         get_arguments.append(QString("include_changelog=%1").arg(args.includeChangelog ? "true" : "false"));

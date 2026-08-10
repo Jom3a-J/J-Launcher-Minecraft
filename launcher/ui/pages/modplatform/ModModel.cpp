@@ -21,8 +21,18 @@
 
 namespace ResourceDownload {
 
-ModModel::ModModel(BaseInstance& base_inst, const ResourceAPI* api, const QString& debugName, QString metaEntryBase)
-    : ResourceModel(api), m_base_instance(base_inst), m_debugName(debugName + " (Model)"), m_metaEntryBase(std::move(metaEntryBase))
+ModModel::ModModel(BaseInstance& base_inst,
+                   const ResourceAPI* api,
+                   const QString& debugName,
+                   QString metaEntryBase,
+                   ModPlatform::ResourceType resourceType,
+                   QStringList loaderNames)
+    : ResourceModel(api),
+      m_base_instance(base_inst),
+      m_resourceType(resourceType),
+      m_loaderNames(std::move(loaderNames)),
+      m_debugName(debugName + " (Model)"),
+      m_metaEntryBase(std::move(metaEntryBase))
 {}
 
 /******** Make data requests ********/
@@ -52,7 +62,7 @@ ResourceAPI::SearchArgs ModModel::createSearchArguments()
 
     auto sort = getCurrentSortingMethodByIndex();
 
-    return { .type = ModPlatform::ResourceType::Mod,
+    return { .type = m_resourceType,
              .offset = m_next_search_offset,
              .search = m_search_term,
              .sorting = sort,
@@ -60,7 +70,8 @@ ResourceAPI::SearchArgs ModModel::createSearchArguments()
              .versions = versions,
              .side = side,
              .categoryIds = categories,
-             .openSource = m_filter->openSource };
+             .openSource = m_filter->openSource,
+             .loaderNames = m_loaderNames.isEmpty() ? std::nullopt : std::optional<QStringList>(m_loaderNames) };
 }
 
 ResourceAPI::VersionSearchArgs ModModel::createVersionsArguments(const QModelIndex& index)
@@ -80,7 +91,11 @@ ResourceAPI::VersionSearchArgs ModModel::createVersionsArguments(const QModelInd
         loaders = m_filter->loaders;
     }
 
-    return { .pack = pack, .mcVersions = versions, .loaders = loaders, .resourceType = ModPlatform::ResourceType::Mod };
+    return { .pack = pack,
+             .mcVersions = versions,
+             .loaders = loaders,
+             .resourceType = m_resourceType,
+             .loaderNames = m_loaderNames.isEmpty() ? std::nullopt : std::optional<QStringList>(m_loaderNames) };
 }
 
 ResourceAPI::ProjectInfoArgs ModModel::createInfoArguments(const QModelIndex& index)

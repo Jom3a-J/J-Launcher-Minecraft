@@ -40,6 +40,7 @@
 #include "ui_APIPage.h"
 
 #include <QFileDialog>
+#include <QJsonDocument>
 #include <QMessageBox>
 #include <QRegularExpression>
 #include <QStandardPaths>
@@ -49,7 +50,11 @@
 
 #include "Application.h"
 #include "BuildConfig.h"
+#include "logs/Privacy.h"
+#include "net/ApiHeaderProxy.h"
+#include "net/Download.h"
 #include "net/PasteUpload.h"
+#include "settings/CredentialStore.h"
 #include "settings/SettingsObject.h"
 #include "tools/BaseProfiler.h"
 
@@ -64,6 +69,19 @@ APIPage::APIPage(QWidget* parent) : QWidget(parent), ui(new Ui::APIPage)
         QRegularExpression::anchoredPattern("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"));
 
     ui->setupUi(this);
+
+    ui->flameKey->setEchoMode(QLineEdit::Password);
+    ui->flameKey->setPlaceholderText(
+        BuildConfig.FLAME_API_KEY.trimmed().isEmpty()
+            ? tr("Enter your CurseForge API key")
+            : tr("Use bundled key"));
+    updateFlameKeyStorageNote();
+    ui->flameKeyStatus->clear();
+    connect(ui->testFlameKeyButton, &QPushButton::clicked,
+            this, &APIPage::testFlameKey);
+    connect(ui->flameKey, &QLineEdit::textChanged, this, [this] {
+        ui->flameKeyStatus->clear();
+    });
 
     for (auto pasteType : comboBoxEntries) {
         ui->pasteTypeComboBox->addItem(PasteUpload::PasteTypes.at(pasteType).name, pasteType);
@@ -148,8 +166,7 @@ void APIPage::loadSettings()
     ui->resourceURL->setText(resourceURL);
     QString fmlLibsURL = s->get("LegacyFMLLibsURLOverride").toString();
     ui->legacyFMLLibsURL->setText(fmlLibsURL);
-    QString flameKey = s->get("FlameKeyOverride").toString();
-    ui->flameKey->setText(flameKey);
+    ui->flameKey->setText(APPLICATION->getFlameAPIKeyOverride());
     QString modrinthToken = s->get("ModrinthToken").toString();
     ui->modrinthToken->setText(modrinthToken);
     QString customUserAgent = s->get("UserAgentOverride").toString();
@@ -157,7 +174,7 @@ void APIPage::loadSettings()
     ui->technicClientID->setText(s->get("TechnicClientID").toString());
 }
 
-void APIPage::applySettings()
+bool APIPage::applySettings()
 {
     auto s = APPLICATION->settings();
 
@@ -198,21 +215,98 @@ void APIPage::applySettings()
     s->set("MetaRefreshOnLaunch", ui->metaRefreshOnLaunchCB->checkState() == Qt::Checked);
     s->set("ResourceURLOverride", resourceURL.toString());
     s->set("LegacyFMLLibsURLOverride", fmlLibsURL.toString());
-    QString flameKey = ui->flameKey->text();
-    s->set("FlameKeyOverride", flameKey);
+    QString credentialError;
+    if (!APPLICATION->setFlameAPIKeyOverride(ui->flameKey->text(),
+                                             &credentialError)) {
+        QMessageBox::critical(
+            this, tr("CurseForge API Key"),
+            tr("The API key could not be saved securely.\n\n%1")
+                .arg(credentialError));
+        return false;
+    }
     QString modrinthToken = ui->modrinthToken->text();
     s->set("ModrinthToken", modrinthToken);
     s->set("UserAgentOverride", ui->userAgentLineEdit->text());
     s->set("TechnicClientID", ui->technicClientID->text());
+    return true;
 }
 
 bool APIPage::apply()
 {
-    applySettings();
+    if (!applySettings()) {
+        return false;
+    }
+    APPLICATION->updateCapabilities();
     return true;
+}
+
+void APIPage::updateFlameKeyStorageNote()
+{
+    ui->label_10->setText(
+        CredentialStore::isPersistent()
+            ? tr("Your personal key is stored in the operating system's secure credential store and is only sent to the CurseForge API.")
+            : tr("Secure persistent storage is unavailable on this platform. Your personal key is kept only for this launcher session."));
+}
+
+void APIPage::testFlameKey()
+{
+    const QString key = ui->flameKey->text().trimmed().isEmpty()
+        ? BuildConfig.FLAME_API_KEY.trimmed()
+        : ui->flameKey->text().trimmed();
+    if (key.isEmpty()) {
+        ui->flameKeyStatus->setText(tr("Enter an API key before testing it."));
+        return;
+    }
+
+    if (m_flameKeyTestJob && m_flameKeyTestJob->isRunning()) {
+        m_flameKeyTestJob->abort();
+    }
+
+    auto [request, response] = Net::Download::makeByteArray(
+        QUrl(BuildConfig.FLAME_BASE_URL + QStringLiteral("/games/432")));
+    request->addHeaderProxy(
+        std::make_unique<Net::CurseForgeApiKeyHeaderProxy>(key.toUtf8()));
+
+    m_flameKeyTestJob =
+        makeShared<NetJob>(tr("Testing CurseForge API key"), APPLICATION->network());
+    m_flameKeyTestJob->setAskRetry(false);
+    m_flameKeyTestJob->addNetAction(request);
+    ui->testFlameKeyButton->setEnabled(false);
+    ui->flameKeyStatus->setText(tr("Testing API key..."));
+
+    connect(m_flameKeyTestJob.get(), &Task::succeeded, this,
+            [this, response] {
+                QJsonParseError parseError{};
+                const QJsonDocument document =
+                    QJsonDocument::fromJson(*response, &parseError);
+                if (parseError.error != QJsonParseError::NoError
+                    || !document.object().value(QStringLiteral("data")).isObject()) {
+                    ui->flameKeyStatus->setText(
+                        tr("CurseForge accepted the request but returned an invalid response."));
+                    return;
+                }
+                ui->flameKeyStatus->setText(tr("API key accepted by CurseForge."));
+            });
+    connect(m_flameKeyTestJob.get(), &Task::failed, this,
+            [this, request](const QString& reason) {
+                const int status = request->replyStatusCode();
+                if (status == 401 || status == 403) {
+                    ui->flameKeyStatus->setText(
+                        tr("CurseForge rejected this API key."));
+                } else {
+                    ui->flameKeyStatus->setText(
+                        tr("The key could not be tested: %1")
+                            .arg(Privacy::sanitizeText(reason)));
+                }
+            });
+    connect(m_flameKeyTestJob.get(), &Task::finished, this, [this] {
+        ui->testFlameKeyButton->setEnabled(true);
+    });
+    m_flameKeyTestJob->start();
 }
 
 void APIPage::retranslate()
 {
     ui->retranslateUi(this);
+    updateFlameKeyStorageNote();
 }

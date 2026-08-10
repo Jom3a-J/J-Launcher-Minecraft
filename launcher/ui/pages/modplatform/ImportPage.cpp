@@ -52,6 +52,7 @@
 #include "Json.h"
 
 #include "InstanceImportTask.h"
+#include "logs/Privacy.h"
 #include "net/NetJob.h"
 
 class UrlValidator : public QValidator {
@@ -126,7 +127,8 @@ void ImportPage::updateState()
             // format of url curseforge://install?addonId=IDHERE&fileId=IDHERE
             QUrlQuery query(url);
             if (query.allQueryItemValues("addonId").isEmpty() || query.allQueryItemValues("fileId").isEmpty()) {
-                qDebug() << "Invalid curseforge link:" << url;
+                qDebug() << "Invalid curseforge link:"
+                         << Privacy::sanitizeUrl(url);
                 return;
             }
             auto addonId = query.allQueryItemValues("addonId")[0];
@@ -137,7 +139,8 @@ void ImportPage::updateState()
             connect(job.get(), &NetJob::failed, this,
                     [this](QString reason) { CustomMessageBox::selectable(this, tr("Error"), reason, QMessageBox::Critical)->show(); });
             connect(job.get(), &NetJob::succeeded, this, [this, array, addonId, fileId] {
-                qDebug() << "Returned CFURL Json:\n" << array->toStdString().c_str();
+                qDebug() << "Returned CurseForge response:"
+                         << Privacy::sanitizeResponseBody(*array, 2048);
                 auto doc = Json::requireDocument(*array);
                 auto data = doc.object()["data"].toObject();
                 // No way to find out if it's a mod or a modpack before here

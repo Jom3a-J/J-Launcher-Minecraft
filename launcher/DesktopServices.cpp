@@ -38,11 +38,12 @@
 #include <QDir>
 #include <QProcess>
 #include "FileSystem.h"
+#include "logs/Privacy.h"
 
 namespace DesktopServices {
 bool openPath(const QFileInfo& path, bool ensureFolderPathExists)
 {
-    qDebug() << "Opening path" << path;
+    qDebug() << "Opening path" << Privacy::sanitizePath(path.absoluteFilePath());
     if (ensureFolderPathExists) {
         FS::ensureFolderPathExists(path);
     }
@@ -56,13 +57,14 @@ bool openPath(const QString& path, bool ensureFolderPathExists)
 
 bool run(const QString& application, const QStringList& args, const QString& workingDirectory, qint64* pid)
 {
-    qDebug() << "Running" << application << "with args" << args.join(' ');
+    qDebug() << "Running" << Privacy::sanitizePath(application) << "with args"
+             << Privacy::sanitizeText(args.join(' '));
     return QProcess::startDetached(application, args, workingDirectory, pid);
 }
 
 bool openUrl(const QUrl& url)
 {
-    qDebug() << "Opening URL" << url.toString();
+    qDebug() << "Opening URL" << Privacy::sanitizeUrl(url);
     return QDesktopServices::openUrl(url);
 }
 

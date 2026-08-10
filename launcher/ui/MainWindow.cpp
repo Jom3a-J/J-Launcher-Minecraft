@@ -46,6 +46,8 @@
 #include "ui_MainWindow.h"
 
 #include <QDir>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QFileInfo>
 #include <QUrl>
 #include <QUrlQuery>
@@ -61,6 +63,7 @@
 #include <QInputDialog>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QVBoxLayout>
 #include <QMainWindow>
 #include <QMenu>
 #include <QMenuBar>
@@ -77,6 +80,7 @@
 #include <BaseInstance.h>
 #include <BuildConfig.h>
 #include <DesktopServices.h>
+#include "logs/Privacy.h"
 #include <InstanceList.h>
 #include <MMCZip.h>
 #include <icons/IconList.h>
@@ -103,6 +107,7 @@
 #include "ui/dialogs/IconPickerDialog.h"
 #include "ui/dialogs/ImportResourceDialog.h"
 #include "ui/dialogs/NewInstanceDialog.h"
+#include "ui/pages/server/ServerListPage.h"
 #include "ui/dialogs/NewsDialog.h"
 #include "ui/dialogs/ProgressDialog.h"
 #include "ui/dialogs/skins/SkinManageDialog.h"
@@ -943,6 +948,27 @@ void MainWindow::on_actionAddInstance_triggered()
     addInstance();
 }
 
+void MainWindow::on_actionManageServers_triggered()
+{
+    auto* serverManager = APPLICATION->serverManager();
+    if (!serverManager) {
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Server Manager"));
+    dialog.setMinimumSize(760, 560);
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* serverPage = new ServerListPage(&dialog);
+    serverPage->setServerManager(serverManager);
+    layout->addWidget(serverPage);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::accept);
+    layout->addWidget(buttons);
+    dialog.exec();
+}
+
 void MainWindow::processURLs(QList<QUrl> urls)
 {
     // NOTE: This loop only processes one dropped file!
@@ -950,7 +976,7 @@ void MainWindow::processURLs(QList<QUrl> urls)
         if (url.isEmpty() || url.toString().trimmed().isEmpty())
             continue;
 
-        qDebug() << "Processing" << url;
+        qDebug() << "Processing" << Privacy::sanitizeUrl(url);
 
         // The isLocalFile() check below doesn't work as intended without an explicit scheme.
         if (url.scheme().isEmpty())
@@ -980,7 +1006,8 @@ void MainWindow::processURLs(QList<QUrl> urls)
                 }
 
                 if (query.allQueryItemValues("addonId").isEmpty() || query.allQueryItemValues("fileId").isEmpty()) {
-                    qDebug() << "Invalid curseforge link:" << url;
+                    qDebug() << "Invalid curseforge link:"
+                             << Privacy::sanitizeUrl(url);
                     continue;
                 }
 
@@ -995,7 +1022,8 @@ void MainWindow::processURLs(QList<QUrl> urls)
                 connect(job.get(), &Task::failed, this,
                         [this](QString reason) { CustomMessageBox::selectable(this, tr("Error"), reason, QMessageBox::Critical)->show(); });
                 connect(job.get(), &Task::succeeded, this, [this, array, addonId, fileId, &dl_url, &version] {
-                    qDebug() << "Returned CFURL Json:\n" << array->toStdString().c_str();
+                    qDebug() << "Returned CurseForge response:"
+                             << Privacy::sanitizeResponseBody(*array, 2048);
                     auto doc = Json::requireDocument(*array);
                     auto data = doc.object()["data"].toObject();
                     // No way to find out if it's a mod or a modpack before here

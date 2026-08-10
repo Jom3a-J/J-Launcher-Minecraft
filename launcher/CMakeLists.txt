@@ -415,6 +415,8 @@ set(SETTINGS_SOURCES
     settings/INIFile.h
     settings/INISettingsObject.cpp
     settings/INISettingsObject.h
+    settings/CredentialStore.cpp
+    settings/CredentialStore.h
     settings/OverrideSetting.cpp
     settings/OverrideSetting.h
     settings/PassthroughSetting.cpp
@@ -439,6 +441,8 @@ set(JAVA_SOURCES
 
     java/JavaMetadata.h
     java/JavaMetadata.cpp
+    java/JavaRuntimeInstallTask.h
+    java/JavaRuntimeInstallTask.cpp
     java/download/ArchiveDownloadTask.cpp
     java/download/ArchiveDownloadTask.h
     java/download/ManifestDownloadTask.cpp
@@ -539,6 +543,8 @@ set(FTB_SOURCES
 
 set(FLAME_SOURCES
     # Flame
+    modplatform/flame/CurseForgeHash.cpp
+    modplatform/flame/CurseForgeHash.h
     modplatform/flame/FlameModIndex.cpp
     modplatform/flame/FlameModIndex.h
     modplatform/flame/PackManifest.h
@@ -784,6 +790,11 @@ set(LOGIC_SOURCES
     ${ATLAUNCHER_SOURCES}
 )
 
+set(PRIVACY_SOURCES
+    logs/Privacy.cpp
+    logs/Privacy.h
+)
+
 if(APPLE AND Launcher_ENABLE_UPDATER)
     set (LOGIC_SOURCES ${LOGIC_SOURCES} ${MAC_UPDATE_SOURCES})
 else()
@@ -802,6 +813,34 @@ SET(LAUNCHER_SOURCES
     SysInfo.cpp
     HardwareInfo.cpp
     HardwareInfo.h
+
+    # Local server management
+    server/ServerManager.h
+    server/ServerManager.cpp
+    server/ServerModpackInstaller.h
+    server/ServerModpackInstaller.cpp
+    server/ServerPackCompatibility.h
+    server/ServerPackCompatibility.cpp
+    server/ServerInstance.h
+    server/ServerInstance.cpp
+    server/ServerPackImportTransaction.h
+    server/ServerPackImportTransaction.cpp
+    server/ServerDiagnostics.h
+    server/ServerDiagnostics.cpp
+    server/ServerContentUpdater.h
+    server/ServerContentUpdater.cpp
+    server/ServerPlayerAccess.h
+    server/ServerPlayerAccess.cpp
+    server/ServerProperties.h
+    server/ServerProperties.cpp
+    server/ServerDownloader.h
+    server/ServerDownloader.cpp
+    ui/pages/server/ServerListPage.h
+    ui/pages/server/ServerListPage.cpp
+    ui/pages/server/ServerListPage.ui
+    ui/pages/server/ServerSettingsPage.h
+    ui/pages/server/ServerSettingsPage.cpp
+    ui/pages/server/ServerSettingsPage.ui
 
     # console utils
     console/Console.h
@@ -1102,6 +1141,8 @@ SET(LAUNCHER_SOURCES
     ui/dialogs/ChooseOfflineNameDialog.h
     ui/dialogs/UntrustedModsDialog.cpp
     ui/dialogs/UntrustedModsDialog.h
+    ui/dialogs/CreateServerDialog.cpp
+    ui/dialogs/CreateServerDialog.h
 
     ui/dialogs/skins/SkinManageDialog.cpp
     ui/dialogs/skins/SkinManageDialog.h
@@ -1248,7 +1289,7 @@ endif()
 ####### Targets ########
 
 # Add executable
-add_library(Launcher_logic STATIC ${LOGIC_SOURCES} ${LAUNCHER_SOURCES} ${LAUNCHER_RESOURCES})
+add_library(Launcher_logic STATIC ${LOGIC_SOURCES} ${LAUNCHER_SOURCES} ${PRIVACY_SOURCES} ${LAUNCHER_RESOURCES})
 target_include_directories(Launcher_logic PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(Launcher_logic PUBLIC LAUNCHER_APPLICATION)
 
@@ -1264,6 +1305,10 @@ target_link_libraries(Launcher_logic
     BuildConfig
     Qt${QT_VERSION_MAJOR}::Widgets
 )
+
+if(WIN32)
+    target_link_libraries(Launcher_logic Advapi32)
+endif()
 
 if(TARGET PkgConfig::libqrencode)
     target_link_libraries(Launcher_logic PkgConfig::libqrencode)
@@ -1368,7 +1413,7 @@ endif()
 
 if(Launcher_BUILD_UPDATER)
     # Updater
-    add_library(prism_updater_logic STATIC ${PRISMUPDATER_SOURCES} ${TASKS_SOURCES})
+    add_library(prism_updater_logic STATIC ${PRISMUPDATER_SOURCES} ${TASKS_SOURCES} ${PRIVACY_SOURCES})
     target_include_directories(prism_updater_logic PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
     if(${Launcher_USE_PCH})
@@ -1420,7 +1465,7 @@ endif()
 
 if(WIN32 OR (DEFINED Launcher_BUILD_FILELINKER AND Launcher_BUILD_FILELINKER))
     # File link
-    add_library(filelink_logic STATIC ${LINKEXE_SOURCES})
+    add_library(filelink_logic STATIC ${LINKEXE_SOURCES} ${PRIVACY_SOURCES})
 
     target_include_directories(filelink_logic PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 

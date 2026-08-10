@@ -36,6 +36,7 @@
 
 #include "ImgurUpload.h"
 #include "BuildConfig.h"
+#include "logs/Privacy.h"
 #include "net/RawHeaderProxy.h"
 
 #include <QDebug>
@@ -52,7 +53,9 @@ QNetworkReply* ImgurUpload::getReply(QNetworkRequest& request)
     auto file = new QFile(m_fileInfo.absoluteFilePath(), this);
 
     if (!file->open(QFile::ReadOnly)) {
-        emitFailed(tr("Could not open file %1 for reading: %2").arg(m_fileInfo.absoluteFilePath()).arg(file->errorString()));
+        emitFailed(tr("Could not open file %1 for reading: %2")
+                       .arg(Privacy::sanitizePath(m_fileInfo.absoluteFilePath()))
+                       .arg(Privacy::sanitizeText(file->errorString())));
         return nullptr;
     }
 
@@ -105,7 +108,8 @@ auto ImgurUpload::Sink::finalize(QNetworkReply&) -> Task::State
     }
     auto object = doc.object();
     if (!object.value("success").toBool()) {
-        qDebug() << "Screenshot upload not successful:" << doc.toJson();
+        qDebug() << "Screenshot upload returned an unsuccessful response; "
+                    "response body omitted.";
         m_fail_reason = "Screenshot was not uploaded successfully";
         return Task::State::Failed;
     }

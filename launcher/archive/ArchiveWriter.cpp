@@ -22,6 +22,7 @@
 
 #include <QFile>
 #include <QFileInfo>
+#include "logs/Privacy.h"
 
 #include <memory>
 
@@ -61,13 +62,13 @@ bool ArchiveWriter::open()
     archive_write_set_format_by_name(m_archive, format.constData());
 
     if (archive_write_set_options(m_archive, "hdrcharset=UTF-8") != ARCHIVE_OK) {
-        qCritical() << "Failed to open archive file:" << m_filename << "-" << archive_error_string(m_archive);
+        qCritical() << "Failed to open archive file:" << Privacy::sanitizePath(m_filename) << "-" << archive_error_string(m_archive);
         return false;
     }
 
     auto archiveNameW = m_filename.toStdWString();
     if (archive_write_open_filename_w(m_archive, archiveNameW.data()) != ARCHIVE_OK) {
-        qCritical() << "Failed to open archive file:" << m_filename << "-" << archive_error_string(m_archive);
+        qCritical() << "Failed to open archive file:" << Privacy::sanitizePath(m_filename) << "-" << archive_error_string(m_archive);
         return false;
     }
 
@@ -79,11 +80,11 @@ bool ArchiveWriter::close()
     bool success = true;
     if (m_archive) {
         if (archive_write_close(m_archive) != ARCHIVE_OK) {
-            qCritical() << "Failed to close archive" << m_filename << "-" << archive_error_string(m_archive);
+            qCritical() << "Failed to close archive" << Privacy::sanitizePath(m_filename) << "-" << archive_error_string(m_archive);
             success = false;
         }
         if (archive_write_free(m_archive) != ARCHIVE_OK) {
-            qCritical() << "Failed to free archive" << m_filename << "-" << archive_error_string(m_archive);
+            qCritical() << "Failed to free archive" << Privacy::sanitizePath(m_filename) << "-" << archive_error_string(m_archive);
             success = false;
         }
         m_archive = nullptr;
@@ -95,7 +96,7 @@ bool ArchiveWriter::addFile(const QString& fileName, const QString& fileDest)
 {
     QFileInfo fileInfo(fileName);
     if (!fileInfo.exists()) {
-        qCritical() << "File does not exist:" << fileInfo.filePath();
+        qCritical() << "File does not exist:" << Privacy::sanitizePath(fileInfo.filePath());
         return false;
     }
 
@@ -116,13 +117,13 @@ bool ArchiveWriter::addFile(const QString& fileName, const QString& fileDest)
         auto widePath = fileInfo.absoluteFilePath().toStdWString();
         HANDLE file_handle = CreateFileW(widePath.data(), GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
         if (file_handle == INVALID_HANDLE_VALUE) {
-            qCritical() << "Failed to stat file:" << fileInfo.filePath();
+            qCritical() << "Failed to stat file:" << Privacy::sanitizePath(fileInfo.filePath());
             return false;
         }
 
         BY_HANDLE_FILE_INFORMATION file_info;
         if (!GetFileInformationByHandle(file_handle, &file_info)) {
-            qCritical() << "Failed to stat file:" << fileInfo.filePath();
+            qCritical() << "Failed to stat file:" << Privacy::sanitizePath(fileInfo.filePath());
             CloseHandle(file_handle);
             return false;
         }
@@ -139,7 +140,7 @@ bool ArchiveWriter::addFile(const QString& fileName, const QString& fileDest)
         const char* cpath = utf8.constData();
         struct stat st;
         if (stat(cpath, &st) != 0) {
-            qCritical() << "Failed to stat file:" << fileInfo.filePath();
+            qCritical() << "Failed to stat file:" << Privacy::sanitizePath(fileInfo.filePath());
             return false;
         }
 
@@ -162,7 +163,7 @@ bool ArchiveWriter::addFile(const QString& fileName, const QString& fileDest)
     } else if (fileInfo.isFile()) {
         archive_entry_set_filetype(entry, AE_IFREG);
     } else {
-        qCritical() << "Unsupported file type:" << fileInfo.filePath();
+        qCritical() << "Unsupported file type:" << Privacy::sanitizePath(fileInfo.filePath());
         return false;
     }
 
@@ -174,7 +175,8 @@ bool ArchiveWriter::addFile(const QString& fileName, const QString& fileDest)
     if (fileInfo.isFile() && !fileInfo.isSymLink()) {
         QFile file(fileInfo.absoluteFilePath());
         if (!file.open(QIODevice::ReadOnly)) {
-            qCritical() << "Failed to open file:" << fileInfo.filePath() << "error:" << file.errorString();
+            qCritical() << "Failed to open file:" << Privacy::sanitizePath(fileInfo.filePath())
+                        << "error:" << Privacy::sanitizeText(file.errorString());
             return false;
         }
 
@@ -185,7 +187,7 @@ bool ArchiveWriter::addFile(const QString& fileName, const QString& fileDest)
         while (!file.atEnd()) {
             auto bytesRead = file.read(buffer.data(), chunkSize);
             if (bytesRead < 0) {
-                qCritical() << "Read error in file:" << fileInfo.filePath();
+                qCritical() << "Read error in file:" << Privacy::sanitizePath(fileInfo.filePath());
                 return false;
             }
 

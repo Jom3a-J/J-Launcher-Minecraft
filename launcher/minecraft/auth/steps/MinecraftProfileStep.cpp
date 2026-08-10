@@ -4,6 +4,7 @@
 
 #include "Application.h"
 #include "minecraft/auth/Parsers.h"
+#include "logs/Privacy.h"
 #include "net/NetUtils.h"
 #include "net/RawHeaderProxy.h"
 
@@ -47,18 +48,21 @@ void MinecraftProfileStep::onRequestDone(QByteArray* response)
         qWarning() << "Error getting profile:";
         qWarning() << " HTTP Status       :" << m_request->replyStatusCode();
         qWarning() << " Internal error no.:" << m_request->error();
-        qWarning() << " Error string      :" << m_request->errorString();
+        qWarning() << " Error string      :"
+                   << Privacy::sanitizeText(m_request->errorString());
 
-        qWarning() << " Response:";
-        qWarning() << QString::fromUtf8(*response);
+        qWarning() << " Response body omitted because authentication "
+                      "responses may contain account data.";
 
         if (Net::isApplicationError(m_request->error()) && !Net::isServerError(m_request->error())) {
             emit finished(AccountTaskState::STATE_FAILED_SOFT,
-                          tr("Minecraft Java profile acquisition failed: %1").arg(m_request->errorString()));
+                          tr("Minecraft Java profile acquisition failed: %1")
+                              .arg(Privacy::sanitizeText(m_request->errorString())));
         } else {
             m_data->networkError = m_request->error();
             emit finished(AccountTaskState::STATE_OFFLINE,
-                          tr("Minecraft Java profile acquisition failed: %1").arg(m_request->errorString()));
+                          tr("Minecraft Java profile acquisition failed: %1")
+                              .arg(Privacy::sanitizeText(m_request->errorString())));
         }
         return;
     }

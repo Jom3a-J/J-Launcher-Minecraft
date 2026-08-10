@@ -36,6 +36,7 @@
 #include "modplatform/flame/FlameModIndex.h"
 #include "modplatform/helpers/HashUtils.h"
 #include "tasks/Task.h"
+#include "logs/Privacy.h"
 
 #include "archive/ExportToZipTask.h"
 
@@ -182,7 +183,8 @@ void FlamePackExportTask::makeApiRequest()
         if (parseError.error != QJsonParseError::NoError) {
             qWarning() << "Error while parsing JSON response from CurseForge::CurrentVersions at" << parseError.offset
                        << "reason:" << parseError.errorString();
-            qWarning() << *response;
+            qWarning() << "Response body excerpt:"
+                       << Privacy::sanitizeResponseBody(*response, 2048);
 
             emitFailed(parseError.errorString());
             return;
@@ -224,7 +226,8 @@ void FlamePackExportTask::makeApiRequest()
 
         } catch (Json::JsonException& e) {
             qDebug() << e.cause();
-            qDebug() << doc;
+            qDebug() << "CurseForge response excerpt:"
+                     << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
         }
         pendingHashes.clear();
         getProjectsInfo();
@@ -263,7 +266,8 @@ void FlamePackExportTask::getProjectsInfo()
         if (parseError.error != QJsonParseError::NoError) {
             qWarning() << "Error while parsing JSON response from CurseForge projects task at" << parseError.offset
                        << "reason:" << parseError.errorString();
-            qWarning() << *response;
+            qWarning() << "Response body excerpt:"
+                       << Privacy::sanitizeResponseBody(*response, 2048);
             emitFailed(parseError.errorString());
             return;
         }
@@ -299,12 +303,14 @@ void FlamePackExportTask::getProjectsInfo()
 
                 } catch (Json::JsonException& e) {
                     qDebug() << e.cause();
-                    qDebug() << entries;
+                    qDebug() << "CurseForge response entry excerpt:"
+                             << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
                 }
             }
         } catch (Json::JsonException& e) {
             qDebug() << e.cause();
-            qDebug() << doc;
+            qDebug() << "CurseForge response excerpt:"
+                     << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
         }
         buildZip();
     });

@@ -71,10 +71,15 @@
 NewInstanceDialog::NewInstanceDialog(const QString& initialGroup,
                                      const QString& url,
                                      const QMap<QString, QString>& extraInfo,
-                                     QWidget* parent)
-    : QDialog(parent), ui(new Ui::NewInstanceDialog), m_instIconKey("default")
+                                     QWidget* parent,
+                                     Mode mode)
+    : QDialog(parent), ui(new Ui::NewInstanceDialog), m_instIconKey("default"), m_mode(mode)
 {
     ui->setupUi(this);
+
+    if (m_mode == Mode::ServerModpack) {
+        setWindowTitle(tr("Create Server from Modpack"));
+    }
 
     ui->instNameTextBox->installEventFilter(this);
 
@@ -119,7 +124,7 @@ NewInstanceDialog::NewInstanceDialog(const QString& initialGroup,
     auto* okButton = m_buttons->button(QDialogButtonBox::Ok);
     okButton->setDefault(true);
     okButton->setAutoDefault(true);
-    okButton->setText(tr("OK"));
+    okButton->setText(m_mode == Mode::ServerModpack ? tr("Create Instance and Server") : tr("OK"));
     connect(okButton, &QPushButton::clicked, this, &NewInstanceDialog::accept);
 
     auto* cancelButton = m_buttons->button(QDialogButtonBox::Cancel);
@@ -192,7 +197,9 @@ QList<BasePage*> NewInstanceDialog::getPages()
 
     m_importPage = new ImportPage(this);
 
-    pages.append(new CustomPage(this));
+    if (m_mode == Mode::NewInstance) {
+        pages.append(new CustomPage(this));
+    }
     pages.append(m_importPage);
     pages.append(new AtlPage(this));
     if (APPLICATION->capabilities() & Application::SupportsFlame) {
@@ -209,7 +216,7 @@ QList<BasePage*> NewInstanceDialog::getPages()
 
 QString NewInstanceDialog::dialogTitle()
 {
-    return tr("New Instance");
+    return m_mode == Mode::ServerModpack ? tr("Create Server from Modpack") : tr("New Instance");
 }
 
 NewInstanceDialog::~NewInstanceDialog()
@@ -321,6 +328,7 @@ InstanceTask* NewInstanceDialog::extractTask()
     extracted->setGroup(instGroup());
     extracted->setIcon(iconKey());
     extracted->setTargetDir(instDir());
+    extracted->setCreateServerPair(m_mode == Mode::ServerModpack);
     return extracted;
 }
 

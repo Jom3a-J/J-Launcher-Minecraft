@@ -41,6 +41,7 @@
 #include "BuildConfig.h"
 
 #include "net/ApiDownload.h"
+#include "logs/Privacy.h"
 
 namespace LegacyFTB {
 
@@ -52,13 +53,15 @@ void PackFetchTask::fetch()
     jobPtr.reset(new NetJob("LegacyFTB::ModpackFetch", m_network));
 
     QUrl publicPacksUrl = QUrl(BuildConfig.LEGACY_FTB_CDN_BASE_URL + "static/modpacks.xml");
-    qDebug() << "Downloading public version info from" << publicPacksUrl.toString();
+    qDebug() << "Downloading public version info from"
+             << Privacy::sanitizeUrl(publicPacksUrl);
 
     auto [publicAction, publicResponse] = Net::ApiDownload::makeByteArray(publicPacksUrl);
     jobPtr->addNetAction(publicAction);
 
     QUrl thirdPartyUrl = QUrl(BuildConfig.LEGACY_FTB_CDN_BASE_URL + "static/thirdparty.xml");
-    qDebug() << "Downloading thirdparty version info from" << thirdPartyUrl.toString();
+    qDebug() << "Downloading thirdparty version info from"
+             << Privacy::sanitizeUrl(thirdPartyUrl);
 
     auto [thirdPartyAction, thirdPartyResponse] = Net::Download::makeByteArray(thirdPartyUrl);
     jobPtr->addNetAction(thirdPartyAction);
@@ -140,7 +143,7 @@ bool PackFetchTask::parseAndAddPacks(QByteArray& data, PackType packType, Modpac
 
     if (!doc.setContent(data, false, &errorMsg, &errorLine, &errorCol)) {
         auto fullErrMsg = QString("Failed to fetch modpack data: %1 %2:%3!").arg(errorMsg).arg(errorLine).arg(errorCol);
-        qWarning() << fullErrMsg;
+        qWarning() << Privacy::sanitizeText(fullErrMsg);
         return false;
     }
 

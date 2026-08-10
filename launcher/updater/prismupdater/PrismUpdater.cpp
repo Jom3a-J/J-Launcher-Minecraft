@@ -22,6 +22,7 @@
 
 #include "PrismUpdater.h"
 #include "BuildConfig.h"
+#include "logs/Privacy.h"
 #include "ui/dialogs/ProgressDialog.h"
 
 #include <cstdlib>
@@ -62,7 +63,8 @@ void appDebugOutput(QtMsgType type, const QMessageLogContext& context, const QSt
     static std::mutex loggerMutex;
     const std::lock_guard<std::mutex> lock(loggerMutex);  // synchronized, QFile logFile is not thread-safe
 
-    QString out = qFormatLogMessage(type, context, msg);
+    const auto safeMsg = Privacy::sanitizeText(msg, 256 * 1024);
+    QString out = qFormatLogMessage(type, context, safeMsg);
     out += QChar::LineFeed;
 
     PrismUpdaterApp* app = static_cast<PrismUpdaterApp*>(QCoreApplication::instance());
@@ -1208,7 +1210,9 @@ int PrismUpdaterApp::parseReleasePage(const QByteArray* response)
         }
     } catch (Json::JsonException& e) {
         auto err_msg =
-            QString("Failed to parse releases from github: %1\n%2").arg(e.what()).arg(QString::fromStdString(response->toStdString()));
+            QString("Failed to parse releases from github: %1\n%2")
+                .arg(Privacy::sanitizeText(QString::fromUtf8(e.what())),
+                     Privacy::sanitizeResponseBody(*response, 4096));
         fail(err_msg);
     }
     return num_releases;

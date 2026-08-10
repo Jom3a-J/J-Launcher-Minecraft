@@ -51,6 +51,7 @@
 
 #include "Application.h"
 #include "modplatform/technic/SolderPackManifest.h"
+#include "logs/Privacy.h"
 
 #include "net/ApiDownload.h"
 
@@ -182,7 +183,8 @@ void TechnicPage::suggestCurrent()
         if (parse_error.error != QJsonParseError::NoError) {
             qWarning() << "Error while parsing JSON response from Technic at" << parse_error.offset
                        << "reason:" << parse_error.errorString();
-            qWarning() << response;
+            qWarning() << "Response body excerpt:"
+                       << Privacy::sanitizeResponseBody(response, 2048);
             return;
         }
         if (!obj.contains("url")) {
@@ -208,6 +210,7 @@ void TechnicPage::suggestCurrent()
         }
 
         current.minecraftVersion = obj["minecraft"].toString();
+        current.serverPackUrl = obj["serverPackUrl"].toString();
         current.websiteUrl = obj["platformUrl"].toString();
         current.author = obj["user"].toString();
         current.description = obj["description"].toString();
@@ -291,11 +294,13 @@ void TechnicPage::selectVersion()
 
     if (!current.isSolder) {
         dialog->setSuggestedPack(current.name, selectedVersion,
-                                 new Technic::SingleZipPackInstallTask(current.url, current.minecraftVersion));
+                                 new Technic::SingleZipPackInstallTask(current.url, current.minecraftVersion,
+                                                                      QUrl(current.serverPackUrl)));
     } else {
+        const QUrl serverPackUrl = selectedVersion == current.currentVersion ? QUrl(current.serverPackUrl) : QUrl();
         dialog->setSuggestedPack(current.name, selectedVersion,
                                  new Technic::SolderPackInstallTask(APPLICATION->network(), current.url, current.slug, selectedVersion,
-                                                                    current.minecraftVersion));
+                                                                    current.minecraftVersion, serverPackUrl));
     }
 }
 
@@ -318,7 +323,8 @@ void TechnicPage::onSolderLoaded(QByteArray* responsePtr)
     auto doc = QJsonDocument::fromJson(response, &parse_error);
     if (parse_error.error != QJsonParseError::NoError) {
         qWarning() << "Error while parsing JSON response from Solder at" << parse_error.offset << "reason:" << parse_error.errorString();
-        qWarning() << response;
+        qWarning() << "Response body excerpt:"
+                   << Privacy::sanitizeResponseBody(response, 2048);
         fallback();
         return;
     }

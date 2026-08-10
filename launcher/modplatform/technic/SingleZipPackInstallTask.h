@@ -16,14 +16,10 @@
 #pragma once
 
 #include "InstanceTask.h"
-#include "archive/ArchiveReader.h"
 #include "net/NetJob.h"
 
 #include <QFutureWatcher>
-#include <QStringList>
 #include <QUrl>
-
-#include <optional>
 
 namespace Technic {
 
@@ -31,7 +27,7 @@ class SingleZipPackInstallTask : public InstanceTask {
     Q_OBJECT
 
    public:
-    SingleZipPackInstallTask(const QUrl& sourceUrl, const QString& minecraftVersion);
+    SingleZipPackInstallTask(const QUrl& sourceUrl, const QString& minecraftVersion, const QUrl& serverPackUrl = {});
 
     bool canAbort() const override { return true; }
     bool abort() override;
@@ -50,12 +46,13 @@ class SingleZipPackInstallTask : public InstanceTask {
     bool m_abortable = false;
 
     QUrl m_sourceUrl;
+    QUrl m_serverPackUrl;
     QString m_minecraftVersion;
     QString m_archivePath;
+    QString m_serverArchivePath;
     NetJob::Ptr m_filesNetJob;
-    std::unique_ptr<MMCZip::ArchiveReader> m_packZip;
-    QFuture<std::optional<QStringList>> m_extractFuture;
-    QFutureWatcher<std::optional<QStringList>> m_extractFutureWatcher;
+    QFuture<QString> m_extractFuture;
+    QFutureWatcher<QString> m_extractFutureWatcher;
 };
 
 }  // namespace Technic

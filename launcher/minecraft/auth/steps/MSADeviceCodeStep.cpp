@@ -40,6 +40,7 @@
 
 #include "Application.h"
 #include "Json.h"
+#include "logs/Privacy.h"
 #include "net/RawHeaderProxy.h"
 
 // https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-device-code
@@ -114,8 +115,11 @@ DeviceAuthorizationResponse parseDeviceAuthorizationResponse(const QByteArray& d
 void MSADeviceCodeStep::deviceAuthorizationFinished(QByteArray* response)
 {
     if (!m_request->wasSuccessful() || m_request->error() != QNetworkReply::NoError) {
-        qWarning() << "Device authorization failed:" << m_request->error() << m_request->errorString();
-        emit finished(AccountTaskState::STATE_FAILED_HARD, tr("Device authorization failed: %1").arg(m_request->errorString()));
+        qWarning() << "Device authorization failed:" << m_request->error()
+                   << Privacy::sanitizeText(m_request->errorString());
+        emit finished(AccountTaskState::STATE_FAILED_HARD,
+                      tr("Device authorization failed: %1")
+                          .arg(Privacy::sanitizeText(m_request->errorString())));
         return;
     }
 

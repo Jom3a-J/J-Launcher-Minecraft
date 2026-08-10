@@ -24,6 +24,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QUrl>
+#include "logs/Privacy.h"
 #include <functional>
 #include <memory>
 #include <optional>
@@ -100,7 +101,8 @@ auto ArchiveReader::goToFile(const QString& filename) -> std::unique_ptr<File>
     archive_read_support_filter_all(a);
     auto fileName = m_archivePath.toStdWString();
     if (archive_read_open_filename_w(a, fileName.data(), m_blockSize) != ARCHIVE_OK) {
-        qCritical() << "Failed to open archive file:" << m_archivePath << "-" << archive_error_string(a);
+        qCritical() << "Failed to open archive file:" << Privacy::sanitizePath(m_archivePath)
+                    << "-" << archive_error_string(a);
         return nullptr;
     }
 
@@ -219,12 +221,14 @@ bool ArchiveReader::parse(const std::function<bool(File*, bool&)>& doStuff)
     archive_read_support_filter_all(a);
     auto fileName = m_archivePath.toStdWString();
     if (archive_read_open_filename_w(a, fileName.data(), m_blockSize) != ARCHIVE_OK) {
-        qCritical() << "Failed to open archive file:" << m_archivePath << "-" << f->error();
+        qCritical() << "Failed to open archive file:" << Privacy::sanitizePath(m_archivePath)
+                    << "-" << f->error();
         return false;
     }
 
     bool breakControl = false;
-    while (f->readNextHeader() == ARCHIVE_OK) {
+    int headerStatus = ARCHIVE_OK;
+    while ((headerStatus = f->readNextHeader()) == ARCHIVE_OK) {
         if (f && !doStuff(f.get(), breakControl)) {
             qCritical() << "Failed to parse file:" << f->filename() << "-" << f->error();
             return false;
@@ -235,7 +239,7 @@ bool ArchiveReader::parse(const std::function<bool(File*, bool&)>& doStuff)
     }
 
     archive_read_close(a);
-    return true;
+    return breakControl || headerStatus == ARCHIVE_EOF;
 }
 
 bool ArchiveReader::parse(const std::function<bool(File*)>& doStuff)

@@ -46,6 +46,7 @@
 #include "ByteArraySink.h"
 #include "ChecksumValidator.h"
 #include "MetaCacheSink.h"
+#include "logs/Privacy.h"
 
 namespace Net {
 
@@ -54,7 +55,7 @@ auto Download::makeCached(QUrl url, MetaEntryPtr entry, Options options) -> Down
 {
     auto dl = makeShared<Download>();
     dl->m_url = url;
-    dl->setObjectName(QString("CACHE:") + url.toString());
+    dl->setObjectName(QString("CACHE:") + Privacy::sanitizeUrl(url));
     dl->m_options = options;
     auto md5Node = new ChecksumValidator(QCryptographicHash::Md5);
     auto cachedNode = new MetaCacheSink(entry, md5Node, options.testFlag(Option::MakeEternal));
@@ -67,7 +68,7 @@ auto Download::makeByteArray(QUrl url, Options options) -> std::pair<Download::P
 {
     auto dl = makeShared<Download>();
     dl->m_url = url;
-    dl->setObjectName(QString("BYTES:") + url.toString());
+    dl->setObjectName(QString("BYTES:") + Privacy::sanitizeUrl(url));
     dl->m_options = options;
 
     auto sink = std::make_unique<ByteArraySink>();
@@ -81,7 +82,7 @@ auto Download::makeFile(QUrl url, QString path, Options options) -> Download::Pt
 {
     auto dl = makeShared<Download>();
     dl->m_url = url;
-    dl->setObjectName(QString("FILE:") + url.toString());
+    dl->setObjectName(QString("FILE:") + Privacy::sanitizeUrl(url));
     dl->m_options = options;
     dl->m_sink.reset(new FileSink(path));
     return dl;

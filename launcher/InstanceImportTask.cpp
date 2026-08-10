@@ -52,10 +52,12 @@
 
 #include "settings/INISettingsObject.h"
 #include "tasks/Task.h"
+#include "logs/Privacy.h"
 
 #include "net/ApiDownload.h"
 
 #include <QFileInfo>
+#include <QFile>
 #include <QtConcurrentRun>
 #include <memory>
 #include <utility>
@@ -85,7 +87,8 @@ void InstanceImportTask::executeTask()
         m_archivePath = m_sourceUrl.toLocalFile();
         processZipPack();
     } else {
-        setStatus(tr("Downloading modpack:\n%1").arg(m_sourceUrl.toString()));
+        setStatus(tr("Downloading modpack:\n%1")
+                      .arg(Privacy::sanitizeUrl(m_sourceUrl)));
 
         downloadFromUrl();
     }
@@ -129,7 +132,8 @@ void InstanceImportTask::processZipPack()
 {
     setStatus(tr("Attempting to determine instance type"));
     QDir extractDir(m_stagingPath);
-    qDebug() << "Attempting to create instance from" << m_archivePath;
+    qDebug() << "Attempting to create instance from"
+             << Privacy::sanitizePath(m_archivePath);
 
     // open the zip and find relevant files in it
     MMCZip::ArchiveReader packZip(m_archivePath);
@@ -232,9 +236,10 @@ void InstanceImportTask::extractFinished()
         }
         if (origPermissions != permissions) {
             if (!QFile::setPermissions(filepath, permissions)) {
-                logWarning(tr("Could not fix permissions for %1").arg(filepath));
+                logWarning(tr("Could not fix permissions for %1").arg(
+                    Privacy::sanitizePath(filepath)));
             } else {
-                qDebug() << "Fixed" << filepath;
+                qDebug() << "Fixed" << Privacy::sanitizePath(filepath);
             }
         }
     }
@@ -294,6 +299,12 @@ void InstanceImportTask::processFlame()
         Q_ASSERT(packVersionIdIt != m_extra_info.constEnd());
         const auto& packVersionId = packVersionIdIt.value();
 
+        QString serverPackFileId;
+        auto serverPackFileIdIt = m_extra_info.constFind("server_pack_file_id");
+        if (serverPackFileIdIt != m_extra_info.constEnd()) {
+            serverPackFileId = serverPackFileIdIt.value();
+        }
+
         QString originalInstanceId;
         auto originalInstanceIdIt = m_extra_info.constFind("original_instance_id");
         if (originalInstanceIdIt != m_extra_info.constEnd()) {
@@ -301,7 +312,7 @@ void InstanceImportTask::processFlame()
         }
 
         instCreationTask = makeShared<FlameCreationTask>(m_stagingPath, m_trustedSource, m_globalSettings, m_parent, packId, packVersionId,
-                                                         originalInstanceId);
+                                                         originalInstanceId, serverPackFileId);
     } else {
         // FIXME: Find a way to get IDs in directly imported ZIPs
         instCreationTask = makeShared<FlameCreationTask>(m_stagingPath, m_trustedSource, m_globalSettings, m_parent, QString(), QString());
@@ -320,6 +331,7 @@ void InstanceImportTask::processFlame()
     instCreationTask->setIcon(m_instIcon);
     instCreationTask->setGroup(m_instGroup);
     instCreationTask->setConfirmUpdate(shouldConfirmUpdate());
+    instCreationTask->setCreateServerPair(shouldCreateServerPair());
 
     auto weak = instCreationTask.toWeakRef();
     connect(instCreationTask.get(), &Task::succeeded, this, [this, weak] {
@@ -347,6 +359,17 @@ void InstanceImportTask::processFlame()
 
 void InstanceImportTask::processTechnic()
 {
+    if (shouldCreateServerPair()) {
+        const QString providerMarkerPath =
+            FS::PathCombine(m_stagingPath, "server-pack", "provider.txt");
+        FS::ensureFilePathExists(providerMarkerPath);
+        QFile providerMarker(providerMarkerPath);
+        if (!providerMarker.open(QIODevice::WriteOnly | QIODevice::Text)
+            || providerMarker.write("technic\n") != 8) {
+            emitFailed(tr("Could not record the Technic compatibility metadata."));
+            return;
+        }
+    }
     shared_qobject_ptr<Technic::TechnicPackProcessor> packProcessor{ new Technic::TechnicPackProcessor };
     connect(packProcessor.get(), &Technic::TechnicPackProcessor::succeeded, this, &InstanceImportTask::emitSucceeded);
     connect(packProcessor.get(), &Technic::TechnicPackProcessor::failed, this, &InstanceImportTask::emitFailed);
@@ -423,6 +446,7 @@ void InstanceImportTask::processModrinth()
     instCreationTask->setIcon(m_instIcon);
     instCreationTask->setGroup(m_instGroup);
     instCreationTask->setConfirmUpdate(shouldConfirmUpdate());
+    instCreationTask->setCreateServerPair(shouldCreateServerPair());
 
     auto weak = instCreationTask.toWeakRef();
     connect(instCreationTask.get(), &Task::succeeded, this, [this, weak] {

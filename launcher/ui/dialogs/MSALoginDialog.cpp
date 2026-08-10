@@ -40,6 +40,7 @@
 #include "ui_MSALoginDialog.h"
 
 #include "DesktopServices.h"
+#include "logs/Privacy.h"
 #include "minecraft/auth/AuthFlow.h"
 
 #include <QApplication>
@@ -115,7 +116,7 @@ void MSALoginDialog::onTaskFailed(QString reason)
     m_authflow_task->disconnect();
     m_devicecode_task->disconnect();
     ui->stackedWidget->setCurrentIndex(0);
-    auto lines = reason.split('\n');
+    auto lines = Privacy::sanitizeText(reason, 4096).split('\n');
     QString processed;
     for (auto line : lines) {
         if (line.size()) {

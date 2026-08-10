@@ -27,6 +27,7 @@
 #include "QObjectPtr.h"
 #include "minecraft/mod/tasks/GetModDependenciesTask.h"
 #include "modplatform/ModIndex.h"
+#include "modplatform/ResourceType.h"
 #include "ui/pages/BasePageProvider.h"
 
 class BaseInstance;
@@ -75,7 +76,7 @@ class ResourceDownloadDialog : public QDialog, public BasePageProvider {
     void connectButtons();
 
     //: String that gets appended to the download dialog title ("Download " + resourcesString())
-    QString resourcesString() const { return m_resourcesString; }
+    virtual QString resourcesString() const { return m_resourcesString; }
 
     QString dialogTitle() override { return tr("Download %1").arg(resourcesString()); };
 
@@ -109,10 +110,10 @@ class ResourceDownloadDialog : public QDialog, public BasePageProvider {
                            QString geometrySaveKey = "",
                            bool suppressInitialSearch = false);
 
-    QString geometrySaveKey() const { return m_geometrySaveKey; }
+    virtual QString geometrySaveKey() const { return m_geometrySaveKey; }
     void setButtonStatus();
 
-    GetModDependenciesTask::Ptr getModDependenciesTask();
+    virtual GetModDependenciesTask::Ptr getModDependenciesTask();
 
     void initPages(QList<BasePage*> pages);
 
@@ -131,6 +132,30 @@ class ResourceDownloadDialog : public QDialog, public BasePageProvider {
     QString m_resourcesString;
     QString m_geometrySaveKey;
     QList<BasePage*> m_pages;
+};
+
+class ModDownloadDialog final : public ResourceDownloadDialog {
+    Q_OBJECT
+
+   public:
+    explicit ModDownloadDialog(QWidget* parent,
+                               ModFolderModel* mods,
+                               MinecraftInstance* instance,
+                               bool suppressInitialSearch = false,
+                               ModPlatform::ResourceType resourceType = ModPlatform::ResourceType::Mod,
+                               QStringList loaderNames = {});
+    ~ModDownloadDialog() override = default;
+
+    QString resourcesString() const override;
+    QString geometrySaveKey() const override;
+    QList<BasePage*> getPages() override;
+
+   protected:
+    GetModDependenciesTask::Ptr getModDependenciesTask() override;
+
+   private:
+    ModPlatform::ResourceType m_resourceType;
+    QStringList m_loaderNames;
 };
 
 }  // namespace ResourceDownload

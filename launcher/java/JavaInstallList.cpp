@@ -46,6 +46,7 @@
 #include "java/JavaUtils.h"
 #include "settings/SettingsObject.h"
 #include "tasks/ConcurrentTask.h"
+#include "logs/Privacy.h"
 
 JavaInstallList::JavaInstallList(QObject* parent, bool onlyManagedVersions)
     : BaseVersionList(parent), m_only_managed_versions(onlyManagedVersions)
@@ -171,6 +172,11 @@ void JavaListLoadTask::executeTask()
     qDebug() << "Probing the following Java paths: ";
     int id = 0;
     for (QString candidate : candidate_paths) {
+        if (!JavaUtils::isJavaPathSafeToProbe(candidate, APPLICATION->javaPath())) {
+            qWarning() << "Skipping incomplete or missing Java candidate:"
+                       << Privacy::sanitizePath(candidate);
+            continue;
+        }
         auto checker = new JavaChecker(candidate, "", 0, 0, 0, id);
         connect(checker, &JavaChecker::checkFinished, this, [this](const JavaChecker::Result& result) { m_results << result; });
         job->addTask(Task::Ptr(checker));
@@ -196,7 +202,9 @@ void JavaListLoadTask::javaCheckerFinished()
             javaVersion->is_64bit = result.is_64bit;
             candidates.append(javaVersion);
 
-            qDebug() << " " << javaVersion->id.toString() << javaVersion->arch << javaVersion->path;
+            qDebug() << " " << javaVersion->id.toString()
+                     << javaVersion->arch
+                     << Privacy::sanitizePath(javaVersion->path);
         }
     }
 

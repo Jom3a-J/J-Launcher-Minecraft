@@ -30,6 +30,7 @@
 #include "tasks/Task.h"
 
 #include "Application.h"
+#include "logs/Privacy.h"
 
 Flame::FileResolvingTask::FileResolvingTask(Flame::Manifest& toProcess) : m_manifest(toProcess) {}
 
@@ -184,13 +185,15 @@ void Flame::FileResolvingTask::netJobFinished(QByteArray* response)
                             qDebug() << "Found alternative on modrinth" << out.version.fileName;
                         } catch (Json::JsonException& e) {
                             qDebug() << e.cause();
-                            qDebug() << entries;
+                            qDebug() << "Modrinth response entry excerpt:"
+                                     << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
                         }
                     }
                 }
             } catch (Json::JsonException& e) {
                 qDebug() << e.cause();
-                qDebug() << doc;
+                qDebug() << "Modrinth response excerpt:"
+                         << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
             }
         }
         getFlameProjects();
@@ -231,7 +234,8 @@ void Flame::FileResolvingTask::getFlameProjects()
         if (parse_error.error != QJsonParseError::NoError) {
             qWarning() << "Error while parsing JSON response from Modrinth projects task at" << parse_error.offset
                        << "reason:" << parse_error.errorString();
-            qWarning() << *response;
+            qWarning() << "Response body excerpt:"
+                       << Privacy::sanitizeResponseBody(*response, 2048);
             return;
         }
 
@@ -257,7 +261,8 @@ void Flame::FileResolvingTask::getFlameProjects()
             }
         } catch (Json::JsonException& e) {
             qDebug() << e.cause();
-            qDebug() << doc;
+            qDebug() << "Modrinth response excerpt:"
+                     << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
         }
         step_progress->state = TaskStepState::Succeeded;
         stepProgress(*step_progress);

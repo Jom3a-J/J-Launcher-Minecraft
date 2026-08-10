@@ -50,6 +50,7 @@
     <bool>false</bool>
    </attribute>
    <addaction name="actionAddInstance"/>
+   <addaction name="actionManageServers"/>
    <addaction name="separator"/>
    <addaction name="actionFoldersButton"/>
    <addaction name="actionSettings"/>
@@ -142,6 +143,7 @@
      <bool>true</bool>
     </property>
     <addaction name="actionAddInstance"/>
+    <addaction name="actionManageServers"/>
     <addaction name="separator"/>
     <addaction name="actionLaunchInstance"/>
     <addaction name="actionKillInstance"/>
@@ -292,6 +294,17 @@
    </property>
    <property name="toolTip">
     <string>Add a new instance.</string>
+   </property>
+  </action>
+  <action name="actionManageServers">
+   <property name="icon">
+    <iconset theme="server"/>
+   </property>
+   <property name="text">
+    <string>Servers…</string>
+   </property>
+   <property name="toolTip">
+    <string>Create and manage local Minecraft servers.</string>
    </property>
   </action>
   <action name="actionCheckUpdate">

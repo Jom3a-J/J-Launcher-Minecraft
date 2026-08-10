@@ -39,6 +39,7 @@
 #include <QDebug>
 
 #include "AssertHelpers.h"
+#include "logs/Privacy.h"
 
 Q_LOGGING_CATEGORY(taskLogC, "launcher.task")
 
@@ -118,14 +119,15 @@ void Task::start()
 
 void Task::emitFailed(QString reason)
 {
+    const auto safeReason = Privacy::sanitizeText(reason);
     // Don't fail twice.
     if (ASSERT_NEVER(!isRunning())) {
-        qCCritical(taskLogC) << "Task" << describe() << "failed while not running!!!!:" << reason;
+        qCCritical(taskLogC) << "Task" << describe() << "failed while not running!!!!:" << safeReason;
         return;
     }
     m_state = State::Failed;
     m_failReason = reason;
-    qCCritical(taskLogC) << "Task" << describe() << "failed:" << reason;
+    qCCritical(taskLogC) << "Task" << describe() << "failed:" << safeReason;
     emit failed(reason);
     emit finished();
 }
@@ -219,10 +221,11 @@ void Task::propagateFromOther(Task* other)
 
 void Task::logWarning(const QString& line)
 {
-    qWarning() << line;
-    m_Warnings.append(line);
+    const auto safeLine = Privacy::sanitizeText(line);
+    qWarning() << safeLine;
+    m_Warnings.append(safeLine);
 
-    emit warningLogged(line);
+    emit warningLogged(safeLine);
 }
 
 QStringList Task::warnings() const

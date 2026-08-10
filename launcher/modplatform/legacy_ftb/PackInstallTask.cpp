@@ -36,6 +36,7 @@
 #include "PackInstallTask.h"
 
 #include <QtConcurrent>
+#include <QFile>
 #include <utility>
 
 #include "BaseInstance.h"
@@ -203,6 +204,18 @@ void PackInstallTask::install()
             m_instIcon = "ftb_logo";
         }
         m_instance->setIconKey(m_instIcon);
+    }
+
+    if (shouldCreateServerPair()) {
+        const QString providerMarkerPath =
+            FS::PathCombine(m_stagingPath, "server-pack", "provider.txt");
+        FS::ensureFilePathExists(providerMarkerPath);
+        QFile providerMarker(providerMarkerPath);
+        if (!providerMarker.open(QIODevice::WriteOnly | QIODevice::Text)
+            || providerMarker.write("ftb-legacy\n") != 11) {
+            emitFailed(tr("Could not record the legacy FTB compatibility metadata."));
+            return;
+        }
     }
 
     downloadFiles(m_instance.get());

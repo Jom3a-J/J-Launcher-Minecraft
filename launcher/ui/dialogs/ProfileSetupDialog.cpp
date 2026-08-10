@@ -46,6 +46,7 @@
 #include "ui/dialogs/ProgressDialog.h"
 
 #include <Application.h>
+#include "logs/Privacy.h"
 #include "minecraft/auth/Parsers.h"
 #include "net/Upload.h"
 
@@ -227,7 +228,7 @@ struct MojangError {
     static MojangError fromJSON(QByteArray data)
     {
         MojangError out;
-        out.rawError = QString::fromUtf8(data);
+        out.rawError = Privacy::sanitizeResponseBody(data, 4096);
         auto doc = QJsonDocument::fromJson(data, &out.parseError);
 
         out.fullyParsed = false;
