@@ -56,6 +56,7 @@ class LabeledToolButton;
 class QLabel;
 class MinecraftInstance;
 class MinecraftLauncher;
+class ServerInstance;
 class BaseProfilerFactory;
 class InstanceView;
 class KonamiCode;
@@ -230,6 +231,8 @@ class MainWindow : public QMainWindow {
     void updateInstanceToolIcon(QString new_icon);
     void setSelectedInstanceById(const QString& id);
     void updateStatusCenter();
+    void watchServerStatus(const std::shared_ptr<ServerInstance>& server);
+    void updateServerStatusIndicator();
     void setInstanceActionsEnabled(bool enabled);
 
     void runModalTask(Task* task);
@@ -243,6 +246,7 @@ class MainWindow : public QMainWindow {
     QToolButton* newsLabel = nullptr;
     QLabel* m_statusLeft = nullptr;
     QLabel* m_statusCenter = nullptr;
+    QToolButton* m_serverStatusButton = nullptr;
     LabeledToolButton* changeIconButton = nullptr;
     LabeledToolButton* renameButton = nullptr;
     QToolButton* helpMenuButton = nullptr;
