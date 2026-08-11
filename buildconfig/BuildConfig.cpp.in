@@ -62,6 +62,7 @@ Config::Config()
     BUILD_PLATFORM = "@Launcher_BUILD_PLATFORM@";
     BUILD_ARTIFACT = "@Launcher_BUILD_ARTIFACT@";
     BUILD_DATE = "@Launcher_BUILD_TIMESTAMP@";
+    RELEASE_STAGE = "@Launcher_RELEASE_STAGE@";
     UPDATER_GITHUB_REPO = "@Launcher_UPDATER_GITHUB_REPO@";
 
     COMPILER_NAME = "@Launcher_COMPILER_NAME@";
@@ -95,12 +96,13 @@ Config::Config()
         GIT_COMMIT = "";
     }
 
-    if (GIT_REFSPEC.startsWith("refs/heads/")) {
+    VERSION_CHANNEL = "@Launcher_VERSION_CHANNEL@";
+    if (VERSION_CHANNEL.isEmpty() && GIT_REFSPEC.startsWith("refs/heads/")) {
         VERSION_CHANNEL = GIT_REFSPEC;
         VERSION_CHANNEL.remove("refs/heads/");
-    } else if (!GIT_COMMIT.isEmpty()) {
+    } else if (VERSION_CHANNEL.isEmpty() && !GIT_COMMIT.isEmpty()) {
         VERSION_CHANNEL = GIT_COMMIT.mid(0, 8);
-    } else {
+    } else if (VERSION_CHANNEL.isEmpty()) {
         VERSION_CHANNEL = "unknown";
     }
 

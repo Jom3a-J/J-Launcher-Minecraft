@@ -119,6 +119,7 @@ class NetRequest : public Task {
     int m_retryCount = 0;
     int m_redirectCount = 0;
     bool m_redirectRejected = false;
+    bool m_requestHadCredentials = false;
     QTimer m_retryTimer;
 };
 }  // namespace Net

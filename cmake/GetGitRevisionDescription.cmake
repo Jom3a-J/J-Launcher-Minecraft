@@ -143,7 +143,17 @@ function(get_git_head_revision _refspecvar _hashvar)
             string(REGEX REPLACE "gitdir: (.*)$" "\\1" git_worktree_dir
                                  ${worktree_ref})
             string(STRIP ${git_worktree_dir} git_worktree_dir)
-            _git_find_closest_git_dir("${git_worktree_dir}" GIT_DIR)
+            # Ask Git for the common directory instead of walking upwards for
+            # another directory named .git. A nested .git directory in the
+            # main checkout is legal and would otherwise be mistaken for the
+            # common repository directory.
+            execute_process(
+                COMMAND "${GIT_EXECUTABLE}" rev-parse --git-common-dir
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                OUTPUT_VARIABLE git_common_dir
+                ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+            get_filename_component(GIT_DIR "${git_common_dir}" ABSOLUTE
+                                   BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
             set(HEAD_SOURCE_FILE "${git_worktree_dir}/HEAD")
         endif()
     else()

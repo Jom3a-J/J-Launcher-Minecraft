@@ -417,6 +417,9 @@ set(SETTINGS_SOURCES
     settings/INISettingsObject.h
     settings/CredentialStore.cpp
     settings/CredentialStore.h
+    settings/SecretEncryption.cpp
+    settings/SecretEncryption.h
+    settings/SecretEncryption_p.h
     settings/OverrideSetting.cpp
     settings/OverrideSetting.h
     settings/PassthroughSetting.cpp
@@ -457,6 +460,7 @@ set(JAVA_SOURCES
 )
 
 set(TRANSLATIONS_SOURCES
+    translations/TranslationMetadata.h
     translations/TranslationsModel.h
     translations/TranslationsModel.cpp
     translations/POTranslator.h
@@ -1312,6 +1316,18 @@ if(WIN32)
     target_link_libraries(Launcher_logic Advapi32)
 endif()
 
+# Authenticated encryption for account tokens. vcpkg exports a CMake config;
+# Linux distributions generally expose libsodium through pkg-config.
+find_package(unofficial-sodium CONFIG QUIET)
+if(TARGET unofficial-sodium::sodium)
+    target_link_libraries(Launcher_logic unofficial-sodium::sodium)
+    set(Launcher_SODIUM_RUNTIME_TARGET unofficial-sodium::sodium)
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(sodium REQUIRED IMPORTED_TARGET libsodium)
+    target_link_libraries(Launcher_logic PkgConfig::sodium)
+endif()
+
 if(TARGET PkgConfig::libqrencode)
     target_link_libraries(Launcher_logic PkgConfig::libqrencode)
 else()
@@ -1388,6 +1404,17 @@ endif()
 
 target_link_libraries(${Launcher_Name} Launcher_logic)
 
+# vcpkg's Windows triplet provides libsodium as a DLL. Deploy it next to the
+# launcher so both the application and test executables can start.
+if(WIN32 AND DEFINED Launcher_SODIUM_RUNTIME_TARGET)
+    add_custom_command(TARGET ${Launcher_Name} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE:${Launcher_SODIUM_RUNTIME_TARGET}>
+            $<TARGET_FILE_DIR:${Launcher_Name}>
+        COMMENT "Deploying the libsodium runtime"
+    )
+endif()
+
 if(DEFINED Launcher_APP_BINARY_NAME)
     set_target_properties(${Launcher_Name} PROPERTIES OUTPUT_NAME "${Launcher_APP_BINARY_NAME}")
 endif()
@@ -1439,6 +1466,10 @@ if(Launcher_BUILD_UPDATER)
 
     add_executable("${Launcher_Name}_updater" WIN32 updater/prismupdater/updater_main.cpp)
     target_sources("${Launcher_Name}_updater" PRIVATE updater/prismupdater/updater.exe.manifest)
+    if(WIN32)
+        target_sources("${Launcher_Name}_updater" PRIVATE
+            ${CMAKE_CURRENT_BINARY_DIR}/../${Launcher_Branding_UpdaterRC})
+    endif()
     target_link_libraries("${Launcher_Name}_updater" prism_updater_logic)
 
     if(${Launcher_USE_PCH})
@@ -1486,6 +1517,10 @@ if(WIN32 OR (DEFINED Launcher_BUILD_FILELINKER AND Launcher_BUILD_FILELINKER))
 
     add_executable("${Launcher_Name}_filelink" WIN32 filelink/filelink_main.cpp)
     target_sources("${Launcher_Name}_filelink" PRIVATE filelink/filelink.exe.manifest)
+    if(WIN32)
+        target_sources("${Launcher_Name}_filelink" PRIVATE
+            ${CMAKE_CURRENT_BINARY_DIR}/../${Launcher_Branding_FileLinkRC})
+    endif()
 
     if(${Launcher_USE_PCH})
         target_precompile_headers("${Launcher_Name}_filelink" REUSE_FROM filelink_logic)

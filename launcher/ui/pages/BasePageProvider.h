@@ -15,6 +15,8 @@
 
 #pragma once
 
+#include <QDebug>
+#include <QElapsedTimer>
 #include <functional>
 #include "ui/pages/BasePage.h"
 
@@ -35,7 +37,15 @@ class GenericPageProvider : public BasePageProvider {
     {
         QList<BasePage*> pages;
         for (PageCreator creator : m_creators) {
-            pages.append(creator());
+            QElapsedTimer timer;
+            timer.start();
+            auto* page = creator();
+            pages.append(page);
+            if (qEnvironmentVariableIsSet("JLAUNCHER_PROFILE_UI")) {
+                const QString pageId = page ? page->id() : QStringLiteral("<null>");
+                qInfo().noquote() << "[Performance] Created page" << pageId
+                                  << "in" << timer.elapsed() << "ms";
+            }
         }
         return pages;
     }

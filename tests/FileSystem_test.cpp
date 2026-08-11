@@ -1,4 +1,5 @@
 #include <QDir>
+#include <QFile>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
@@ -11,6 +12,30 @@
 
 #include <filesystem>
 namespace fs = std::filesystem;
+
+static bool canCreateSymlinksWithoutElevation()
+{
+#if defined Q_OS_WIN32
+    QTemporaryDir directory;
+    if (!directory.isValid()) {
+        return false;
+    }
+
+    const auto targetPath = directory.filePath(QStringLiteral("target.txt"));
+    QFile target(targetPath);
+    if (!target.open(QIODevice::WriteOnly)) {
+        return false;
+    }
+    target.close();
+
+    std::error_code error;
+    fs::create_symlink(StringUtils::toStdString(targetPath),
+                       StringUtils::toStdString(directory.filePath(QStringLiteral("link.txt"))), error);
+    return !error;
+#else
+    return true;
+#endif
+}
 
 class LinkTask : public Task {
     Q_OBJECT
@@ -308,6 +333,10 @@ class FileSystemTest : public QObject {
 
     void test_link()
     {
+        if (!canCreateSymlinksWithoutElevation()) {
+            QSKIP("Windows symbolic-link tests require Developer Mode or an elevated test process.");
+        }
+
         QString folder = QFINDTESTDATA("testdata/FileSystem/test_folder");
         auto f = [&folder]() {
             QTemporaryDir tempDir;
@@ -402,6 +431,10 @@ class FileSystemTest : public QObject {
 
     void test_link_with_blacklist()
     {
+        if (!canCreateSymlinksWithoutElevation()) {
+            QSKIP("Windows symbolic-link tests require Developer Mode or an elevated test process.");
+        }
+
         QString folder = QFINDTESTDATA("testdata/FileSystem/test_folder");
         auto f = [&folder]() {
             QTemporaryDir tempDir;
@@ -448,6 +481,10 @@ class FileSystemTest : public QObject {
 
     void test_link_with_whitelist()
     {
+        if (!canCreateSymlinksWithoutElevation()) {
+            QSKIP("Windows symbolic-link tests require Developer Mode or an elevated test process.");
+        }
+
         QString folder = QFINDTESTDATA("testdata/FileSystem/test_folder");
         auto f = [&folder]() {
             QTemporaryDir tempDir;
@@ -495,6 +532,10 @@ class FileSystemTest : public QObject {
 
     void test_link_with_dot_hidden()
     {
+        if (!canCreateSymlinksWithoutElevation()) {
+            QSKIP("Windows symbolic-link tests require Developer Mode or an elevated test process.");
+        }
+
         QString folder = QFINDTESTDATA("testdata/FileSystem/test_folder");
         auto f = [&folder]() {
             QTemporaryDir tempDir;
@@ -542,6 +583,10 @@ class FileSystemTest : public QObject {
 
     void test_link_single_file()
     {
+        if (!canCreateSymlinksWithoutElevation()) {
+            QSKIP("Windows symbolic-link tests require Developer Mode or an elevated test process.");
+        }
+
         QTemporaryDir tempDir;
         tempDir.setAutoRemove(true);
 
@@ -577,6 +622,10 @@ class FileSystemTest : public QObject {
 
     void test_link_with_max_depth()
     {
+        if (!canCreateSymlinksWithoutElevation()) {
+            QSKIP("Windows symbolic-link tests require Developer Mode or an elevated test process.");
+        }
+
         QString folder = QFINDTESTDATA("testdata/FileSystem/test_folder");
         auto f = [&folder]() {
             QTemporaryDir tempDir;
@@ -627,6 +676,10 @@ class FileSystemTest : public QObject {
 
     void test_link_with_no_max_depth()
     {
+        if (!canCreateSymlinksWithoutElevation()) {
+            QSKIP("Windows symbolic-link tests require Developer Mode or an elevated test process.");
+        }
+
         QString folder = QFINDTESTDATA("testdata/FileSystem/test_folder");
         auto f = [&folder]() {
             QTemporaryDir tempDir;

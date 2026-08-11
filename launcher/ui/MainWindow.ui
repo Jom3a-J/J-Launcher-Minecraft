@@ -478,7 +478,7 @@
     <iconset theme="launcher"/>
    </property>
    <property name="text">
-    <string>Prism Launcher (zip)</string>
+    <string>Launcher Instance (ZIP)</string>
    </property>
   </action>
   <action name="actionExportInstanceMrPack">

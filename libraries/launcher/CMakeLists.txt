@@ -1,10 +1,13 @@
 cmake_minimum_required(VERSION 3.15)
 project(launcher Java)
-find_package(Java 1.7 REQUIRED COMPONENTS Development)
+find_package(Java 1.8 REQUIRED COMPONENTS Development)
 
 include(UseJava)
 set(CMAKE_JAVA_JAR_ENTRY_POINT org.prismlauncher.EntryPoint)
-set(CMAKE_JAVA_COMPILE_FLAGS -target 7 -source 7)
+# Current JDKs no longer accept -source/-target 7. Java 8 remains the oldest
+# runtime supported by the launcher and --release also selects the matching
+# standard-library API surface.
+set(CMAKE_JAVA_COMPILE_FLAGS --release 8)
 
 set(SRC
     org/prismlauncher/EntryPoint.java

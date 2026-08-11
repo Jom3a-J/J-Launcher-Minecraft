@@ -22,6 +22,7 @@ class QTreeView;
 class QLabel;
 class Setting;
 class QCheckBox;
+class QPushButton;
 
 class LanguageSelectionWidget : public QWidget {
     Q_OBJECT
@@ -39,6 +40,9 @@ class LanguageSelectionWidget : public QWidget {
    private:
     QVBoxLayout* verticalLayout = nullptr;
     QTreeView* languageView = nullptr;
+    QLabel* networkNoticeLabel = nullptr;
+    QPushButton* refreshButton = nullptr;
+    QCheckBox* autoUpdateCheckbox = nullptr;
     QLabel* helpUsLabel = nullptr;
     QCheckBox* formatCheckbox = nullptr;
 };

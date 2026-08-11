@@ -180,17 +180,20 @@ endif()
 ##################################### Set Application options #####################################
 
 ######## Set URLs ########
-set(Launcher_NEWS_RSS_URL "https://prismlauncher.org/feed/feed.xml" CACHE STRING "URL to fetch Prism Launcher's news RSS feed from.")
-set(Launcher_NEWS_OPEN_URL "https://prismlauncher.org/news" CACHE STRING "URL that gets opened when the user clicks 'More News'")
-set(Launcher_WIKI_URL "https://prismlauncher.org/wiki/" CACHE STRING "URL that gets opened when the user clicks 'Launcher Help'")
-set(Launcher_HELP_URL "https://prismlauncher.org/wiki/help-pages/%1" CACHE STRING "URL (with arg %1 to be substituted with page-id) that gets opened when the user requests help in a dialog window")
-set(Launcher_LOGIN_CALLBACK_URL "https://prismlauncher.org/successful-login" CACHE STRING "URL that gets opened when the user successfully logins.")
+set(Launcher_NEWS_RSS_URL "" CACHE STRING "URL to fetch J Launcher news RSS feed from. Disabled until J Launcher publishes one." FORCE)
+set(Launcher_NEWS_OPEN_URL "" CACHE STRING "URL that gets opened when the user clicks 'More News'. Disabled until J Launcher publishes one." FORCE)
+set(Launcher_WIKI_URL "" CACHE STRING "URL that gets opened when the user requests Launcher Help. Disabled until J Launcher publishes one." FORCE)
+set(Launcher_HELP_URL "" CACHE STRING "URL (with arg %1 to be substituted with page-id) for dialog help. Disabled until J Launcher publishes one." FORCE)
+# Presentation only. Authentication completes through the local loopback
+# handler before the browser reaches this page, so it receives no code, token,
+# account identifier, or other credential.
+set(Launcher_LOGIN_CALLBACK_URL "https://jom3a-j.github.io/J-Launcher-web/login-complete/" CACHE STRING "URL opened after a successful login." FORCE)
 set(Launcher_LEGACY_FMLLIBS_BASE_URL "https://files.prismlauncher.org/fmllibs/" CACHE STRING "URL for legacy (<=1.5.2) FML Libraries.")
 
 ######## Set version numbers ########
-set(Launcher_VERSION_MAJOR 12)
-set(Launcher_VERSION_MINOR 0)
-set(Launcher_VERSION_PATCH 0)
+set(Launcher_VERSION_MAJOR 0)
+set(Launcher_VERSION_MINOR 1)
+set(Launcher_VERSION_PATCH 1)
 
 set(Launcher_VERSION_NAME "${Launcher_VERSION_MAJOR}.${Launcher_VERSION_MINOR}.${Launcher_VERSION_PATCH}")
 set(Launcher_VERSION_NAME4 "${Launcher_VERSION_MAJOR}.${Launcher_VERSION_MINOR}.${Launcher_VERSION_PATCH}.0")
@@ -200,32 +203,37 @@ set(Launcher_VERSION_NAME4_COMMA "${Launcher_VERSION_MAJOR},${Launcher_VERSION_M
 set(Launcher_BUILD_PLATFORM "unknown" CACHE STRING "A short string identifying the platform that this build was built for. Only used to display in the about dialog.")
 
 # Github repo URL with releases for updater
-set(Launcher_UPDATER_GITHUB_REPO "https://github.com/PrismLauncher/PrismLauncher" CACHE STRING "Base github URL for the updater.")
+set(Launcher_UPDATER_GITHUB_REPO "" CACHE STRING "Base GitHub URL for the updater. Disabled until J Launcher release infrastructure exists." FORCE)
 
 # Name to help updater identify valid artifacts
 set(Launcher_BUILD_ARTIFACT "" CACHE STRING "Artifact name to help the updater identify valid artifacts.")
 
 # The metadata server
-set(Launcher_META_URL "https://meta.prismlauncher.org/v1/" CACHE STRING "URL to fetch Launcher's meta files from.")
+set(Launcher_META_URL "https://jom3a-j.github.io/J-Launcher-meta-launcher/" CACHE STRING "URL to fetch Launcher's meta files from." FORCE)
 
 # Imgur API Client ID
-set(Launcher_IMGUR_CLIENT_ID "5b97b0713fba4a3" CACHE STRING "Client ID you can get from Imgur when you register an application")
+set(Launcher_IMGUR_CLIENT_ID "" CACHE STRING "Client ID for optional screenshot uploads. Disabled until J Launcher owns a reviewed client registration." FORCE)
 
 # Bug tracker URL
-set(Launcher_BUG_TRACKER_URL "https://github.com/PrismLauncher/PrismLauncher/issues" CACHE STRING "URL for the bug tracker.")
+set(Launcher_BUG_TRACKER_URL "https://github.com/Jom3a-J/J-Launcher-Minecraft/issues" CACHE STRING "URL for the J Launcher bug tracker." FORCE)
 
 # Translations Platform URL
 set(Launcher_TRANSLATIONS_URL "https://hosted.weblate.org/projects/prismlauncher/launcher/" CACHE STRING "URL for the translations platform.")
 set(Launcher_TRANSLATION_FILES_URL "https://i18n.prismlauncher.org/" CACHE STRING "URL for the translations files.")
 
 # Matrix Space
-set(Launcher_MATRIX_URL "https://prismlauncher.org/matrix" CACHE STRING "URL to the Matrix Space")
+set(Launcher_MATRIX_URL "" CACHE STRING "URL for the J Launcher Matrix space. Disabled until J Launcher publishes one." FORCE)
 
 # Discord URL
-set(Launcher_DISCORD_URL "https://prismlauncher.org/discord" CACHE STRING "URL for the Discord guild.")
+set(Launcher_DISCORD_URL "" CACHE STRING "URL for the J Launcher Discord guild. Disabled until J Launcher publishes one." FORCE)
 
 # Subreddit URL
-set(Launcher_SUBREDDIT_URL "https://prismlauncher.org/reddit" CACHE STRING "URL for the subreddit.")
+set(Launcher_SUBREDDIT_URL "" CACHE STRING "URL for the J Launcher subreddit. Disabled until J Launcher publishes one." FORCE)
+
+# This is deliberately separate from the Git branch/channel. It tells users
+# whether an artifact is suitable for development, beta feedback, or stable use.
+set(Launcher_RELEASE_STAGE "development" CACHE STRING "J Launcher release stage: development, beta, or stable")
+set(Launcher_VERSION_CHANNEL "${Launcher_RELEASE_STAGE}" CACHE STRING "User-facing J Launcher build channel" FORCE)
 
 # Builds
 set(Launcher_QT_VERSION_MAJOR "6" CACHE STRING "Major Qt version to build against")
@@ -269,7 +277,10 @@ endif()
 
 # By using this key in your builds you accept the terms of use laid down in
 # https://docs.microsoft.com/en-us/legal/microsoft-identity-platform/terms-of-use
-set(Launcher_MSA_CLIENT_ID "c36a9fb6-4f2a-41ff-90bd-ae7cc92031eb" CACHE STRING "Client ID you can get from Microsoft Identity Platform when you register an application")
+# Public desktop-client identifier for J Launcher's approved Microsoft
+# application registration. It is intentionally public; no client secret is
+# embedded in the launcher.
+set(Launcher_MSA_CLIENT_ID "39238a1d-3fd8-4dbc-80a3-e0036a37b2e8" CACHE STRING "J Launcher Microsoft Identity Platform client ID" FORCE)
 
 # By using this key in your builds you accept the terms and conditions laid down in
 # https://support.curseforge.com/en/support/solutions/articles/9000207405-curse-forge-3rd-party-api-terms-and-conditions
@@ -370,7 +381,7 @@ include(ECMQtDeclareLoggingCategory)
 
 ####################################### Program Info #######################################
 
-set(Launcher_APP_BINARY_NAME "prismlauncher" CACHE STRING "Name of the Launcher binary")
+set(Launcher_APP_BINARY_NAME "jlauncher" CACHE STRING "Name of the J Launcher binary" FORCE)
 add_subdirectory(program_info)
 
 ####################################### Install layout #######################################
@@ -404,8 +415,10 @@ if(UNIX AND APPLE)
     set(MACOSX_BUNDLE_LONG_VERSION_STRING "${Launcher_VERSION_NAME}")
     set(MACOSX_BUNDLE_ICON_FILE ${Launcher_Name}.icns)
     set(MACOSX_BUNDLE_COPYRIGHT "${Launcher_Copyright_Mac}")
-    set(MACOSX_SPARKLE_UPDATE_PUBLIC_KEY "v55ZWWD6QlPoXGV6VLzOTZxZUggWeE51X8cRQyQh6vA=" CACHE STRING "Public key for Sparkle update feed")
-    set(MACOSX_SPARKLE_UPDATE_FEED_URL "https://prismlauncher.org/feed/appcast.xml" CACHE STRING "URL for Sparkle update feed")
+    # Do not inherit Prism Launcher's update feed or signing identity. Sparkle
+    # remains disabled until J Launcher owns and publishes both values.
+    set(MACOSX_SPARKLE_UPDATE_PUBLIC_KEY "" CACHE STRING "Public key for Sparkle update feed" FORCE)
+    set(MACOSX_SPARKLE_UPDATE_FEED_URL "" CACHE STRING "URL for Sparkle update feed" FORCE)
 
     set(MACOSX_SPARKLE_DOWNLOAD_URL "https://github.com/sparkle-project/Sparkle/releases/download/2.8.0/Sparkle-2.8.0.tar.xz" CACHE STRING "URL to Sparkle release archive")
     set(MACOSX_SPARKLE_SHA256 "fd5681ee92bf238aaac2d08214ceaf0cc8976e452d7f882d80bac1e61581f3b1" CACHE STRING "SHA256 checksum for Sparkle release archive")
@@ -419,7 +432,7 @@ if(UNIX AND APPLE)
     install(FILES ${Launcher_Branding_ICNS} DESTINATION ${RESOURCES_DEST_DIR} RENAME ${Launcher_Name}.icns)
 
     find_program(ACTOOL_EXE actool DOC "Path to the apple asset catalog compiler")
-    if(ACTOOL_EXE)
+    if(ACTOOL_EXE AND Launcher_Branding_MAC_ICON)
         execute_process(
             COMMAND xcodebuild -version
             OUTPUT_VARIABLE XCODE_VERSION_OUTPUT

@@ -167,6 +167,10 @@ void NetRequest::executeTask()
     for (auto& header_proxy : m_headerProxies) {
         header_proxy->writeHeaders(request);
     }
+    // Record this before handing the request to Qt. Redirect policy must not
+    // depend on whether a backend preserves sensitive raw headers in
+    // QNetworkReply::request().
+    m_requestHadCredentials = containsCredentials(request);
     qCDebug(logCat) << getUid().toString() << "Running"
                     << formatRequestForLogging(request);
 
@@ -322,7 +326,7 @@ auto NetRequest::handleRedirect() -> bool
         return false;
     }
 
-    if (containsCredentials(m_reply->request()) && !sameOrigin(currentUrl, redirect)) {
+    if (m_requestHadCredentials && !sameOrigin(currentUrl, redirect)) {
         m_state = State::Failed;
         m_redirectRejected = true;
         m_failReason = tr("Redirect rejected: credentials cannot cross origins.");

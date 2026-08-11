@@ -54,8 +54,8 @@ QString getCreditsHtml()
     QString fileContent = QString::fromUtf8(dataFile.readAll());
     dataFile.close();
 
-    return fileContent.arg(QObject::tr("%1 Developers").arg(BuildConfig.LAUNCHER_DISPLAYNAME), QObject::tr("MultiMC Developers"),
-                           QObject::tr("With special thanks to"));
+    return fileContent.arg(QObject::tr("J Launcher Contributors"), QObject::tr("Prism Launcher Contributors"),
+                           QObject::tr("MultiMC Developers"), QObject::tr("With special thanks to"));
 }
 
 QString getLicenseHtml()
@@ -93,6 +93,17 @@ AboutDialog::AboutDialog(QWidget* parent) : QDialog(parent), ui(new Ui::AboutDia
     ui->title->setText(launcherName);
 
     ui->versionLabel->setText(BuildConfig.printableVersionString());
+
+    const auto releaseStage = BuildConfig.RELEASE_STAGE.trimmed().toLower();
+    if (releaseStage == "development") {
+        ui->releaseStageLabel->setText(tr("Release status: Development (not for distribution)"));
+    } else if (releaseStage == "beta") {
+        ui->releaseStageLabel->setText(tr("Release status: Beta"));
+    } else if (releaseStage == "stable") {
+        ui->releaseStageLabel->setText(tr("Release status: Stable"));
+    } else {
+        ui->releaseStageLabel->setText(tr("Release status: %1").arg(BuildConfig.RELEASE_STAGE));
+    }
 
     if (!BuildConfig.BUILD_PLATFORM.isEmpty())
         ui->platformLabel->setText(tr("Platform") + ": " + BuildConfig.BUILD_PLATFORM);

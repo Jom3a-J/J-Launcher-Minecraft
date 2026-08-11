@@ -40,6 +40,9 @@
 #include <QJsonObject>
 #include <QUuid>
 
+#include "settings/CredentialStore.h"
+#include "settings/SecretEncryption.h"
+
 namespace {
 void tokenToJSONV3(QJsonObject& parent, const Token& t, const char* tokenName)
 {
@@ -281,6 +284,9 @@ bool entitlementFromJSONV3(const QJsonObject& parent, MinecraftEntitlement& out)
 
 bool AccountData::resumeStateFromV3(QJsonObject data)
 {
+    preservedSecretsPayload.clear();
+    preservedSecretsPayloadIsUnreadable = false;
+
     auto typeV = data.value("type");
     if (!typeV.isString()) {
         qWarning() << "Failed to parse account data: type is missing.";
@@ -296,17 +302,39 @@ bool AccountData::resumeStateFromV3(QJsonObject data)
         return false;
     }
 
+    // New profiles keep token fields in one authenticated encrypted payload.
+    // Continue reading legacy inline fields so upgrades and cross-platform
+    // profiles do not lose their accounts.
+    QJsonObject secrets = data;
+    const auto secretsValue = data.value("secrets");
+    if (secretsValue.isString()) {
+        preservedSecretsPayload = secretsValue.toString();
+        const QByteArray decrypted = SecretEncryption::decrypt(preservedSecretsPayload);
+        if (decrypted.isEmpty()) {
+            preservedSecretsPayloadIsUnreadable = true;
+            qWarning() << "Could not read the stored tokens for this account. It will need to be signed in again.";
+        } else {
+            const auto document = QJsonDocument::fromJson(decrypted);
+            if (document.isObject()) {
+                secrets = document.object();
+            } else {
+                preservedSecretsPayloadIsUnreadable = true;
+                qWarning() << "The stored tokens for this account are not valid data. It will need to be signed in again.";
+            }
+        }
+    }
+
     if (type == AccountType::MSA) {
         auto clientIDV = data.value("msa-client-id");
         if (clientIDV.isString()) {
             msaClientID = clientIDV.toString();
         }  // leave msaClientID empty if it doesn't exist or isn't a string
-        msaToken = tokenFromJSONV3(data, "msa");
-        userToken = tokenFromJSONV3(data, "utoken");
-        mojangservicesToken = tokenFromJSONV3(data, "xrp-mc");
+        msaToken = tokenFromJSONV3(secrets, "msa");
+        userToken = tokenFromJSONV3(secrets, "utoken");
+        mojangservicesToken = tokenFromJSONV3(secrets, "xrp-mc");
     }
 
-    yggdrasilToken = tokenFromJSONV3(data, "ygg");
+    yggdrasilToken = tokenFromJSONV3(secrets, "ygg");
     // versions before 7.2 used "offline" as the offline token
     if (yggdrasilToken.token == "offline")
         yggdrasilToken.token = "0";
@@ -327,17 +355,49 @@ bool AccountData::resumeStateFromV3(QJsonObject data)
 QJsonObject AccountData::saveState() const
 {
     QJsonObject output;
+    QJsonObject secrets;
     if (type == AccountType::MSA) {
         output["type"] = "MSA";
         output["msa-client-id"] = msaClientID;
-        tokenToJSONV3(output, msaToken, "msa");
-        tokenToJSONV3(output, userToken, "utoken");
-        tokenToJSONV3(output, mojangservicesToken, "xrp-mc");
+        tokenToJSONV3(secrets, msaToken, "msa");
+        tokenToJSONV3(secrets, userToken, "utoken");
+        tokenToJSONV3(secrets, mojangservicesToken, "xrp-mc");
     } else if (type == AccountType::Offline) {
         output["type"] = "Offline";
     }
 
-    tokenToJSONV3(output, yggdrasilToken, "ygg");
+    tokenToJSONV3(secrets, yggdrasilToken, "ygg");
+
+    // Never downgrade to plaintext when a persistent credential backend is
+    // expected but temporarily unavailable. Preserve the previous ciphertext
+    // so a repaired credential store can recover it later.
+    bool secretsStored = false;
+    if (!secrets.isEmpty()) {
+        const QString payload = SecretEncryption::encrypt(QJsonDocument(secrets).toJson(QJsonDocument::Compact));
+        if (!payload.isEmpty()) {
+            output["secrets"] = payload;
+            secretsStored = true;
+        } else if (CredentialStore::isPersistent()) {
+            if (!preservedSecretsPayload.isEmpty()) {
+                output["secrets"] = preservedSecretsPayload;
+            }
+            secretsStored = true;
+            qWarning() << "Could not encrypt the tokens for this account; they were not written in plaintext.";
+        }
+    }
+
+    if (!secretsStored && secrets.isEmpty() && preservedSecretsPayloadIsUnreadable && !preservedSecretsPayload.isEmpty()) {
+        output["secrets"] = preservedSecretsPayload;
+        secretsStored = true;
+    }
+
+    // Platforms without a persistent native store retain the inherited
+    // plaintext representation until an appropriate backend is available.
+    if (!secretsStored) {
+        for (auto it = secrets.constBegin(); it != secrets.constEnd(); ++it) {
+            output[it.key()] = it.value();
+        }
+    }
     profileToJSONV3(output, minecraftProfile, "profile");
     entitlementToJSONV3(output, minecraftEntitlement);
     return output;

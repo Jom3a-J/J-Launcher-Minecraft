@@ -48,6 +48,13 @@ inline bool isModrinthApiRequest(const QUrl& url)
         || isConfiguredEndpoint(QUrl(BuildConfig.MODRINTH_STAGING_URL));
 }
 
+inline bool isModrinthDownloadRequest(const QUrl& url)
+{
+    return url.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0
+        && url.host().compare(BuildConfig.MODRINTH_DOWNLOAD_HOST, Qt::CaseInsensitive) == 0
+        && url.port(443) == 443;
+}
+
 class CurseForgeApiKeyHeaderProxy final : public HeaderProxy {
    public:
     explicit CurseForgeApiKeyHeaderProxy(QByteArray apiKey)
@@ -103,18 +110,17 @@ class ApiHeaderProxy : public HeaderProxy {
     QList<HeaderPair> headers(const QNetworkRequest& request) const override
     {
         QList<HeaderPair> hdrs;
-        const auto host = request.url().host();
 
         if (APPLICATION->capabilities() & Application::SupportsFlame && isCurseForgeApiRequest(request.url())) {
             hdrs.append({ .headerName = "x-api-key", .headerValue = APPLICATION->getFlameAPIKey().toUtf8() });
         } else if (isModrinthApiRequest(request.url())) {
             QString token = APPLICATION->getModrinthAPIToken();
-            if (!token.isNull()) {
+            if (!token.isEmpty()) {
                 hdrs.append({ .headerName = "Authorization", .headerValue = token.toUtf8() });
             }
         }
 
-        if (host == BuildConfig.MODRINTH_DOWNLOAD_HOST && !m_meta.isEmpty()) {
+        if (isModrinthDownloadRequest(request.url()) && !m_meta.isEmpty()) {
             hdrs.append({ .headerName = "modrinth-download-meta", .headerValue = m_meta.toJson() });
         }
         return hdrs;

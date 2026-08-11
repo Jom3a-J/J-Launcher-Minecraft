@@ -24,7 +24,7 @@ struct Language;
 class TranslationsModel : public QAbstractListModel {
     Q_OBJECT
    public:
-    explicit TranslationsModel(const QString& path, QObject* parent = nullptr);
+    TranslationsModel(const QString& path, QString selectedLanguage, bool useSystemLocale, QObject* parent = nullptr);
     ~TranslationsModel() override;
 
     // hide copy constructor
@@ -41,6 +41,7 @@ class TranslationsModel : public QAbstractListModel {
     QString selectedLanguage() const;
 
     void downloadIndex();
+    bool isIndexDownloadInProgress() const;
     void setUseSystemLocale(bool useSystemLocale) const;
 
    private:
@@ -58,6 +59,7 @@ class TranslationsModel : public QAbstractListModel {
     void dlFailed(const QString& reason);
     void dlGood();
     void translationDirChanged(const QString& path);
+    void applyPendingTranslationChange();
 
    private: /* data */
     struct Private;

@@ -39,6 +39,35 @@
 #include "minecraft/auth/AuthStep.h"
 
 #include <QtNetworkAuth/qoauth2authorizationcodeflow.h>
+#include <QtNetworkAuth/qoauthhttpserverreplyhandler.h>
+
+/**
+ * The page served on the loopback callback once Microsoft redirects back to us.
+ * It sends the browser on to a fixed landing URL and nothing else.
+ *
+ * Split out of MSAStep's constructor so the isolation rules can be tested: the
+ * landing URL must be used exactly as given, with no part of the OAuth callback
+ * - no query, no fragment, no authorization code - appended to it.
+ */
+QString buildLoginCallbackPage(const QString& landingUrl);
+
+/**
+ * The page served when Microsoft sends us back an error instead of a code,
+ * which is what a cancelled or denied sign-in looks like. It says so and
+ * redirects nowhere.
+ */
+QString buildLoginFailedPage();
+
+/**
+ * Wire a loopback handler so the browser is told the truth.
+ *
+ * Qt serves one fixed callback text for every hit on the loopback path, so
+ * without this a denied sign-in is answered with "Login Successful" and sent to
+ * the completion page, while the launcher reports the failure. Choose the page
+ * from the callback's own query instead.
+ */
+void configureLoginCallbackHandler(QOAuthHttpServerReplyHandler* handler);
+
 class MSAStep : public AuthStep {
     Q_OBJECT
    public:
