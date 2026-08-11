@@ -92,6 +92,8 @@
 #include <net/ApiDownload.h>
 #include <net/NetJob.h>
 #include <news/NewsChecker.h>
+#include <server/ServerInstance.h>
+#include <server/ServerManager.h>
 #include <tools/BaseProfiler.h>
 #include <updater/ExternalUpdater.h>
 #include "InstanceWindow.h"
@@ -383,8 +385,32 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainWi
 
     m_statusLeft = new QLabel(tr("No instance selected"), this);
     m_statusCenter = new QLabel(tr("Total playtime: 0s"), this);
+    m_serverStatusButton = new QToolButton(this);
+    m_serverStatusButton->setObjectName(QStringLiteral("serverStatusButton"));
+    m_serverStatusButton->setAutoRaise(true);
+    m_serverStatusButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_serverStatusButton->setIcon(QIcon::fromTheme(QStringLiteral("status-running")));
+    connect(m_serverStatusButton, &QToolButton::clicked,
+            this, &MainWindow::on_actionManageServers_triggered);
     statusBar()->addPermanentWidget(m_statusLeft, 1);
     statusBar()->addPermanentWidget(m_statusCenter, 0);
+    statusBar()->addPermanentWidget(m_serverStatusButton, 0);
+
+    if (auto* serverManager = APPLICATION->serverManager()) {
+        for (const auto& server : serverManager->getAllServers()) {
+            watchServerStatus(server);
+        }
+        connect(serverManager, &ServerManager::serverAdded, this,
+                [this, serverManager](const QString& id) {
+                    watchServerStatus(serverManager->getServer(id));
+                    updateServerStatusIndicator();
+                });
+        connect(serverManager, &ServerManager::serverRemoved,
+                this, &MainWindow::updateServerStatusIndicator);
+        connect(serverManager, &ServerManager::serverChanged,
+                this, &MainWindow::updateServerStatusIndicator);
+    }
+    updateServerStatusIndicator();
 
     // Add "manage accounts" button, right align
     QWidget* spacer = new QWidget();
@@ -469,6 +495,7 @@ void MainWindow::retranslateUi()
 
     changeIconButton->setToolTip(ui->actionChangeInstIcon->toolTip());
     renameButton->setToolTip(ui->actionRenameInstance->toolTip());
+    updateServerStatusIndicator();
 
     // replace the %1 with the launcher display name in some actions
     if (helpMenuButton->toolTip().contains("%1"))
@@ -499,6 +526,75 @@ void MainWindow::setStatusBarVisibility(bool state)
     statusBar()->setVisible(state);
     APPLICATION->settings()->set("StatusBarVisible", state);
 }
+
+void MainWindow::watchServerStatus(const std::shared_ptr<ServerInstance>& server)
+{
+    if (!server) {
+        return;
+    }
+    connect(server.get(), &ServerInstance::statusChanged,
+            this, &MainWindow::updateServerStatusIndicator, Qt::UniqueConnection);
+}
+
+void MainWindow::updateServerStatusIndicator()
+{
+    if (!m_serverStatusButton) {
+        return;
+    }
+
+    int activeCount = 0;
+    int runningCount = 0;
+    if (auto* serverManager = APPLICATION->serverManager()) {
+        for (const auto& server : serverManager->getAllServers()) {
+            if (!server) {
+                continue;
+            }
+            switch (server->status()) {
+                case ServerStatus::Running:
+                    ++runningCount;
+                    ++activeCount;
+                    break;
+                case ServerStatus::Starting:
+                case ServerStatus::Stopping:
+                case ServerStatus::Downloading:
+                    ++activeCount;
+                    break;
+                case ServerStatus::Stopped:
+                case ServerStatus::Error:
+                    break;
+            }
+        }
+    }
+
+    m_serverStatusButton->setVisible(activeCount > 0);
+    if (activeCount == 0) {
+        m_serverStatusButton->setText(QString());
+        m_serverStatusButton->setToolTip(QString());
+        m_serverStatusButton->setAccessibleName(tr("No local servers running"));
+        ui->actionManageServers->setToolTip(tr("Create and manage local Minecraft servers."));
+        return;
+    }
+
+    const bool allRunning = runningCount == activeCount;
+    const QString summary = allRunning
+        ? (runningCount == 1 ? tr("1 server running")
+                             : tr("%1 servers running").arg(runningCount))
+        : (activeCount == 1 ? tr("1 server process active")
+                            : tr("%1 server processes active").arg(activeCount));
+    const QString detail = allRunning
+        ? tr("Servers keep running when the Server Manager window is closed. Click to manage them.")
+        : tr("A managed server is starting, stopping, or downloading. Click to open Server Manager.");
+
+    m_serverStatusButton->setIcon(QIcon::fromTheme(
+        allRunning ? QStringLiteral("status-running") : QStringLiteral("status-yellow")));
+    m_serverStatusButton->setText(summary);
+    m_serverStatusButton->setToolTip(summary + QStringLiteral("\n") + detail);
+    m_serverStatusButton->setAccessibleName(summary);
+    m_serverStatusButton->setAccessibleDescription(detail);
+    ui->actionManageServers->setToolTip(
+        tr("Create and manage local Minecraft servers. %1.").arg(summary));
+}
+
 void MainWindow::lockToolbars(bool state)
 {
     ui->mainToolBar->setMovable(!state);
