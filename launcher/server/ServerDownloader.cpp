@@ -117,7 +117,7 @@ QNetworkRequest ServerDownloader::createRequest(const QUrl &url)
     QNetworkRequest request(url);
     request.setRawHeader(
         "User-Agent",
-        QString("%1 (https://github.com/PrismLauncher/PrismLauncher)").arg(BuildConfig.USER_AGENT).toUtf8());
+        QString("%1 (%2)").arg(BuildConfig.USER_AGENT, BuildConfig.LAUNCHER_GIT).toUtf8());
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
     return request;

@@ -85,11 +85,11 @@ PrismUpdaterApp::PrismUpdaterApp(int& argc, char** argv) : QApplication(argc, ar
 
     // Command line parsing
     QCommandLineParser parser;
-    parser.setApplicationDescription(QObject::tr("An auto-updater for Prism Launcher"));
+    parser.setApplicationDescription(QObject::tr("An auto-updater for J Launcher"));
 
     parser.addOptions(
         { { { "d", "dir" }, tr("Use a custom path as application root (use '.' for current directory)."), tr("directory") },
-          { { "V", "prism-version" },
+          { { "V", "launcher-version" },
             tr("Use this version as the installed launcher version. (provided because stdout can not be reliably captured on windows)"),
             tr("installed launcher version") },
           { { "I", "install-version" }, "Install a specific version.", tr("version name") },
@@ -171,7 +171,7 @@ PrismUpdaterApp::PrismUpdaterApp(int& argc, char** argv) : QApplication(argc, ar
 #endif
     }
 
-    m_updateLogPath = FS::PathCombine(m_dataPath, "logs", "prism_launcher_update.log");
+    m_updateLogPath = FS::PathCombine(m_dataPath, "logs", "jlauncher_update.log");
 
     {  // setup logging
         FS::ensureFolderPathExists(FS::PathCombine(m_dataPath, "logs"));
@@ -328,7 +328,7 @@ PrismUpdaterApp::PrismUpdaterApp(int& argc, char** argv) : QApplication(argc, ar
     m_selectUI = parser.isSet("select-ui");
     m_allowDowngrade = parser.isSet("allow-downgrade");
 
-    auto version = parser.value("prism-version");
+    auto version = parser.value("launcher-version");
     if (!version.isEmpty()) {
         if (version.contains('-')) {
             auto index = version.indexOf('-');
@@ -348,7 +348,7 @@ PrismUpdaterApp::PrismUpdaterApp(int& argc, char** argv) : QApplication(argc, ar
 
     m_allowPreRelease = parser.isSet("pre-release");
 
-    auto marker_file_path = QDir(m_rootPath).absoluteFilePath(".prism_launcher_updater_unpack.marker");
+    auto marker_file_path = QDir(m_rootPath).absoluteFilePath(".jlauncher_updater_unpack.marker");
     auto marker_file = QFileInfo(marker_file_path);
     if (marker_file.exists()) {
         auto target_dir = QString(FS::read(marker_file_path)).trimmed();
@@ -449,8 +449,8 @@ void PrismUpdaterApp::run()
     }
 
     if (m_isFlatpak) {
-        showFatalErrorMessage(tr("Updating flatpack not supported"), tr("Actions outside of checking if an update is available are not "
-                                                                        "supported when running the flatpak version of Prism Launcher."));
+        showFatalErrorMessage(tr("Updating Flatpak is not supported"), tr("Actions outside of checking if an update is available are not "
+                                                                           "supported when running the Flatpak version of J Launcher."));
         return;
     }
     if (m_isAppimage) {
@@ -573,14 +573,14 @@ void PrismUpdaterApp::moveAndFinishUpdate(QDir target)
 
     if (error) {
         logUpdate(tr("There were errors installing the update."));
-        auto fail_marker = FS::PathCombine(m_dataPath, ".prism_launcher_update.fail");
+        auto fail_marker = FS::PathCombine(m_dataPath, ".jlauncher_update.fail");
         FS::copy(m_updateLogPath, fail_marker).overwrite(true)();
     } else {
         logUpdate(tr("Update succeed."));
-        auto success_marker = FS::PathCombine(m_dataPath, ".prism_launcher_update.success");
+        auto success_marker = FS::PathCombine(m_dataPath, ".jlauncher_update.success");
         FS::copy(m_updateLogPath, success_marker).overwrite(true)();
     }
-    auto update_lock_path = FS::PathCombine(m_dataPath, ".prism_launcher_update.lock");
+    auto update_lock_path = FS::PathCombine(m_dataPath, ".jlauncher_update.lock");
     FS::deletePath(update_lock_path);
 
     QProcess proc;
@@ -853,7 +853,7 @@ bool write_lock_file(const QString& path, QDateTime timestamp, QString from, QSt
 void PrismUpdaterApp::performInstall(QFileInfo file)
 {
     qDebug() << "starting install";
-    auto update_lock_path = FS::PathCombine(m_dataPath, ".prism_launcher_update.lock");
+    auto update_lock_path = FS::PathCombine(m_dataPath, ".jlauncher_update.lock");
     QFileInfo update_lock(update_lock_path);
     if (update_lock.exists()) {
         auto [timestamp, from, to, target, data_path] = read_lock_File(update_lock_path);
@@ -868,7 +868,7 @@ void PrismUpdaterApp::performInstall(QFileInfo file)
                "\n"
                "This likely means that a previous update attempt failed. Please ensure your installation is in working order before "
                "proceeding.\n"
-               "Check the Prism Launcher updater log at: \n"
+               "Check the J Launcher updater log at: \n"
                "%7\n"
                "for details on the last update attempt.\n"
                "\n"
@@ -894,7 +894,7 @@ void PrismUpdaterApp::performInstall(QFileInfo file)
     }
     clearUpdateLog();
 
-    auto changelog_path = FS::PathCombine(m_dataPath, ".prism_launcher_update.changelog");
+    auto changelog_path = FS::PathCombine(m_dataPath, ".jlauncher_update.changelog");
     FS::write(changelog_path, m_install_release.body.toUtf8());
 
     logUpdate(tr("Updating from %1 to %2").arg(m_prismVersion).arg(m_install_release.tag_name));
@@ -923,7 +923,7 @@ void PrismUpdaterApp::unpackAndInstall(QFileInfo archive)
     backupAppDir();
 
     if (auto loc = unpackArchive(archive)) {
-        auto marker_file_path = loc.value().absoluteFilePath(".prism_launcher_updater_unpack.marker");
+        auto marker_file_path = loc.value().absoluteFilePath(".jlauncher_updater_unpack.marker");
         FS::write(marker_file_path, m_rootPath.toUtf8());
 
         QProcess proc = QProcess();
@@ -973,13 +973,14 @@ void PrismUpdaterApp::backupAppDir()
     if (file_list.isEmpty()) {
         // best guess
         if (BuildConfig.BUILD_ARTIFACT.toLower().contains("linux")) {
-            file_list.append({ "PrismLauncher", "bin", "share", "lib" });
+            file_list.append({ BuildConfig.LAUNCHER_NAME, "bin", "share", "lib" });
         } else {  // windows by process of elimination
+            const auto app_binary_name = BuildConfig.LAUNCHER_APP_BINARY_NAME;
             file_list.append({
                 "jars",
-                "prismlauncher.exe",
-                "prismlauncher_filelink.exe",
-                "prismlauncher_updater.exe",
+                app_binary_name + ".exe",
+                app_binary_name + "_filelink.exe",
+                app_binary_name + "_updater.exe",
                 "qtlogging.ini",
                 "imageformats",
                 "iconengines",
@@ -999,7 +1000,7 @@ void PrismUpdaterApp::backupAppDir()
         FS::PathCombine(app_dir.absolutePath(),
                         QStringLiteral("backup_") + QString(m_prismVersion).replace(s_replaceRegex, QString("_")) + "-" + m_prismGitCommit);
     FS::ensureFolderPathExists(backup_dir);
-    auto backup_marker_path = FS::PathCombine(m_dataPath, ".prism_launcher_update_backup_path.txt");
+    auto backup_marker_path = FS::PathCombine(m_dataPath, ".jlauncher_update_backup_path.txt");
     FS::write(backup_marker_path, backup_dir.toUtf8());
 
     QProgressDialog progress(tr("Backing up install at %1").arg(m_rootPath), "", 0, file_list.length());
@@ -1049,7 +1050,7 @@ void PrismUpdaterApp::backupAppDir()
 
 std::optional<QDir> PrismUpdaterApp::unpackArchive(QFileInfo archive)
 {
-    auto temp_extract_path = FS::PathCombine(m_dataPath, "prism_launcher_update_release");
+    auto temp_extract_path = FS::PathCombine(m_dataPath, "jlauncher_update_release");
     FS::ensureFolderPathExists(temp_extract_path);
     auto tmp_extract_dir = QDir(temp_extract_path);
 

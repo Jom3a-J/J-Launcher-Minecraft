@@ -37,6 +37,8 @@
 #include "TranslationsModel.h"
 
 #include <QDebug>
+#include <QTimer>
+#include <algorithm>
 #include <memory>
 #include <utility>
 
@@ -47,6 +49,7 @@
 #include "net/NetJob.h"
 
 #include "POTranslator.h"
+#include "TranslationMetadata.h"
 
 #include "Application.h"
 #include "settings/SettingsObject.h"
@@ -60,10 +63,18 @@ QString getSystemLocaleName()
 {
     return QLocale::system().name();
 }
-
 QString getSystemLanguage()
 {
     return getSystemLocaleName().split('_').front();
+}
+
+QString fileSha1(const QString& path)
+{
+    try {
+        return QString::fromLatin1(QCryptographicHash::hash(FS::read(path), QCryptographicHash::Sha1).toHex());
+    } catch ([[maybe_unused]] const Exception& e) {
+        return {};
+    }
 }
 }  // namespace
 
@@ -121,8 +132,12 @@ struct Language {
 
     bool isIdenticalTo(const Language& other) const
     {
-        return (key == other.key && fileName == other.fileName && fileSize == other.fileSize && fileSha1 == other.fileSha1 &&
-                translated == other.translated && fuzzy == other.fuzzy && total == other.fuzzy && localFileType == other.localFileType);
+        return key == other.key && updated == other.updated && metadata() == other.metadata();
+    }
+
+    Translations::Metadata metadata() const
+    {
+        return { fileName, fileSize, fileSha1, translated, untranslated, fuzzy, total, static_cast<std::uint8_t>(localFileType) };
     }
 
     Language& apply(const Language& other)
@@ -134,9 +149,11 @@ struct Language {
         fileSize = other.fileSize;
         fileSha1 = other.fileSha1;
         translated = other.translated;
+        untranslated = other.untranslated;
         fuzzy = other.fuzzy;
         total = other.total;
         localFileType = other.localFileType;
+        updated = other.updated;
         return *this;
     }
 
@@ -165,6 +182,9 @@ struct TranslationsModel::Private {
     QString m_selectedLanguage = g_defaultLangCode;
     std::unique_ptr<QTranslator> m_qtTranslator;
     std::unique_ptr<QTranslator> m_appTranslator;
+    QString m_appTranslationSignature;
+    bool m_languageSelectionApplied = false;
+    bool m_lastLanguageSelectionSuccessful = false;
 
     Net::Download* m_indexTask = nullptr;
     QString m_downloadingTranslation;
@@ -173,21 +193,32 @@ struct TranslationsModel::Private {
     QString m_nextDownload;
 
     QFileSystemWatcher* watcher = nullptr;
+    QTimer* translationReloadTimer = nullptr;
 
     bool m_noLanguageSet = false;
+    bool m_useSystemLocale = false;
 };
 
-TranslationsModel::TranslationsModel(const QString& path, QObject* parent) : QAbstractListModel(parent)
+TranslationsModel::TranslationsModel(const QString& path, QString selectedLanguage, bool useSystemLocale, QObject* parent)
+    : QAbstractListModel(parent)
 {
     d = std::make_unique<Private>();
     d->m_dir.setPath(path);
-    d->m_selectedLanguage = APPLICATION->settings()->get("Language").toString();
+    d->m_selectedLanguage = std::move(selectedLanguage);
+    d->m_useSystemLocale = useSystemLocale;
     FS::ensureFolderPathExists(path);
     reloadLocalFiles();
 
     d->watcher = new QFileSystemWatcher(this);
     connect(d->watcher, &QFileSystemWatcher::directoryChanged, this, &TranslationsModel::translationDirChanged);
     d->watcher->addPath(d->m_dir.canonicalPath());
+
+    d->translationReloadTimer = new QTimer(this);
+    d->translationReloadTimer->setSingleShot(true);
+    d->translationReloadTimer->setInterval(200);
+    connect(d->translationReloadTimer, &QTimer::timeout, this, &TranslationsModel::applyPendingTranslationChange);
+
+    selectLanguage(d->m_selectedLanguage);
 }
 
 TranslationsModel::~TranslationsModel() = default;
@@ -195,6 +226,11 @@ TranslationsModel::~TranslationsModel() = default;
 void TranslationsModel::translationDirChanged(const QString& path)
 {
     qDebug() << "Dir changed:" << path;
+    d->translationReloadTimer->start();
+}
+
+void TranslationsModel::applyPendingTranslationChange()
+{
     if (!d->m_noLanguageSet) {
         reloadLocalFiles();
     }
@@ -269,11 +305,9 @@ void TranslationsModel::reloadLocalFiles()
     QMap<QString, Language> languages = { { g_defaultLangCode, Language(g_defaultLangCode) } };
 
     const auto indexPath = d->m_dir.absoluteFilePath("index_v2.json");
-    if (!QFileInfo::exists(indexPath)) {
-        downloadIndex();
-        return;
+    if (QFileInfo::exists(indexPath)) {
+        readIndex(indexPath, languages);
     }
-    readIndex(indexPath, languages);
     auto entries = d->m_dir.entryInfoList({ "mmc_*.qm", "*.po" }, QDir::Files | QDir::NoDotAndDotDot);
     for (auto& entry : entries) {
         auto completeSuffix = entry.completeSuffix();
@@ -296,43 +330,23 @@ void TranslationsModel::reloadLocalFiles()
             if (static_cast<int>(fileType) > static_cast<int>(language.localFileType)) {
                 language.localFileType = fileType;
             }
-        } else {
             if (fileType == FileType::Po) {
-                Language localFound(langCode);
-                localFound.localFileType = FileType::Po;
-                languages.insert(langCode, localFound);
+                // A local PO file intentionally overrides the downloaded catalog.
+                language.updated = true;
+            } else if (language.localFileType != FileType::Po
+                       && entry.size() == static_cast<qint64>(language.fileSize)) {
+                language.updated =
+                    fileSha1(entry.absoluteFilePath()).compare(language.fileSha1, Qt::CaseInsensitive) == 0;
             }
-        }
-    }
-
-    // changed and removed languages
-    for (auto iter = d->m_languages.begin(); iter != d->m_languages.end();) {
-        auto& language = *iter;
-        auto row = iter - d->m_languages.begin();
-
-        auto updatedLanguageIter = languages.find(language.key);
-        if (updatedLanguageIter != languages.end()) {
-            if (language.isIdenticalTo(*updatedLanguageIter)) {
-                languages.remove(language.key);
-            } else {
-                language.apply(*updatedLanguageIter);
-                emit dataChanged(index(row), index(row));
-                languages.remove(language.key);
-            }
-            ++iter;
         } else {
-            beginRemoveRows(QModelIndex(), row, row);
-            iter = d->m_languages.erase(iter);
-            endRemoveRows();
+            // Local catalogs remain usable without a downloaded index. This is
+            // what lets first startup stay offline and still retain cached or
+            // bundled translations.
+            Language localFound(langCode);
+            localFound.localFileType = fileType;
+            localFound.updated = true;
+            languages.insert(langCode, localFound);
         }
-    }
-    // added languages
-    if (languages.isEmpty()) {
-        return;
-    }
-    beginInsertRows(QModelIndex(), 0, d->m_languages.size() + languages.size() - 1);
-    for (auto& language : languages) {
-        d->m_languages.append(language);
     }
 
     const auto comp = [systemLocale = getSystemLocaleName(), systemLanguage = getSystemLanguage()](const Language& a, const Language& b) {
@@ -346,8 +360,31 @@ void TranslationsModel::reloadLocalFiles()
         }
         return a.languageName().toLower() < b.languageName().toLower();
     };
-    std::ranges::sort(d->m_languages, comp);
-    endInsertRows();
+
+    QList<Language> refreshedLanguages;
+    refreshedLanguages.reserve(languages.size());
+    for (const auto& language : languages) {
+        refreshedLanguages.append(language);
+    }
+    std::ranges::sort(refreshedLanguages, comp);
+
+    const bool unchanged = d->m_languages.size() == refreshedLanguages.size()
+        && std::equal(d->m_languages.cbegin(), d->m_languages.cend(),
+                      refreshedLanguages.cbegin(),
+                      [](const Language& current, const Language& refreshed) {
+                          return current.isIdenticalTo(refreshed);
+                      });
+    if (unchanged) {
+        return;
+    }
+
+    // The sort order can change whenever the system locale or catalog set
+    // changes. A reset accurately describes that transition; inserting rows
+    // and then sorting the entire backing list would invalidate persistent
+    // indexes without emitting the required layout signals.
+    beginResetModel();
+    d->m_languages = std::move(refreshedLanguages);
+    endResetModel();
 }
 
 namespace {
@@ -416,14 +453,14 @@ QVariant TranslationsModel::headerData(int section, const Qt::Orientation orient
     return QAbstractListModel::headerData(section, orientation, role);
 }
 
-int TranslationsModel::rowCount([[maybe_unused]] const QModelIndex& parent) const
+int TranslationsModel::rowCount(const QModelIndex& parent) const
 {
-    return d->m_languages.size();
+    return parent.isValid() ? 0 : d->m_languages.size();
 }
 
-int TranslationsModel::columnCount([[maybe_unused]] const QModelIndex& parent) const
+int TranslationsModel::columnCount(const QModelIndex& parent) const
 {
-    return 2;
+    return parent.isValid() ? 0 : 2;
 }
 
 QList<Language>::Iterator TranslationsModel::findLanguage(const QString& key) const
@@ -442,6 +479,7 @@ std::optional<Language> TranslationsModel::findLanguageAsOptional(const QString&
 
 void TranslationsModel::setUseSystemLocale(const bool useSystemLocale) const
 {
+    d->m_useSystemLocale = useSystemLocale;
     APPLICATION->settings()->set("UseSystemLocale", useSystemLocale);
     QLocale::setDefault(useSystemLocale ? QLocale::system() : QLocale(selectedLanguage()));
 }
@@ -453,6 +491,8 @@ bool TranslationsModel::selectLanguage(QString key) const
 
     if (langCode.isEmpty()) {
         d->m_noLanguageSet = true;
+    } else {
+        d->m_noLanguageSet = false;
     }
 
     if (!langPtr.has_value()) {
@@ -462,12 +502,36 @@ bool TranslationsModel::selectLanguage(QString key) const
         langCode = langPtr->key;
     }
 
-    // uninstall existing translators if there are any
-    if (d->m_appTranslator) {
+    QString appTranslationPath;
+    if (langPtr.has_value()) {
+        if (langPtr->localFileType == FileType::Po) {
+            appTranslationPath = d->m_dir.absoluteFilePath(langCode + ".po");
+        } else if (langPtr->localFileType == FileType::Qm) {
+            appTranslationPath = d->m_dir.absoluteFilePath("mmc_" + langCode + ".qm");
+        }
+    }
+    QString appTranslationSignature;
+    if (!appTranslationPath.isEmpty()) {
+        const QFileInfo translationFile(appTranslationPath);
+        if (translationFile.exists()) {
+            appTranslationSignature = QString("%1|%2|%3")
+                                          .arg(translationFile.canonicalFilePath())
+                                          .arg(translationFile.size())
+                                          .arg(fileSha1(appTranslationPath));
+        }
+    }
+
+    const bool sameAppliedLanguage = d->m_languageSelectionApplied && d->m_selectedLanguage == langCode;
+    if (sameAppliedLanguage && d->m_appTranslationSignature == appTranslationSignature) {
+        return d->m_lastLanguageSelectionSuccessful;
+    }
+
+    // A changed application catalog does not require reinstalling Qt's catalog.
+    if (d->m_appTranslator && (!sameAppliedLanguage || d->m_appTranslationSignature != appTranslationSignature)) {
         QCoreApplication::removeTranslator(d->m_appTranslator.get());
         d->m_appTranslator.reset();
     }
-    if (d->m_qtTranslator) {
+    if (d->m_qtTranslator && !sameAppliedLanguage) {
         QCoreApplication::removeTranslator(d->m_qtTranslator.get());
         d->m_qtTranslator.reset();
     }
@@ -477,29 +541,33 @@ bool TranslationsModel::selectLanguage(QString key) const
      * In a multithreaded application, the default locale should be set at application startup, before any non-GUI threads are created.
      * This function is not reentrant.
      */
-    const bool useSystemLocale = APPLICATION->settings()->get("UseSystemLocale").toBool();
-    QLocale::setDefault(useSystemLocale ? QLocale::system() : QLocale(langCode));
+    QLocale::setDefault(d->m_useSystemLocale ? QLocale::system() : QLocale(langCode));
 
     // if it's the default UI language, finish
     if (langCode == g_defaultLangCode) {
         d->m_selectedLanguage = langCode;
+        d->m_appTranslationSignature = appTranslationSignature;
+        d->m_languageSelectionApplied = true;
+        d->m_lastLanguageSelectionSuccessful = true;
         return true;
     }
 
     // otherwise install new translations
-    bool successful = false;
+    bool successful = sameAppliedLanguage && d->m_qtTranslator;
     // FIXME: this is likely never present. FIX IT.
-    d->m_qtTranslator = std::make_unique<QTranslator>();
-    if (d->m_qtTranslator->load("qt_" + langCode, QLibraryInfo::path(QLibraryInfo::TranslationsPath))) {
-        qDebug() << "Loading Qt Language File for" << langCode.toLocal8Bit().constData() << "...";
-        if (!QCoreApplication::installTranslator(d->m_qtTranslator.get())) {
-            qCritical() << "Loading Qt Language File failed.";
-            d->m_qtTranslator.reset();
+    if (!sameAppliedLanguage) {
+        d->m_qtTranslator = std::make_unique<QTranslator>();
+        if (d->m_qtTranslator->load("qt_" + langCode, QLibraryInfo::path(QLibraryInfo::TranslationsPath))) {
+            qDebug() << "Loading Qt Language File for" << langCode.toLocal8Bit().constData() << "...";
+            if (!QCoreApplication::installTranslator(d->m_qtTranslator.get())) {
+                qCritical() << "Loading Qt Language File failed.";
+                d->m_qtTranslator.reset();
+            } else {
+                successful = true;
+            }
         } else {
-            successful = true;
+            d->m_qtTranslator.reset();
         }
-    } else {
-        d->m_qtTranslator.reset();
     }
 
     if (langPtr->localFileType == FileType::Po) {
@@ -533,6 +601,9 @@ bool TranslationsModel::selectLanguage(QString key) const
         d->m_appTranslator.reset();
     }
     d->m_selectedLanguage = langCode;
+    d->m_appTranslationSignature = appTranslationSignature;
+    d->m_languageSelectionApplied = true;
+    d->m_lastLanguageSelectionSuccessful = successful;
     return successful;
 }
 
@@ -568,6 +639,11 @@ void TranslationsModel::downloadIndex()
     d->m_indexJob->start();
 }
 
+bool TranslationsModel::isIndexDownloadInProgress() const
+{
+    return d->m_indexJob != nullptr;
+}
+
 void TranslationsModel::updateLanguage(const QString& key)
 {
     if (key == g_defaultLangCode) {
@@ -587,7 +663,9 @@ void TranslationsModel::updateLanguage(const QString& key)
 void TranslationsModel::downloadTranslation(const QString& key)
 {
     if (d->m_downloadJob) {
-        d->m_nextDownload = key;
+        if (key != d->m_downloadingTranslation) {
+            d->m_nextDownload = key;
+        }
         return;
     }
     auto lang = findLanguageAsOptional(key);
@@ -634,7 +712,7 @@ void TranslationsModel::dlGood()
     qDebug() << "Got translation:" << d->m_downloadingTranslation;
 
     if (d->m_downloadingTranslation == d->m_selectedLanguage) {
-        selectLanguage(d->m_selectedLanguage);
+        d->translationReloadTimer->start();
     }
     d->m_downloadJob.reset();
     downloadNext();

@@ -349,22 +349,6 @@ Section "" UninstallPrevious
 
 SectionEnd
 
-;------------------------------------
-; include nice plugins
-
-; NScurl - curl in NSIS
-; used for MSVS redist download
-; extract to ../NSISPlugins/NScurl
-; https://github.com/negrutiu/nsis-nscurl/releases/latest/download/NScurl.zip
-!insertmacro CompileTimeIfFileExist "../NSISPlugins/NScurl/Plugins/" haveNScurl
-!ifdef haveNScurl
-!AddPluginDir /x86-unicode     "../NSISPlugins/NScurl/Plugins/x86-unicode"
-!AddPluginDir /x86-ansi        "../NSISPlugins/NScurl/Plugins/x86-ansi"
-!AddPluginDir /amd64-unicode   "../NSISPlugins/NScurl/Plugins/amd64-unicode"
-!endif
-
-;------------------------------------
-
 ; The stuff to install
 Section "@Launcher_DisplayName@"
 
@@ -376,9 +360,13 @@ Section "@Launcher_DisplayName@"
 
   File "@Launcher_APP_BINARY_NAME@.exe"
   File "@Launcher_APP_BINARY_NAME@_filelink.exe"
-  File "@Launcher_APP_BINARY_NAME@_updater.exe"
+  @Launcher_NSIS_UPDATER_FILE@
   File "qt.conf"
   File "qtlogging.ini"
+  ; GPL-3.0 requires the licence and upstream notices to accompany the program.
+  ; This script names its files explicitly, so installing COPYING.md into the
+  ; build's install tree is not enough on its own.
+  File "COPYING.md"
   File *.dll
   File /r "iconengines"
   File /r "imageformats"
@@ -394,13 +382,9 @@ Section "@Launcher_DisplayName@"
   WriteRegStr HKCU Software\Classes\curseforge "URL Protocol" ""
   WriteRegStr HKCU Software\Classes\curseforge\shell\open\command "" '"$INSTDIR\@Launcher_APP_BINARY_NAME@.exe" "%1"'
 
-  ; Write the URL Handler into registry for prismlauncher
+  ; Write the J Launcher URL handler into the registry
   WriteRegStr HKCU Software\Classes\@Launcher_APP_BINARY_NAME@ "URL Protocol" ""
   WriteRegStr HKCU Software\Classes\@Launcher_APP_BINARY_NAME@\shell\open\command "" '"$INSTDIR\@Launcher_APP_BINARY_NAME@.exe" "%1"'
-
-  ; Write the URL Handler into registry for prismlauncher import
-  WriteRegStr HKCU Software\Classes\prismlauncher "URL Protocol" ""
-  WriteRegStr HKCU Software\Classes\prismlauncher\shell\open\command "" '"$INSTDIR\@Launcher_APP_BINARY_NAME@.exe" "%1"'
 
   ; Write the uninstall keys for Windows
   ; https://learn.microsoft.com/en-us/windows/win32/msi/uninstall-registry-key
@@ -471,10 +455,29 @@ Section "Uninstall"
   DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\@Launcher_CommonName@"
   DeleteRegKey HKCU SOFTWARE\@Launcher_CommonName@
 
+  ; Remove only URL handlers that still point to this installation. This avoids
+  ; deleting a handler another launcher claimed after J Launcher was installed.
+  ReadRegStr $0 HKCU "Software\Classes\curseforge\shell\open\command" ""
+  ${If} $0 == '"$INSTDIR\@Launcher_APP_BINARY_NAME@.exe" "%1"'
+    DeleteRegKey HKCU "Software\Classes\curseforge"
+  ${EndIf}
+  ReadRegStr $0 HKCU "Software\Classes\@Launcher_APP_BINARY_NAME@\shell\open\command" ""
+  ${If} $0 == '"$INSTDIR\@Launcher_APP_BINARY_NAME@.exe" "%1"'
+    DeleteRegKey HKCU "Software\Classes\@Launcher_APP_BINARY_NAME@"
+  ${EndIf}
+  ; Beta builds inherited the Prism Launcher handler. Remove it during upgrade
+  ; or uninstall only when it still points to this J Launcher installation.
+  ReadRegStr $0 HKCU "Software\Classes\prismlauncher\shell\open\command" ""
+  ${If} $0 == '"$INSTDIR\@Launcher_APP_BINARY_NAME@.exe" "%1"'
+    DeleteRegKey HKCU "Software\Classes\prismlauncher"
+  ${EndIf}
+
   Delete $INSTDIR\@Launcher_APP_BINARY_NAME@.exe
   Delete $INSTDIR\@Launcher_APP_BINARY_NAME@_filelink.exe
   Delete $INSTDIR\@Launcher_APP_BINARY_NAME@_updater.exe
   Delete $INSTDIR\qt.conf
+  Delete $INSTDIR\qtlogging.ini
+  Delete $INSTDIR\COPYING.md
   Delete $INSTDIR\*.dll
 
   Delete $INSTDIR\uninstall.exe

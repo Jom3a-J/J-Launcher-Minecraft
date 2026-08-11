@@ -25,7 +25,8 @@
 
 #include "ui/widgets/PageContainer.h"
 
-PageDialog::PageDialog(BasePageProvider* pageProvider, QString defaultId, QWidget* parent) : QDialog(parent)
+PageDialog::PageDialog(BasePageProvider* pageProvider, QString defaultId, QWidget* parent)
+    : QDialog(parent), m_settingsLock(std::make_unique<SettingsObject::Lock>(APPLICATION->settings()))
 {
     setWindowTitle(pageProvider->dialogTitle());
     m_container = new PageContainer(pageProvider, std::move(defaultId), this);
@@ -81,4 +82,9 @@ bool PageDialog::handleClose()
 
     emit applied();
     return true;
+}
+
+bool PageDialog::selectPage(QString pageId)
+{
+    return m_container->selectPage(std::move(pageId));
 }

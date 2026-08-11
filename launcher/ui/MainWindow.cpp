@@ -100,6 +100,7 @@
 
 #include "ui/GuiUtil.h"
 #include "ui/ViewLogWindow.h"
+#include "ui/ModelessWindow.h"
 #include "ui/dialogs/AboutDialog.h"
 #include "ui/dialogs/CopyInstanceDialog.h"
 #include "ui/dialogs/CreateShortcutDialog.h"
@@ -151,6 +152,7 @@ QString profileInUseFilter(const QString& profile, bool used)
         return profile;
     }
 }
+
 }  // namespace
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainWindow)
@@ -206,6 +208,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainWi
         foldersMenuButton->setPopupMode(QToolButton::InstantPopup);
 
         helpMenuButton = dynamic_cast<QToolButton*>(ui->mainToolBar->widgetForAction(ui->actionHelpButton));
+        helpMenuButton->setObjectName(QStringLiteral("helpMenuButton"));
         ui->actionHelpButton->setMenu(new QMenu(this));
         ui->actionHelpButton->menu()->addActions(ui->helpMenu->actions());
         ui->actionHelpButton->menu()->removeAction(ui->actionCheckUpdate);
@@ -282,8 +285,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainWi
         connect(secretEventFilter, &KonamiCode::triggered, this, &MainWindow::konamiTriggered);
     }
 
-    // Add the news label to the news toolbar.
-    {
+    // Do not expose an inherited news feed. The toolbar is created only when
+    // a J Launcher-owned feed is configured.
+    if (!BuildConfig.NEWS_RSS_URL.isEmpty()) {
         m_newsChecker.reset(new NewsChecker(APPLICATION->network(), BuildConfig.NEWS_RSS_URL));
         newsLabel = new QToolButton();
         newsLabel->setIcon(QIcon::fromTheme("news"));
@@ -295,6 +299,10 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainWi
         connect(newsLabel, &QAbstractButton::clicked, this, &MainWindow::newsButtonClicked);
         connect(m_newsChecker.get(), &NewsChecker::newsLoaded, this, &MainWindow::updateNewsLabel);
         updateNewsLabel();
+    } else {
+        ui->newsToolBar->setVisible(false);
+        ui->newsToolBar->toggleViewAction()->setVisible(false);
+        ui->actionMoreNews->setVisible(false);
     }
 
     // Create the instance list widget
@@ -435,8 +443,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainWi
     // TODO: refresh accounts here?
     // auto accounts = APPLICATION->accounts();
 
-    // load the news
-    {
+    // Load news only when a J Launcher feed is configured.
+    if (m_newsChecker) {
         m_newsChecker->reloadNews();
         updateNewsLabel();
     }
@@ -905,6 +913,9 @@ bool MainWindow::eventFilter(QObject* obj, QEvent* ev)
 
 void MainWindow::updateNewsLabel()
 {
+    if (!m_newsChecker || !newsLabel)
+        return;
+
     if (m_newsChecker->isLoadingNews()) {
         newsLabel->setText(tr("Loading news..."));
         newsLabel->setEnabled(false);
@@ -1051,18 +1062,25 @@ void MainWindow::on_actionManageServers_triggered()
         return;
     }
 
-    QDialog dialog(this);
-    dialog.setWindowTitle(tr("Server Manager"));
-    dialog.setMinimumSize(760, 560);
-    auto* layout = new QVBoxLayout(&dialog);
-    auto* serverPage = new ServerListPage(&dialog);
+    if (m_serverManagerWindow) {
+        UI::Modeless::activate(m_serverManagerWindow.data());
+        return;
+    }
+
+    auto* dialog = new QDialog(this);
+    dialog->setObjectName(QStringLiteral("serverManagerWindow"));
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(tr("Server Manager"));
+    dialog->setMinimumSize(760, 560);
+    auto* layout = new QVBoxLayout(dialog);
+    auto* serverPage = new ServerListPage(dialog);
     serverPage->setServerManager(serverManager);
     layout->addWidget(serverPage);
 
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::accept);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::accept);
     layout->addWidget(buttons);
-    dialog.exec();
+    UI::Modeless::showOrActivate(m_serverManagerWindow, [dialog] { return dialog; });
 }
 
 void MainWindow::processURLs(QList<QUrl> urls)
@@ -1534,8 +1552,16 @@ void MainWindow::on_actionManageSkins_triggered()
     auto account = APPLICATION->accounts()->defaultAccount();
 
     if (account && (account->accountType() == AccountType::MSA) && !account->isActive()) {
-        SkinManageDialog dialog(this, account);
-        dialog.exec();
+        if (m_skinManageWindow) {
+            UI::Modeless::activate(m_skinManageWindow.data());
+            return;
+        }
+
+        UI::Modeless::showOrActivate(m_skinManageWindow, [this, account] {
+            auto* dialog = new SkinManageDialog(this, account);
+            dialog->setAttribute(Qt::WA_DeleteOnClose);
+            return dialog;
+        });
     }
 }
 
@@ -1593,17 +1619,23 @@ void MainWindow::on_actionOpenWiki_triggered()
 
 void MainWindow::on_actionMoreNews_triggered()
 {
+    if (!m_newsChecker)
+        return;
+
     auto entries = m_newsChecker->getNewsEntries();
-    NewsDialog news_dialog(entries, this);
-    news_dialog.exec();
+    NewsDialog newsDialog(entries, this);
+    newsDialog.exec();
 }
 
 void MainWindow::newsButtonClicked()
 {
+    if (!m_newsChecker)
+        return;
+
     auto entries = m_newsChecker->getNewsEntries();
-    NewsDialog news_dialog(entries, this);
-    news_dialog.toggleArticleList();
-    news_dialog.exec();
+    NewsDialog newsDialog(entries, this);
+    newsDialog.toggleArticleList();
+    newsDialog.exec();
 }
 
 void MainWindow::onCatChanged(int)
@@ -1613,8 +1645,16 @@ void MainWindow::onCatChanged(int)
 
 void MainWindow::on_actionAbout_triggered()
 {
-    AboutDialog dialog(this);
-    dialog.exec();
+    if (m_aboutWindow) {
+        UI::Modeless::activate(m_aboutWindow.data());
+        return;
+    }
+
+    UI::Modeless::showOrActivate(m_aboutWindow, [this] {
+        auto* dialog = new AboutDialog(this);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        return dialog;
+    });
 }
 
 void MainWindow::on_actionDeleteInstance_triggered()

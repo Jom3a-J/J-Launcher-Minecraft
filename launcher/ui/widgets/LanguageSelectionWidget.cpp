@@ -3,6 +3,7 @@
 #include <QCheckBox>
 #include <QHeaderView>
 #include <QLabel>
+#include <QPushButton>
 #include <QTreeView>
 #include <QVBoxLayout>
 #include "Application.h"
@@ -25,6 +26,27 @@ LanguageSelectionWidget::LanguageSelectionWidget(QWidget* parent) : QWidget(pare
     languageView->header()->setCascadingSectionResizes(true);
     languageView->header()->setStretchLastSection(false);
     verticalLayout->addWidget(languageView);
+
+    networkNoticeLabel = new QLabel(this);
+    networkNoticeLabel->setObjectName(QStringLiteral("translationNetworkNotice"));
+    networkNoticeLabel->setWordWrap(true);
+    verticalLayout->addWidget(networkNoticeLabel);
+
+    refreshButton = new QPushButton(this);
+    refreshButton->setObjectName(QStringLiteral("refreshTranslationsButton"));
+    connect(refreshButton, &QPushButton::clicked, this, []() { APPLICATION->translations()->downloadIndex(); });
+    verticalLayout->addWidget(refreshButton);
+
+    autoUpdateCheckbox = new QCheckBox(this);
+    autoUpdateCheckbox->setObjectName(QStringLiteral("autoUpdateTranslationsCheckbox"));
+    autoUpdateCheckbox->setChecked(APPLICATION->settings()->get("AutoUpdateTranslations").toBool());
+    connect(autoUpdateCheckbox, &QCheckBox::toggled, this, [](bool enabled) {
+        APPLICATION->settings()->set("AutoUpdateTranslations", enabled);
+        if (enabled) {
+            APPLICATION->translations()->downloadIndex();
+        }
+    });
+    verticalLayout->addWidget(autoUpdateCheckbox);
     helpUsLabel = new QLabel(this);
     helpUsLabel->setObjectName(QStringLiteral("helpUsLabel"));
     helpUsLabel->setTextInteractionFlags(Qt::LinksAccessibleByMouse);
@@ -60,6 +82,11 @@ QString LanguageSelectionWidget::getSelectedLanguageKey() const
 
 void LanguageSelectionWidget::retranslate()
 {
+    networkNoticeLabel->setText(
+        tr("Language downloads contact the third-party service i18n.prismlauncher.org. No request is made at startup unless you enable "
+           "automatic checks below."));
+    refreshButton->setText(tr("Download / refresh language list"));
+    autoUpdateCheckbox->setText(tr("Automatically check for translation updates when %1 starts").arg(BuildConfig.LAUNCHER_DISPLAYNAME));
     QString text = tr("Don't see your language or the quality is poor?<br/><a href=\"%1\">Help us with translations!</a>")
                        .arg(BuildConfig.TRANSLATIONS_URL);
     helpUsLabel->setText(text);

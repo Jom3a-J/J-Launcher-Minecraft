@@ -116,6 +116,12 @@ struct AccountData {
     MinecraftEntitlement minecraftEntitlement;
     Validity validity_ = Validity::None;
 
+    // Preserve an unreadable encrypted payload so an autosave cannot destroy
+    // the user's only recoverable copy while the credential store is missing
+    // or damaged.
+    QString preservedSecretsPayload;
+    bool preservedSecretsPayloadIsUnreadable = false;
+
     // runtime only information (not saved with the account)
     QString internalId;
     QString errorString;

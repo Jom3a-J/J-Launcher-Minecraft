@@ -69,6 +69,9 @@ class Config {
      */
     QString VERSION_CHANNEL;
 
+    /// The intended maturity of this artifact: development, beta, or stable.
+    QString RELEASE_STAGE;
+
     bool UPDATER_ENABLED = false;
     bool JAVA_DOWNLOADER_ENABLED = false;
 

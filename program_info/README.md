@@ -1,6 +1,6 @@
-# Prism Launcher Program Info
+# J Launcher Program Info
 
-This is Prism Launcher's program info which contains information about:
+This directory contains J Launcher's program information:
 
 - Application name and logo (and branding in general)
 - Various URLs and API endpoints

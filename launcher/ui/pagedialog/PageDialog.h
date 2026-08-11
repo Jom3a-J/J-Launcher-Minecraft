@@ -15,7 +15,11 @@
 
 #pragma once
 
+#include <memory>
+
 #include <QDialog>
+
+#include "settings/SettingsObject.h"
 #include "ui/pages/BasePageProvider.h"
 
 class PageContainer;
@@ -24,6 +28,8 @@ class PageDialog : public QDialog {
    public:
     explicit PageDialog(BasePageProvider* pageProvider, QString defaultId = QString(), QWidget* parent = 0);
     virtual ~PageDialog() {}
+
+    bool selectPage(QString pageId);
 
    signals:
     void applied();
@@ -34,5 +40,6 @@ class PageDialog : public QDialog {
     bool handleClose();
 
    private:
+    std::unique_ptr<SettingsObject::Lock> m_settingsLock;
     PageContainer* m_container;
 };

@@ -71,6 +71,7 @@ APIPage::APIPage(QWidget* parent) : QWidget(parent), ui(new Ui::APIPage)
     ui->setupUi(this);
 
     ui->flameKey->setEchoMode(QLineEdit::Password);
+    ui->modrinthToken->setEchoMode(QLineEdit::Password);
     ui->flameKey->setPlaceholderText(
         BuildConfig.FLAME_API_KEY.trimmed().isEmpty()
             ? tr("Enter your CurseForge API key")
@@ -167,8 +168,7 @@ void APIPage::loadSettings()
     QString fmlLibsURL = s->get("LegacyFMLLibsURLOverride").toString();
     ui->legacyFMLLibsURL->setText(fmlLibsURL);
     ui->flameKey->setText(APPLICATION->getFlameAPIKeyOverride());
-    QString modrinthToken = s->get("ModrinthToken").toString();
-    ui->modrinthToken->setText(modrinthToken);
+    ui->modrinthToken->setText(APPLICATION->getModrinthAPITokenOverride());
     QString customUserAgent = s->get("UserAgentOverride").toString();
     ui->userAgentLineEdit->setText(customUserAgent);
     ui->technicClientID->setText(s->get("TechnicClientID").toString());
@@ -224,8 +224,15 @@ bool APIPage::applySettings()
                 .arg(credentialError));
         return false;
     }
-    QString modrinthToken = ui->modrinthToken->text();
-    s->set("ModrinthToken", modrinthToken);
+    QString modrinthCredentialError;
+    if (!APPLICATION->setModrinthAPITokenOverride(
+            ui->modrinthToken->text(), &modrinthCredentialError)) {
+        QMessageBox::critical(
+            this, tr("Modrinth API Token"),
+            tr("The API token could not be saved securely.\n\n%1")
+                .arg(modrinthCredentialError));
+        return false;
+    }
     s->set("UserAgentOverride", ui->userAgentLineEdit->text());
     s->set("TechnicClientID", ui->technicClientID->text());
     return true;

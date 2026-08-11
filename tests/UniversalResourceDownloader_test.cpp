@@ -170,6 +170,18 @@ class UniversalResourceDownloaderTest : public QObject {
         }
     }
 
+    void scopesModrinthDownloadMetadataToOfficialHttpsOrigin()
+    {
+        QVERIFY(Net::isModrinthDownloadRequest(
+            QUrl(QStringLiteral("https://cdn.modrinth.com/data/project/version/file.jar"))));
+        QVERIFY(!Net::isModrinthDownloadRequest(
+            QUrl(QStringLiteral("http://cdn.modrinth.com/data/project/version/file.jar"))));
+        QVERIFY(!Net::isModrinthDownloadRequest(
+            QUrl(QStringLiteral("https://cdn.modrinth.com.example/data/file.jar"))));
+        QVERIFY(!Net::isModrinthDownloadRequest(
+            QUrl(QStringLiteral("https://cdn.modrinth.com:444/data/file.jar"))));
+    }
+
     void buildsAndParsesCurseForgeDownloadUrlRequest()
     {
         QCOMPARE(FlameAPI::fileDownloadUrlEndpoint("123", "789"),

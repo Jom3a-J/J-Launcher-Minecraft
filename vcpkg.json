@@ -15,6 +15,7 @@
     },
 
     "cmark",
+    "libsodium",
     {
       "name": "libarchive",
       "default-features": false,

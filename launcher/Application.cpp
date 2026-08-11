@@ -52,6 +52,7 @@
 #include "ui/MainWindow.h"
 #include "ui/ToolTipFilter.h"
 #include "ui/ViewLogWindow.h"
+#include "ui/ModelessWindow.h"
 
 #include "ui/dialogs/ProgressDialog.h"
 #include "ui/instanceview/AccessibleInstanceView.h"
@@ -723,6 +724,7 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
         // Language
         m_settings->registerSetting("Language", QString());
         m_settings->registerSetting("UseSystemLocale", false);
+        m_settings->registerSetting("AutoUpdateTranslations", false);
 
         // Console
         m_settings->registerSetting("ShowConsole", false);
@@ -921,9 +923,23 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
                     QString credentialWriteError;
                     if (CredentialStore::write(QStringLiteral("CurseForgeApiKey"),
                                                flameKey, &credentialWriteError)) {
-                        m_flameApiKeyOverride = flameKey;
-                        m_settings->reset("CFKeyOverride");
-                        m_settings->reset("FlameKeyOverride");
+                        QString credentialVerifyError;
+                        const QString storedKey = CredentialStore::read(
+                            QStringLiteral("CurseForgeApiKey"),
+                            &credentialVerifyError);
+                        if (credentialVerifyError.isEmpty() && storedKey == flameKey) {
+                            m_flameApiKeyOverride = flameKey;
+                            m_settings->reset("CFKeyOverride");
+                            m_settings->reset("FlameKeyOverride");
+                        } else {
+                            m_flameApiKeyOverride = flameKey;
+                            const QString reason = credentialVerifyError.isEmpty()
+                                ? QStringLiteral("stored credential did not match")
+                                : Privacy::sanitizeText(credentialVerifyError);
+                            qWarning() << "Could not verify the migrated CurseForge API key;"
+                                          " preserving the legacy value for this session."
+                                       << reason;
+                        }
                     } else {
                         m_flameApiKeyOverride = flameKey;
                         qWarning() << "Could not migrate the CurseForge API key to secure storage;"
@@ -942,7 +958,55 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
             }
         }
         m_settings->registerSetting("FallbackMRBlockedMods", true);
-        m_settings->registerSetting("ModrinthToken", "");
+        // Migrate the optional Modrinth bearer token out of the plaintext
+        // settings file using the same loss-resistant rules as CurseForge.
+        {
+            m_settings->registerSetting("ModrinthToken", "");
+
+            QString credentialReadError;
+            m_modrinthApiTokenOverride = CredentialStore::read(
+                QStringLiteral("ModrinthApiToken"), &credentialReadError);
+            if (!credentialReadError.isEmpty()) {
+                qWarning() << "Could not read the stored Modrinth API token securely;"
+                              " preserving the legacy value for this session if available."
+                           << Privacy::sanitizeText(credentialReadError);
+            }
+
+            const QString legacyToken =
+                m_settings->get("ModrinthToken").toString().trimmed();
+            if (m_modrinthApiTokenOverride.isEmpty() && !legacyToken.isEmpty()) {
+                m_modrinthApiTokenOverride = legacyToken;
+                if (CredentialStore::isPersistent()) {
+                    QString credentialWriteError;
+                    if (CredentialStore::write(QStringLiteral("ModrinthApiToken"),
+                                               legacyToken, &credentialWriteError)) {
+                        QString credentialVerifyError;
+                        const QString storedToken = CredentialStore::read(
+                            QStringLiteral("ModrinthApiToken"),
+                            &credentialVerifyError);
+                        if (credentialVerifyError.isEmpty()
+                            && storedToken == legacyToken) {
+                            m_settings->reset("ModrinthToken");
+                        } else {
+                            const QString reason = credentialVerifyError.isEmpty()
+                                ? QStringLiteral("stored credential did not match")
+                                : Privacy::sanitizeText(credentialVerifyError);
+                            qWarning() << "Could not verify the migrated Modrinth API token;"
+                                          " preserving the legacy value for this session."
+                                       << reason;
+                        }
+                    } else {
+                        qWarning() << "Could not migrate the Modrinth API token to secure storage;"
+                                      " preserving the legacy value for this session."
+                                   << Privacy::sanitizeText(credentialWriteError);
+                    }
+                }
+            } else if (!m_modrinthApiTokenOverride.isEmpty()
+                       && CredentialStore::isPersistent()
+                       && credentialReadError.isEmpty()) {
+                m_settings->reset("ModrinthToken");
+            }
+        }
         m_settings->registerSetting("UserAgentOverride", "");
 
         // FTBApp instances
@@ -1095,8 +1159,11 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
 
     // load translations
     {
-        m_translations.reset(new TranslationsModel("translations"));
-        m_translations->downloadIndex();
+        m_translations.reset(new TranslationsModel("translations", m_settings->get("Language").toString(),
+                                                   m_settings->get("UseSystemLocale").toBool()));
+        if (m_settings->get("AutoUpdateTranslations").toBool()) {
+            m_translations->downloadIndex();
+        }
         qInfo() << "Your language is" << m_translations->selectedLanguage();
         qInfo() << "<> Translations loaded.";
     }
@@ -1135,9 +1202,9 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
 
     // check update locks
     {
-        auto update_log_path = FS::PathCombine(m_dataPath, "logs", "prism_launcher_update.log");
+        auto update_log_path = FS::PathCombine(m_dataPath, "logs", "jlauncher_update.log");
 
-        auto update_lock = QFileInfo(FS::PathCombine(m_dataPath, ".prism_launcher_update.lock"));
+        auto update_lock = QFileInfo(FS::PathCombine(m_dataPath, ".jlauncher_update.lock"));
         if (update_lock.exists()) {
             auto [timestamp, from, to, target, data_path] = read_lock_File(update_lock.absoluteFilePath());
             auto infoMsg = tr("This installation has a update lock file present at: %1\n"
@@ -1149,7 +1216,7 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
                               "\n"
                               "This likely means that a update attempt failed. Please ensure your installation is in working order before "
                               "proceeding.\n"
-                              "Check the Prism Launcher updater log at: \n"
+                              "Check the J Launcher updater log at: \n"
                               "%7\n"
                               "for details on the last update attempt.\n"
                               "\n"
@@ -1179,13 +1246,13 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
             }
         }
 
-        auto update_fail_marker = QFileInfo(FS::PathCombine(m_dataPath, ".prism_launcher_update.fail"));
+        auto update_fail_marker = QFileInfo(FS::PathCombine(m_dataPath, ".jlauncher_update.fail"));
         if (update_fail_marker.exists()) {
             auto infoMsg = tr("An update attempt failed\n"
                               "\n"
                               "Please ensure your installation is in working order before "
                               "proceeding.\n"
-                              "Check the Prism Launcher updater log at: \n"
+                              "Check the J Launcher updater log at: \n"
                               "%1\n"
                               "for details on the last update attempt.")
                                .arg(update_log_path);
@@ -1211,12 +1278,12 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
             }
         }
 
-        auto update_success_marker = QFileInfo(FS::PathCombine(m_dataPath, ".prism_launcher_update.success"));
+        auto update_success_marker = QFileInfo(FS::PathCombine(m_dataPath, ".jlauncher_update.success"));
         if (update_success_marker.exists()) {
             auto infoMsg = tr("Update succeeded\n"
                               "\n"
                               "You are now running %1 .\n"
-                              "Check the Prism Launcher updater log at: \n"
+                               "Check the J Launcher updater log at: \n"
                               "%2\n"
                               "for details.")
                                .arg(BuildConfig.printableVersionString())
@@ -1732,13 +1799,21 @@ void Application::ShowGlobalSettings(class QWidget* parent, QString open_page)
     if (!m_globalSettingsProvider) {
         return;
     }
-    emit globalSettingsAboutToOpen();
-    {
-        SettingsObject::Lock lock(APPLICATION->settings());
-        PageDialog dlg(m_globalSettingsProvider.get(), open_page, parent);
-        connect(&dlg, &PageDialog::applied, this, &Application::globalSettingsApplied);
-        dlg.exec();
+
+    if (m_globalSettingsWindow) {
+        if (!open_page.isEmpty()) {
+            m_globalSettingsWindow->selectPage(std::move(open_page));
+        }
+        UI::Modeless::activate(m_globalSettingsWindow.data());
+        return;
     }
+
+    emit globalSettingsAboutToOpen();
+    auto* dialog = new PageDialog(m_globalSettingsProvider.get(), std::move(open_page), parent);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    m_globalSettingsWindow = dialog;
+    connect(dialog, &PageDialog::applied, this, &Application::globalSettingsApplied);
+    UI::Modeless::show(dialog);
 }
 
 MainWindow* Application::showMainWindow(bool minimized)
@@ -1976,13 +2051,34 @@ QString Application::getFlameAPIKey() const
 bool Application::setFlameAPIKeyOverride(const QString& key, QString* error)
 {
     const QString normalized = key.trimmed();
+    if (error) {
+        error->clear();
+    }
+
+    QString storageError;
     const bool stored = normalized.isEmpty()
-        ? CredentialStore::remove(QStringLiteral("CurseForgeApiKey"), error)
+        ? CredentialStore::remove(QStringLiteral("CurseForgeApiKey"), &storageError)
         : CredentialStore::write(QStringLiteral("CurseForgeApiKey"), normalized,
-                                 error);
+                                 &storageError);
     if (!stored) {
+        if (error) {
+            *error = storageError;
+        }
         return false;
     }
+
+    QString verificationError;
+    const QString storedValue = CredentialStore::read(
+        QStringLiteral("CurseForgeApiKey"), &verificationError);
+    if (!verificationError.isEmpty() || storedValue != normalized) {
+        if (error) {
+            *error = !verificationError.isEmpty()
+                ? verificationError
+                : tr("The CurseForge API key could not be verified after saving.");
+        }
+        return false;
+    }
+
     m_flameApiKeyOverride = normalized;
     m_settings->reset("CFKeyOverride");
     m_settings->reset("FlameKeyOverride");
@@ -1990,13 +2086,47 @@ bool Application::setFlameAPIKeyOverride(const QString& key, QString* error)
     return true;
 }
 
-QString Application::getModrinthAPIToken()
+QString Application::getModrinthAPIToken() const
 {
-    QString tokenOverride = m_settings->get("ModrinthToken").toString();
-    if (!tokenOverride.isEmpty())
-        return tokenOverride;
+    return m_modrinthApiTokenOverride;
+}
 
-    return QString();
+bool Application::setModrinthAPITokenOverride(const QString& token,
+                                               QString* error)
+{
+    const QString normalized = token.trimmed();
+    if (error) {
+        error->clear();
+    }
+
+    QString storageError;
+    const bool stored = normalized.isEmpty()
+        ? CredentialStore::remove(QStringLiteral("ModrinthApiToken"),
+                                  &storageError)
+        : CredentialStore::write(QStringLiteral("ModrinthApiToken"),
+                                 normalized, &storageError);
+    if (!stored) {
+        if (error) {
+            *error = storageError;
+        }
+        return false;
+    }
+
+    QString verificationError;
+    const QString storedValue = CredentialStore::read(
+        QStringLiteral("ModrinthApiToken"), &verificationError);
+    if (!verificationError.isEmpty() || storedValue != normalized) {
+        if (error) {
+            *error = !verificationError.isEmpty()
+                ? verificationError
+                : tr("The Modrinth API token could not be verified after saving.");
+        }
+        return false;
+    }
+
+    m_modrinthApiTokenOverride = normalized;
+    m_settings->reset("ModrinthToken");
+    return true;
 }
 
 QString Application::getUserAgent()

@@ -45,6 +45,7 @@
 #include <QFlag>
 #include <QIcon>
 #include <QMutex>
+#include <QPointer>
 #include <QUrl>
 
 #include "QObjectPtr.h"
@@ -57,6 +58,7 @@ class InstanceWindow;
 class MainWindow;
 class ViewLogWindow;
 class SetupWizard;
+class PageDialog;
 class GenericPageProvider;
 class QFile;
 class HttpMetaCache;
@@ -170,7 +172,9 @@ class Application : public QApplication {
     QString getFlameAPIKey() const;
     QString getFlameAPIKeyOverride() const { return m_flameApiKeyOverride; }
     bool setFlameAPIKeyOverride(const QString& key, QString* error = nullptr);
-    QString getModrinthAPIToken();
+    QString getModrinthAPIToken() const;
+    QString getModrinthAPITokenOverride() const { return m_modrinthApiTokenOverride; }
+    bool setModrinthAPITokenOverride(const QString& token, QString* error = nullptr);
     QString getUserAgent();
 
     /// this is the root of the 'installation'. Used for automatic updates
@@ -281,6 +285,7 @@ class Application : public QApplication {
     QString m_rootPath;
     QString m_dataPath;
     QString m_flameApiKeyOverride;
+    QString m_modrinthApiTokenOverride;
     Status m_status = Application::StartingUp;
     Capabilities m_capabilities;
     bool m_portable = false;
@@ -307,6 +312,9 @@ class Application : public QApplication {
 
     // log window, if any
     ViewLogWindow* m_viewLogWindow = nullptr;
+
+    // global settings window, if any
+    QPointer<PageDialog> m_globalSettingsWindow;
 
     // peer launcher instance connector - used to implement single instance launcher and signalling
     LocalPeer* m_peerInstance = nullptr;

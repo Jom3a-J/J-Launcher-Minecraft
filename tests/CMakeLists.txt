@@ -79,7 +79,22 @@ add_dependencies(ServerInstance FakeMinecraftServer)
 
 ecm_add_test(ServerSettingsPage_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME ServerSettingsPage)
+
+ecm_add_test(SecretEncryption_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME SecretEncryption)
+
+ecm_add_test(TranslationMetadata_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME TranslationMetadata)
+ecm_add_test(TranslationsModel_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME TranslationsModel)
+
+ecm_add_test(LoginCallback_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME LoginCallback)
 set_tests_properties(ServerSettingsPage PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+ecm_add_test(ModelessWindow_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME ModelessWindow)
+set_tests_properties(ModelessWindow PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 ecm_add_test(ATLPackManifest_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME ATLPackManifest)
