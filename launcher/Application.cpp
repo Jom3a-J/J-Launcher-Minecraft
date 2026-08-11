@@ -52,6 +52,7 @@
 #include "ui/MainWindow.h"
 #include "ui/ToolTipFilter.h"
 #include "ui/ViewLogWindow.h"
+#include "ui/ModelessWindow.h"
 
 #include "ui/dialogs/ProgressDialog.h"
 #include "ui/instanceview/AccessibleInstanceView.h"
@@ -1732,13 +1733,21 @@ void Application::ShowGlobalSettings(class QWidget* parent, QString open_page)
     if (!m_globalSettingsProvider) {
         return;
     }
-    emit globalSettingsAboutToOpen();
-    {
-        SettingsObject::Lock lock(APPLICATION->settings());
-        PageDialog dlg(m_globalSettingsProvider.get(), open_page, parent);
-        connect(&dlg, &PageDialog::applied, this, &Application::globalSettingsApplied);
-        dlg.exec();
+
+    if (m_globalSettingsWindow) {
+        if (!open_page.isEmpty()) {
+            m_globalSettingsWindow->selectPage(std::move(open_page));
+        }
+        UI::Modeless::activate(m_globalSettingsWindow.data());
+        return;
     }
+
+    emit globalSettingsAboutToOpen();
+    auto* dialog = new PageDialog(m_globalSettingsProvider.get(), std::move(open_page), parent);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    m_globalSettingsWindow = dialog;
+    connect(dialog, &PageDialog::applied, this, &Application::globalSettingsApplied);
+    UI::Modeless::show(dialog);
 }
 
 MainWindow* Application::showMainWindow(bool minimized)

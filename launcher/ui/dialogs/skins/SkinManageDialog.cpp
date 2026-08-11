@@ -66,7 +66,7 @@ SkinManageDialog::SkinManageDialog(QWidget* parent, MinecraftAccountPtr acct)
         m_skinPreviewLabel->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     }
 
-    setWindowModality(Qt::WindowModal);
+    setWindowModality(Qt::NonModal);
 
     auto contentsWidget = m_ui->listView;
     contentsWidget->setViewMode(QListView::IconMode);

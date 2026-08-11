@@ -43,6 +43,7 @@
 #include <memory>
 
 #include <QMainWindow>
+#include <QPointer>
 #include <QProcess>
 #include <QTimer>
 
@@ -63,6 +64,9 @@ class KonamiCode;
 class InstanceTask;
 class LabeledToolButton;
 class Setting;
+class AboutDialog;
+class SkinManageDialog;
+class QDialog;
 
 namespace Ui {
 class MainWindow;
@@ -261,4 +265,8 @@ class MainWindow : public QMainWindow {
 
     // managed by the application object
     Task* m_versionLoadTask = nullptr;
+
+    QPointer<QDialog> m_serverManagerWindow;
+    QPointer<SkinManageDialog> m_skinManageWindow;
+    QPointer<AboutDialog> m_aboutWindow;
 };

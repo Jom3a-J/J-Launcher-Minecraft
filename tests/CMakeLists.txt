@@ -81,6 +81,10 @@ ecm_add_test(ServerSettingsPage_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VE
     TEST_NAME ServerSettingsPage)
 set_tests_properties(ServerSettingsPage PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+ecm_add_test(ModelessWindow_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME ModelessWindow)
+set_tests_properties(ModelessWindow PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 ecm_add_test(ATLPackManifest_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME ATLPackManifest)
 

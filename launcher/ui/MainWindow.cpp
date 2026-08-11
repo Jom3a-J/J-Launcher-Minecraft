@@ -100,6 +100,7 @@
 
 #include "ui/GuiUtil.h"
 #include "ui/ViewLogWindow.h"
+#include "ui/ModelessWindow.h"
 #include "ui/dialogs/AboutDialog.h"
 #include "ui/dialogs/CopyInstanceDialog.h"
 #include "ui/dialogs/CreateShortcutDialog.h"
@@ -1051,18 +1052,25 @@ void MainWindow::on_actionManageServers_triggered()
         return;
     }
 
-    QDialog dialog(this);
-    dialog.setWindowTitle(tr("Server Manager"));
-    dialog.setMinimumSize(760, 560);
-    auto* layout = new QVBoxLayout(&dialog);
-    auto* serverPage = new ServerListPage(&dialog);
+    if (m_serverManagerWindow) {
+        UI::Modeless::activate(m_serverManagerWindow.data());
+        return;
+    }
+
+    auto* dialog = new QDialog(this);
+    dialog->setObjectName(QStringLiteral("serverManagerWindow"));
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle(tr("Server Manager"));
+    dialog->setMinimumSize(760, 560);
+    auto* layout = new QVBoxLayout(dialog);
+    auto* serverPage = new ServerListPage(dialog);
     serverPage->setServerManager(serverManager);
     layout->addWidget(serverPage);
 
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::accept);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::accept);
     layout->addWidget(buttons);
-    dialog.exec();
+    UI::Modeless::showOrActivate(m_serverManagerWindow, [dialog] { return dialog; });
 }
 
 void MainWindow::processURLs(QList<QUrl> urls)
@@ -1534,8 +1542,16 @@ void MainWindow::on_actionManageSkins_triggered()
     auto account = APPLICATION->accounts()->defaultAccount();
 
     if (account && (account->accountType() == AccountType::MSA) && !account->isActive()) {
-        SkinManageDialog dialog(this, account);
-        dialog.exec();
+        if (m_skinManageWindow) {
+            UI::Modeless::activate(m_skinManageWindow.data());
+            return;
+        }
+
+        UI::Modeless::showOrActivate(m_skinManageWindow, [this, account] {
+            auto* dialog = new SkinManageDialog(this, account);
+            dialog->setAttribute(Qt::WA_DeleteOnClose);
+            return dialog;
+        });
     }
 }
 
@@ -1613,8 +1629,16 @@ void MainWindow::onCatChanged(int)
 
 void MainWindow::on_actionAbout_triggered()
 {
-    AboutDialog dialog(this);
-    dialog.exec();
+    if (m_aboutWindow) {
+        UI::Modeless::activate(m_aboutWindow.data());
+        return;
+    }
+
+    UI::Modeless::showOrActivate(m_aboutWindow, [this] {
+        auto* dialog = new AboutDialog(this);
+        dialog->setAttribute(Qt::WA_DeleteOnClose);
+        return dialog;
+    });
 }
 
 void MainWindow::on_actionDeleteInstance_triggered()

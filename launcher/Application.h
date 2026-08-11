@@ -45,6 +45,7 @@
 #include <QFlag>
 #include <QIcon>
 #include <QMutex>
+#include <QPointer>
 #include <QUrl>
 
 #include "QObjectPtr.h"
@@ -57,6 +58,7 @@ class InstanceWindow;
 class MainWindow;
 class ViewLogWindow;
 class SetupWizard;
+class PageDialog;
 class GenericPageProvider;
 class QFile;
 class HttpMetaCache;
@@ -307,6 +309,9 @@ class Application : public QApplication {
 
     // log window, if any
     ViewLogWindow* m_viewLogWindow = nullptr;
+
+    // global settings window, if any
+    QPointer<PageDialog> m_globalSettingsWindow;
 
     // peer launcher instance connector - used to implement single instance launcher and signalling
     LocalPeer* m_peerInstance = nullptr;
