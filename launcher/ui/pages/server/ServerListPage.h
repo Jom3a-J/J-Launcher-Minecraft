@@ -118,6 +118,7 @@ private:
     void refreshDiagnostics();
     void refreshAutomationHistory();
     void setupServerNavigation();
+    void syncServerNavigation();
     void applyServerVisualHierarchy();
     void recordAutomation(const std::shared_ptr<ServerInstance> &server, const QString &action, const QString &result);
     void attachServerTracking(const std::shared_ptr<ServerInstance> &server);

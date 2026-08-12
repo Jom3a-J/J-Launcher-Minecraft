@@ -192,12 +192,40 @@ QStringList installedContentDetails(const QFileInfo &file)
 QIcon launcherIcon(const QString &name, QStyle::StandardPixmap fallback)
 {
     const QIcon icon = QIcon::fromTheme(name);
-    return icon.isNull() ? QApplication::style()->standardIcon(fallback) : icon;
+    if (!icon.isNull()) {
+        return icon;
+    }
+
+    // Keep this surface in the launcher's icon family even when a custom or
+    // incomplete theme does not provide an icon. The blue pack is the product
+    // default; platform icons are only the final safety fallback.
+    const QIcon defaultIcon(
+        QStringLiteral(":/icons/pe_blue/scalable/%1.svg").arg(name));
+    return defaultIcon.isNull()
+        ? QApplication::style()->standardIcon(fallback)
+        : defaultIcon;
 }
 
 QIcon serverCardIcon()
 {
     return launcherIcon("server", QStyle::SP_ComputerIcon);
+}
+
+void applyMutedLabelPalette(QLabel *label)
+{
+    if (!label) return;
+    QPalette labelPalette = label->palette();
+    const QColor foreground = labelPalette.color(QPalette::WindowText);
+    const QColor background = label->parentWidget()
+        ? label->parentWidget()->palette().color(QPalette::Window)
+        : labelPalette.color(QPalette::Window);
+    const QColor muted(
+        (foreground.red() * 2 + background.red()) / 3,
+        (foreground.green() * 2 + background.green()) / 3,
+        (foreground.blue() * 2 + background.blue()) / 3);
+    labelPalette.setColor(QPalette::WindowText, muted);
+    labelPalette.setColor(QPalette::Text, muted);
+    label->setPalette(labelPalette);
 }
 
 QIcon serverFileIcon(const QFileInfo &file)
@@ -284,10 +312,10 @@ ServerListPage::ServerListPage(QWidget *parent)
     performanceTimer.start();
     ui->setupUi(this);
     m_serverTrackingContext = new QObject(this);
-    ui->serverListPanel->setMinimumWidth(255);
-    ui->serverListPanel->setMaximumWidth(340);
-    ui->serverSplitter->setSizes(QList<int>() << 290 << 630);
-    ui->serverList->setSpacing(9);
+    ui->serverListPanel->setMinimumWidth(264);
+    ui->serverListPanel->setMaximumWidth(328);
+    ui->serverSplitter->setSizes(QList<int>() << 292 << 888);
+    ui->serverList->setSpacing(6);
     applyServerVisualHierarchy();
 
     // Do not present a creation action as preselected when this page opens.
@@ -296,9 +324,11 @@ ServerListPage::ServerListPage(QWidget *parent)
     QTimer::singleShot(0, this, [this]() { setFocus(Qt::OtherFocusReason); });
 
     m_undoDeleteButton = new QPushButton(tr("Undo Delete"), this);
-    m_undoDeleteButton->setIcon(launcherIcon("undo", QStyle::SP_ArrowBack));
+    m_undoDeleteButton->setObjectName(QStringLiteral("undoDeleteButton"));
+    m_undoDeleteButton->setIcon(launcherIcon("refresh", QStyle::SP_ArrowBack));
     m_undoDeleteButton->setEnabled(false);
-    ui->headerLayout->insertWidget(ui->headerLayout->count() - 1, m_undoDeleteButton);
+    m_undoDeleteButton->hide();
+    ui->headerLayout->insertWidget(ui->headerLayout->count() - 2, m_undoDeleteButton);
 
     m_emptyServerListWidget = new QWidget(ui->serverListPanel);
     m_emptyServerListWidget->setObjectName("serverEmptyState");
@@ -309,18 +339,21 @@ ServerListPage::ServerListPage(QWidget *parent)
     emptyListIcon->setAlignment(Qt::AlignCenter);
     emptyListLayout->addWidget(emptyListIcon);
     auto *emptyListTitle = new QLabel(tr("No servers yet"), m_emptyServerListWidget);
+    emptyListTitle->setObjectName(QStringLiteral("emptyServerListTitle"));
     QFont emptyTitleFont = emptyListTitle->font();
     emptyTitleFont.setBold(true);
     emptyListTitle->setFont(emptyTitleFont);
     emptyListTitle->setAlignment(Qt::AlignCenter);
     emptyListLayout->addWidget(emptyListTitle);
     auto *emptyListHint = new QLabel(tr("Create a server to manage it from the launcher."), m_emptyServerListWidget);
+    emptyListHint->setObjectName(QStringLiteral("emptyServerListHint"));
     emptyListHint->setWordWrap(true);
     emptyListHint->setAlignment(Qt::AlignCenter);
-    emptyListHint->setForegroundRole(QPalette::PlaceholderText);
+    applyMutedLabelPalette(emptyListHint);
     emptyListLayout->addWidget(emptyListHint);
     auto *emptyListCreateButton = new QPushButton(tr("Create Server"), m_emptyServerListWidget);
-    emptyListCreateButton->setObjectName("emptyCreateServerButton");
+    emptyListCreateButton->setObjectName(QStringLiteral("emptyCreateServerButton"));
+    emptyListCreateButton->setProperty("role", "primary");
     emptyListCreateButton->setIcon(launcherIcon("new", QStyle::SP_FileDialogNewFolder));
     emptyListCreateButton->setIconSize(QSize(20, 20));
     emptyListCreateButton->setMinimumSize(132, 36);
@@ -342,10 +375,10 @@ ServerListPage::ServerListPage(QWidget *parent)
                    m_emptyDetailWidget);
     emptyDetailHint->setWordWrap(true);
     emptyDetailHint->setAlignment(Qt::AlignCenter);
-    emptyDetailHint->setForegroundRole(QPalette::PlaceholderText);
+    applyMutedLabelPalette(emptyDetailHint);
     emptyDetailLayout->addWidget(emptyDetailHint);
     emptyDetailLayout->addStretch();
-    ui->serverDetailLayout->insertWidget(3, m_emptyDetailWidget, 1);
+    ui->serverDetailLayout->insertWidget(1, m_emptyDetailWidget, 1);
     ui->overviewInfoLabel->hide();
     ui->overviewDetailsGroup->hide();
     ui->overviewBackupsCard->hide();
@@ -377,7 +410,7 @@ ServerListPage::ServerListPage(QWidget *parent)
     liveUsageLayout->addWidget(m_overviewRamBar, 1, 1);
     m_overviewUpdatedLabel = new QLabel(tr("Waiting for live data."), liveUsageGroup);
     m_overviewUpdatedLabel->setAlignment(Qt::AlignRight);
-    m_overviewUpdatedLabel->setForegroundRole(QPalette::PlaceholderText);
+    applyMutedLabelPalette(m_overviewUpdatedLabel);
     liveUsageLayout->addWidget(m_overviewUpdatedLabel, 2, 0, 1, 2);
     ui->overviewTabLayout->insertWidget(3, liveUsageGroup);
     m_liveStatisticsTimer.setInterval(2000);
@@ -392,9 +425,12 @@ ServerListPage::ServerListPage(QWidget *parent)
     ui->filesActions->insertWidget(3, m_importProfileButton);
 
     auto *consoleHeader = new QHBoxLayout();
-    auto *consoleTitle = new QLabel(tr("LIVE SERVER CONSOLE"), ui->consoleTab);
+    auto *consoleTitle = new QLabel(tr("Live output"), ui->consoleTab);
     consoleTitle->setObjectName("consoleTitleLabel");
-    auto *consoleHint = new QLabel(tr("Live output and commands"), ui->consoleTab);
+    QFont consoleTitleFont = consoleTitle->font();
+    consoleTitleFont.setBold(true);
+    consoleTitle->setFont(consoleTitleFont);
+    auto *consoleHint = new QLabel(tr("Server output and commands"), ui->consoleTab);
     consoleHint->setObjectName("consoleHintLabel");
     consoleHeader->addWidget(consoleTitle);
     consoleHeader->addWidget(consoleHint);
@@ -757,9 +793,9 @@ ServerListPage::~ServerListPage()
 
 void ServerListPage::setupServerNavigation()
 {
-    // Keep the main navigation focused on the daily server workflow. Related
-    // maintenance tools live together in the nested Maintenance page so new
-    // tools do not keep expanding the top-level tab row.
+    // Keep the selected server visible while its operational tools switch in
+    // the workspace. The dedicated rail avoids an overflowing tab strip and
+    // gives every destination a stable icon and keyboard-accessible row.
     const QList<QPair<QWidget *, QString>> pages = {
         {ui->overviewTab, tr("Home")},
         {ui->consoleTab, tr("Console")},
@@ -784,10 +820,42 @@ void ServerListPage::setupServerNavigation()
         ui->serverTabs->addTab(page.first, page.second);
     }
 
-    ui->serverTabs->setDocumentMode(false);
-    ui->serverTabs->setUsesScrollButtons(true);
-    ui->serverTabs->tabBar()->setExpanding(false);
-    ui->serverTabs->tabBar()->setElideMode(Qt::ElideNone);
+    const QList<QIcon> icons = {
+        launcherIcon("server", QStyle::SP_ComputerIcon),
+        launcherIcon("log", QStyle::SP_FileDialogDetailedView),
+        launcherIcon("loadermods", QStyle::SP_FileIcon),
+        launcherIcon("accounts", QStyle::SP_DirHomeIcon),
+        launcherIcon("viewfolder", QStyle::SP_DirOpenIcon),
+        launcherIcon("copy", QStyle::SP_DialogSaveButton),
+        launcherIcon("custom-commands", QStyle::SP_ComputerIcon),
+        launcherIcon("settings", QStyle::SP_FileDialogContentsView)
+    };
+    for (int index = 0; index < icons.size(); ++index) {
+        ui->serverTabs->setTabIcon(index, icons.at(index));
+    }
+
+    ui->serverTabs->tabBar()->hide();
+    ui->serverNavigationList->clear();
+    for (int index = 0; index < ui->serverTabs->count(); ++index) {
+        auto *item = new QListWidgetItem(ui->serverTabs->tabIcon(index),
+                                         ui->serverTabs->tabText(index),
+                                         ui->serverNavigationList);
+        item->setData(Qt::UserRole, index);
+        item->setSizeHint(QSize(126, 44));
+    }
+
+    connect(ui->serverNavigationList, &QListWidget::currentRowChanged, this,
+            [this](int row) {
+        if (row < 0 || row >= ui->serverTabs->count()) return;
+        if (!ui->serverTabs->isTabEnabled(row)) {
+            syncServerNavigation();
+            return;
+        }
+        ui->serverTabs->setCurrentIndex(row);
+    });
+    connect(ui->serverTabs, &QTabWidget::currentChanged, this,
+            [this](int) { syncServerNavigation(); });
+
     ui->serverTabs->setTabToolTip(ui->serverTabs->indexOf(ui->overviewTab),
                                    tr("Server status, live resource use, and quick statistics."));
     ui->serverTabs->setTabToolTip(ui->serverTabs->indexOf(ui->consoleTab),
@@ -805,17 +873,39 @@ void ServerListPage::setupServerNavigation()
     ui->serverTabs->setTabToolTip(ui->serverTabs->indexOf(ui->settingsTab),
                                    tr("Server properties, Java, memory, and launch settings."));
     ui->serverTabs->setCurrentWidget(ui->overviewTab);
+    syncServerNavigation();
 
-    // Use the same native tab presentation as the rest of the launcher.
     m_maintenanceTab->setDocumentMode(false);
     m_maintenanceTab->setUsesScrollButtons(true);
     m_maintenanceTab->tabBar()->setExpanding(false);
 }
 
+void ServerListPage::syncServerNavigation()
+{
+    if (!ui->serverNavigationList) return;
+
+    const QSignalBlocker blocker(ui->serverNavigationList);
+    for (int index = 0; index < ui->serverTabs->count(); ++index) {
+        QListWidgetItem *item = ui->serverNavigationList->item(index);
+        if (!item) continue;
+        item->setText(ui->serverTabs->tabText(index));
+        item->setIcon(ui->serverTabs->tabIcon(index));
+        Qt::ItemFlags flags = item->flags();
+        if (ui->serverTabs->isTabEnabled(index)) {
+            flags |= Qt::ItemIsEnabled | Qt::ItemIsSelectable;
+        } else {
+            flags &= ~(Qt::ItemIsEnabled | Qt::ItemIsSelectable);
+        }
+        item->setFlags(flags);
+        item->setToolTip(ui->serverTabs->tabToolTip(index));
+    }
+    ui->serverNavigationList->setCurrentRow(ui->serverTabs->currentIndex());
+}
+
 void ServerListPage::applyServerVisualHierarchy()
 {
-    // Fonts and palette roles preserve the visual hierarchy while allowing the
-    // active Prism theme to own widget colours, borders, spacing, and states.
+    // Palette roles keep the workspace native to every launcher theme while
+    // object-scoped styling supplies the quieter geometry and action hierarchy.
     QFont titleFont = ui->titleLabel->font();
     titleFont.setBold(true);
     ui->titleLabel->setFont(titleFont);
@@ -825,14 +915,206 @@ void ServerListPage::applyServerVisualHierarchy()
     ui->serverListTitle->setFont(sectionFont);
     ui->detailTitleLabel->setFont(sectionFont);
 
-    ui->serverStatsLabel->setForegroundRole(QPalette::PlaceholderText);
-    ui->selectedServerInfoLabel->setForegroundRole(QPalette::PlaceholderText);
+    applyMutedLabelPalette(ui->serverStatsLabel);
+    applyMutedLabelPalette(ui->selectedServerInfoLabel);
 
+    ui->createFromModpackButton->setIcon(launcherIcon("centralmods", QStyle::SP_FileDialogNewFolder));
     ui->createServerButton->setIcon(launcherIcon("new", QStyle::SP_FileDialogNewFolder));
     ui->startServerButton->setIcon(launcherIcon("launch", QStyle::SP_MediaPlay));
-    ui->stopServerButton->setIcon(launcherIcon("stop", QStyle::SP_MediaStop));
+    ui->stopServerButton->setIcon(launcherIcon("status-bad", QStyle::SP_MediaStop));
     ui->restartServerButton->setIcon(launcherIcon("refresh", QStyle::SP_BrowserReload));
-    ui->deleteServerButton->setIcon(launcherIcon("remove", QStyle::SP_TrashIcon));
+    ui->deleteServerButton->setIcon(launcherIcon("delete", QStyle::SP_TrashIcon));
+    ui->sendCommandButton->setIcon(launcherIcon("launch", QStyle::SP_ArrowForward));
+
+    ui->createServerButton->setProperty("role", "primary");
+    ui->startServerButton->setProperty("role", "primary");
+    ui->deleteServerButton->setProperty("role", "danger");
+    ui->sendCommandButton->setProperty("role", "primary");
+
+    setStyleSheet(QStringLiteral(R"QSS(
+        QWidget#ServerListPage {
+            background: palette(window);
+            color: palette(text);
+        }
+        QFrame#serverHeaderPanel {
+            background: palette(base);
+            border: none;
+            border-bottom: 1px solid palette(midlight);
+        }
+        QFrame#serverListPanel {
+            background: palette(alternate-base);
+            border: none;
+            border-right: 1px solid palette(midlight);
+        }
+        QFrame#serverDetailPanel {
+            background: palette(window);
+            border: none;
+        }
+        QFrame#serverCommandBar,
+        QFrame#serverWorkspacePanel,
+        QFrame#overviewMetricsPanel {
+            background: palette(base);
+            border: 1px solid palette(midlight);
+            border-radius: 12px;
+        }
+        QLabel#titleLabel,
+        QLabel#detailTitleLabel,
+        QLabel#serverListTitle {
+            color: palette(text);
+        }
+        QLineEdit,
+        QComboBox,
+        QSpinBox,
+        QTimeEdit {
+            min-height: 32px;
+            padding: 2px 9px;
+            background: palette(base);
+            color: palette(text);
+            border: 1px solid palette(midlight);
+            border-radius: 8px;
+            selection-background-color: palette(highlight);
+            selection-color: palette(highlighted-text);
+        }
+        QLineEdit:focus,
+        QComboBox:focus,
+        QSpinBox:focus,
+        QTimeEdit:focus {
+            border: 2px solid palette(highlight);
+            padding: 1px 8px;
+        }
+        QPushButton {
+            min-height: 30px;
+            padding: 3px 12px;
+            background: palette(button);
+            color: palette(button-text);
+            border: 1px solid palette(midlight);
+            border-radius: 8px;
+        }
+        QPushButton:hover {
+            border-color: palette(highlight);
+        }
+        QPushButton:focus {
+            border: 2px solid palette(highlight);
+            padding: 2px 11px;
+        }
+        QPushButton[role="primary"] {
+            background: palette(highlight);
+            color: palette(highlighted-text);
+            border-color: palette(highlight);
+            font-weight: 600;
+        }
+        QPushButton:disabled {
+            background: palette(alternate-base);
+            color: #7d7d7d;
+            border-color: palette(midlight);
+        }
+        QListWidget#serverList {
+            background: transparent;
+            border: none;
+            outline: none;
+        }
+        QListWidget#serverList::item {
+            background: transparent;
+            border: none;
+        }
+        QWidget#serverCard {
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 10px;
+        }
+        QWidget#serverCard:hover {
+            background: palette(base);
+            border-color: palette(midlight);
+        }
+        QWidget#serverCard[selected="true"] {
+            background: palette(base);
+            border-color: palette(highlight);
+        }
+        QListWidget#serverNavigationList {
+            background: palette(alternate-base);
+            border: none;
+            border-right: 1px solid palette(midlight);
+            padding: 9px 7px;
+            outline: none;
+        }
+        QListWidget#serverNavigationList::item {
+            min-height: 40px;
+            padding: 0 10px;
+            border: 1px solid transparent;
+            border-radius: 8px;
+        }
+        QListWidget#serverNavigationList::item:hover {
+            background: palette(base);
+        }
+        QListWidget#serverNavigationList::item:selected {
+            background: palette(highlight);
+            color: palette(highlighted-text);
+            border-color: palette(highlight);
+        }
+        QListWidget#serverNavigationList::item:disabled {
+            color: palette(mid);
+        }
+        QTabWidget#serverTabs::pane {
+            background: palette(base);
+            border: none;
+        }
+        QGroupBox {
+            margin-top: 10px;
+            padding: 12px;
+            background: palette(base);
+            border: 1px solid palette(midlight);
+            border-radius: 10px;
+            font-weight: 600;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            left: 10px;
+            padding: 0 5px;
+        }
+        QFrame#overviewMetricsPanel QGroupBox {
+            margin-top: 0;
+            padding: 14px 16px;
+            border: none;
+            border-right: 1px solid palette(midlight);
+            border-radius: 0;
+            background: transparent;
+        }
+        QPlainTextEdit#consoleOutput,
+        QTreeWidget {
+            background: palette(base);
+            color: palette(text);
+            border: 1px solid palette(midlight);
+            border-radius: 8px;
+            selection-background-color: palette(highlight);
+            selection-color: palette(highlighted-text);
+        }
+        QHeaderView::section {
+            background: palette(alternate-base);
+            color: palette(text);
+            border: none;
+            border-bottom: 1px solid palette(midlight);
+            padding: 7px 8px;
+            font-weight: 600;
+        }
+        QProgressBar {
+            min-height: 12px;
+            background: palette(alternate-base);
+            border: 1px solid palette(midlight);
+            border-radius: 6px;
+            text-align: center;
+        }
+        QProgressBar::chunk {
+            background: palette(highlight);
+            border-radius: 5px;
+        }
+    )QSS"));
+
+    // Keep destructive actions unmistakable without sacrificing contrast in
+    // either launcher appearance. A local rule wins over the page's generic
+    // button text rule while leaving the native button surface untouched.
+    const bool darkAppearance = palette().color(QPalette::Window).lightness() < 128;
+    ui->deleteServerButton->setStyleSheet(QStringLiteral("color: %1;").arg(
+        darkAppearance ? QStringLiteral("#ff8a80") : QStringLiteral("#b3261e")));
 }
 
 void ServerListPage::setServerManager(ServerManager *manager)
@@ -1784,7 +2066,7 @@ void ServerListPage::onUpdateServerSoftware()
         tr("Loading builds published by %1 for Minecraft %2...")
             .arg(server->loaderType(), server->version()), &dialog);
     status->setWordWrap(true);
-    status->setForegroundRole(QPalette::PlaceholderText);
+    applyMutedLabelPalette(status);
     layout->addWidget(status);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     buttons->button(QDialogButtonBox::Ok)->setText(tr("Install Build"));
@@ -1866,7 +2148,7 @@ void ServerListPage::onChangeMinecraftVersion()
 
     auto *status = new QLabel(tr("Loading versions published by %1...").arg(server->loaderType()), &dialog);
     status->setWordWrap(true);
-    status->setForegroundRole(QPalette::PlaceholderText);
+    applyMutedLabelPalette(status);
     layout->addWidget(status);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
     buttons->button(QDialogButtonBox::Ok)->setText(tr("Change Version"));
@@ -2652,12 +2934,22 @@ void ServerListPage::updateUI()
     ui->stopServerButton->setEnabled(hasSelection && canStop);
     ui->stopServerButton->setText(status == ServerStatus::Downloading ? tr("Cancel Download") : tr("Stop"));
     ui->stopServerButton->setIcon(status == ServerStatus::Downloading
-                                      ? launcherIcon("cancel", QStyle::SP_DialogCancelButton)
-                                      : launcherIcon("stop", QStyle::SP_MediaStop));
+                                      ? launcherIcon("status-bad", QStyle::SP_DialogCancelButton)
+                                      : launcherIcon("status-bad", QStyle::SP_MediaStop));
     ui->restartServerButton->setEnabled(
         hasSelection && (status == ServerStatus::Starting || status == ServerStatus::Running));
-    m_undoDeleteButton->setEnabled(m_serverManager && m_serverManager->hasDeletedServer());
+    ui->startServerButton->setProperty("role", canStart ? "primary" : "secondary");
+    ui->stopServerButton->setProperty("role", canStop ? "primary" : "secondary");
+    for (QPushButton *button : {ui->startServerButton, ui->stopServerButton}) {
+        button->style()->unpolish(button);
+        button->style()->polish(button);
+    }
+    const bool canUndoDelete = m_serverManager && m_serverManager->hasDeletedServer();
+    m_undoDeleteButton->setEnabled(canUndoDelete);
+    m_undoDeleteButton->setVisible(canUndoDelete);
     m_emptyDetailWidget->setVisible(!hasSelection);
+    ui->serverCommandBar->setVisible(hasSelection);
+    ui->serverWorkspacePanel->setVisible(hasSelection);
     ui->selectedServerInfoLabel->setVisible(hasSelection);
     ui->startServerButton->setVisible(hasSelection);
     ui->stopServerButton->setVisible(hasSelection);
@@ -2770,6 +3062,7 @@ void ServerListPage::updateUI()
         m_runAutomationButton->setEnabled(hasSelection);
         m_viewCrashReportButton->setEnabled(hasSelection && !m_diagnosticsLabel->text().startsWith(tr("No crash")));
     }
+    syncServerNavigation();
 }
 
 void ServerListPage::updateServerList()
@@ -2798,9 +3091,9 @@ void ServerListPage::updateServerList()
     // instead of showing a second empty-state illustration beside it.
     ui->serverDetailPanel->setVisible(hasServers);
     if (hasServers) {
-        ui->serverListPanel->setMinimumWidth(255);
-        ui->serverListPanel->setMaximumWidth(340);
-        ui->serverSplitter->setSizes(QList<int>() << 290 << 630);
+        ui->serverListPanel->setMinimumWidth(264);
+        ui->serverListPanel->setMaximumWidth(328);
+        ui->serverSplitter->setSizes(QList<int>() << 292 << 888);
     } else {
         ui->serverListPanel->setMinimumWidth(0);
         ui->serverListPanel->setMaximumWidth(QWIDGETSIZE_MAX);
@@ -2818,28 +3111,26 @@ void ServerListPage::updateServerList()
         }
         QListWidgetItem *item = new QListWidgetItem();
         item->setData(Qt::UserRole, server->id());
-        item->setSizeHint(QSize(0, 118));
+        item->setSizeHint(QSize(0, 82));
 
         auto *card = new QWidget(ui->serverList);
-        card->setObjectName("serverCard");
-        card->setStyleSheet("#serverCard { border: 1px solid palette(midlight); border-radius: 8px; background: palette(alternate-base); }"
-                            "#serverCard:hover { border-color: palette(highlight); background: palette(base); }"
-                            "#serverCard[selected=\"true\"] { border: 2px solid palette(highlight); background: palette(base); }");
+        card->setObjectName(QStringLiteral("serverCard"));
         auto *cardLayout = new QVBoxLayout(card);
-        cardLayout->setContentsMargins(12, 10, 12, 10);
-        cardLayout->setSpacing(6);
+        cardLayout->setContentsMargins(11, 8, 11, 8);
+        cardLayout->setSpacing(4);
 
         auto *topRow = new QHBoxLayout();
         topRow->setContentsMargins(0, 0, 0, 0);
+        topRow->setSpacing(7);
         auto *serverIconLabel = new QLabel(card);
-        serverIconLabel->setPixmap(serverCardIcon().pixmap(22, 22));
-        serverIconLabel->setFixedSize(24, 24);
+        serverIconLabel->setPixmap(serverCardIcon().pixmap(24, 24));
+        serverIconLabel->setFixedSize(26, 26);
         serverIconLabel->setAlignment(Qt::AlignCenter);
         serverIconLabel->setToolTip(tr("Minecraft server"));
         auto *nameLabel = new QLabel(server->name(), card);
         QFont nameFont = nameLabel->font();
         nameFont.setBold(true);
-        nameFont.setPointSize(nameFont.pointSize() + 2);
+        nameFont.setPointSize(nameFont.pointSize() + 1);
         nameLabel->setFont(nameFont);
         auto *statusLabel = new QLabel(getStatusString(static_cast<int>(server->status())), card);
         QColor statusColor;
@@ -2851,20 +3142,22 @@ void ServerListPage::updateServerList()
             case ServerStatus::Error: statusColor = QColor("#e53935"); break;
             default: statusColor = QColor("#607d8b"); break;
         }
-        statusLabel->setStyleSheet(QString("background: %1; color: white; border-radius: 8px; padding: 2px 7px; font-weight: 600;")
-            .arg(statusColor.name()));
-        statusLabel->setMinimumWidth(68);
-        statusLabel->setAlignment(Qt::AlignCenter);
+        auto *statusDot = new QLabel(card);
+        statusDot->setFixedSize(8, 8);
+        statusDot->setStyleSheet(QString("background: %1; border-radius: 4px;").arg(statusColor.name()));
+        applyMutedLabelPalette(statusLabel);
         topRow->addWidget(serverIconLabel);
         topRow->addWidget(nameLabel);
         topRow->addStretch();
+        topRow->addWidget(statusDot);
+        topRow->addWidget(statusLabel);
         cardLayout->addLayout(topRow);
 
         const QString loader = server->loaderType().isEmpty() ? tr("Vanilla") : server->loaderType();
-        auto *detailsLabel = new QLabel(tr("%1  |  %2  |  Port %3").arg(loader, server->version()).arg(server->port()), card);
-        detailsLabel->setForegroundRole(QPalette::PlaceholderText);
+        auto *detailsLabel = new QLabel(tr("%1  •  %2  •  Port %3").arg(loader, server->version()).arg(server->port()), card);
+        applyMutedLabelPalette(detailsLabel);
+        detailsLabel->setContentsMargins(33, 0, 0, 0);
         cardLayout->addWidget(detailsLabel);
-        cardLayout->addWidget(statusLabel, 0, Qt::AlignLeading);
 
         ui->serverList->addItem(item);
         ui->serverList->setItemWidget(item, card);
@@ -2875,14 +3168,41 @@ void ServerListPage::updateServerList()
         ++visible;
     }
 
-    ui->serverStatsLabel->setText(tr("%1 server(s) • %2 running • %3 shown")
-        .arg(servers.size()).arg(running).arg(visible));
+    if (auto *emptyTitle = m_emptyServerListWidget->findChild<QLabel *>(QStringLiteral("emptyServerListTitle"))) {
+        emptyTitle->setText(hasServers ? tr("No matching servers") : tr("No servers yet"));
+    }
+    if (auto *emptyHint = m_emptyServerListWidget->findChild<QLabel *>(QStringLiteral("emptyServerListHint"))) {
+        emptyHint->setText(hasServers ? tr("Try a different name, version, or server type.")
+                                      : tr("Create a server to manage it from the launcher."));
+    }
+    if (auto *emptyCreate = m_emptyServerListWidget->findChild<QPushButton *>(QStringLiteral("emptyCreateServerButton"))) {
+        emptyCreate->setVisible(!hasServers);
+    }
+    const bool hasVisibleServers = visible > 0;
+    m_emptyServerListWidget->setVisible(!hasVisibleServers);
+    ui->serverList->setVisible(hasVisibleServers);
+
+    const bool savedServerExists = !savedId.isEmpty() && m_serverManager->getServer(savedId);
+    const bool selectedServerHidden = savedServerExists && selectRow < 0;
+    const QString serverCount = servers.size() == 1
+        ? tr("1 server")
+        : tr("%1 servers").arg(servers.size());
+    QString statsText = filter.isEmpty()
+        ? tr("%1 • %2 running").arg(serverCount).arg(running)
+        : tr("%1 of %2 shown • %3 running").arg(visible).arg(serverCount).arg(running);
+    if (selectedServerHidden) {
+        statsText += tr(" • selected server hidden by filter");
+    }
+    ui->serverStatsLabel->setText(statsText);
+    ui->serverSearchInput->setToolTip(selectedServerHidden
+        ? tr("The selected server remains active in the workspace but is hidden by this filter.")
+        : tr("Filter servers by name, version, or server type."));
 
     // Restore selection. On first open, select the first visible server so the
     // dashboard immediately has useful information instead of an empty state.
     if (selectRow >= 0) {
         ui->serverList->setCurrentRow(selectRow);
-    } else if (visible > 0) {
+    } else if ((!savedServerExists || savedId.isEmpty()) && visible > 0) {
         ui->serverList->setCurrentRow(0);
     } else {
         ui->serverList->setCurrentRow(-1);
@@ -2890,8 +3210,9 @@ void ServerListPage::updateServerList()
 
     const QString finalId = ui->serverList->currentItem()
         ? ui->serverList->currentItem()->data(Qt::UserRole).toString() : QString();
-    if (finalId != m_selectedServerId
-        || (!finalId.isEmpty() && !m_currentConnectedServer)) {
+    if (!selectedServerHidden
+        && (finalId != m_selectedServerId
+            || (!finalId.isEmpty() && !m_currentConnectedServer))) {
         onServerSelectionChanged();
     } else {
         for (int index = 0; index < ui->serverList->count(); ++index) {
@@ -3514,18 +3835,28 @@ void ServerListPage::populateServerFileItem(QTreeWidgetItem *item)
 void ServerListPage::updateSelectedServerInfo()
 {
     if (!m_serverManager || m_selectedServerId.isEmpty()) {
+        ui->detailTitleLabel->setText(tr("Select a server"));
         ui->selectedServerInfoLabel->setText(tr("Select a server to view its details and controls."));
         return;
     }
     const auto server = m_serverManager->getServer(m_selectedServerId);
     if (!server) {
+        ui->detailTitleLabel->setText(tr("Select a server"));
         ui->selectedServerInfoLabel->setText(tr("Select a server to view its details and controls."));
         return;
     }
-    const QString type = server->loaderType().isEmpty() ? tr("Vanilla") : server->loaderType();
-    ui->selectedServerInfoLabel->setText(tr("<b>%1</b>  •  %2 %3  •  Port %4  •  %5–%6 MB  •  %7")
-        .arg(server->name().toHtmlEscaped(), type.toHtmlEscaped(), server->version().toHtmlEscaped()).arg(server->port())
-        .arg(server->minMemory()).arg(server->maxMemory()).arg(getStatusString(static_cast<int>(server->status()))));
+    QString type = server->loaderType().isEmpty() ? tr("Vanilla") : server->loaderType();
+    if (!type.isEmpty()) type[0] = type[0].toUpper();
+    const auto memoryText = [](int memoryMiB) {
+        return memoryMiB % 1024 == 0
+            ? QObject::tr("%1 GB").arg(memoryMiB / 1024)
+            : QObject::tr("%1 MB").arg(memoryMiB);
+    };
+    ui->detailTitleLabel->setText(server->name());
+    ui->selectedServerInfoLabel->setText(tr("%1 %2  •  Port %3  •  %4–%5  •  <b>%6</b>")
+        .arg(type.toHtmlEscaped(), server->version().toHtmlEscaped()).arg(server->port())
+        .arg(memoryText(server->minMemory()), memoryText(server->maxMemory()))
+        .arg(getStatusString(static_cast<int>(server->status()))));
 }
 
 void ServerListPage::appendConsoleOutput(const QString &text)
