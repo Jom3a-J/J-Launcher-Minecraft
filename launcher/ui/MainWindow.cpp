@@ -1071,15 +1071,14 @@ void MainWindow::on_actionManageServers_triggered()
     dialog->setObjectName(QStringLiteral("serverManagerWindow"));
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowTitle(tr("Server Manager"));
-    dialog->setMinimumSize(760, 560);
+    dialog->setMinimumSize(980, 640);
+    dialog->resize(980, 640);
     auto* layout = new QVBoxLayout(dialog);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
     auto* serverPage = new ServerListPage(dialog);
     serverPage->setServerManager(serverManager);
     layout->addWidget(serverPage);
-
-    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
-    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::accept);
-    layout->addWidget(buttons);
     UI::Modeless::showOrActivate(m_serverManagerWindow, [dialog] { return dialog; });
 }
 

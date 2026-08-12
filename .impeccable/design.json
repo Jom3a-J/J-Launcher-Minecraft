@@ -1,0 +1,144 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-12T21:03:47Z",
+  "title": "Design System: J Launcher Fleet Operations Workspace",
+  "extensions": {
+    "colorMeta": {
+      "status-running": {
+        "role": "secondary",
+        "displayName": "Running Green",
+        "canonical": "#43a047"
+      },
+      "status-transition": {
+        "role": "secondary",
+        "displayName": "Transition Amber",
+        "canonical": "#f9a825"
+      },
+      "status-error": {
+        "role": "secondary",
+        "displayName": "Error Red",
+        "canonical": "#e53935"
+      },
+      "status-stopped": {
+        "role": "secondary",
+        "displayName": "Stopped Blue Gray",
+        "canonical": "#607d8b"
+      },
+      "control-disabled-text": {
+        "role": "neutral",
+        "displayName": "Disabled Control Text",
+        "canonical": "#7d7d7d"
+      },
+      "danger-text-dark": {
+        "role": "secondary",
+        "displayName": "Dark Appearance Danger Text",
+        "canonical": "#ff8a80"
+      },
+      "danger-text-light": {
+        "role": "secondary",
+        "displayName": "Light Appearance Danger Text",
+        "canonical": "#b3261e"
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Window Display",
+        "purpose": "Server Manager window title."
+      },
+      "headline": {
+        "displayName": "Operational Headline",
+        "purpose": "High-value metrics and comparable operational readings."
+      },
+      "title": {
+        "displayName": "Section Title",
+        "purpose": "Rail headings, selected-server titles, and section anchors."
+      },
+      "body": {
+        "displayName": "Native Body",
+        "purpose": "Descriptions, metadata, forms, tables, and server details."
+      },
+      "label": {
+        "displayName": "Operational Label",
+        "purpose": "Primary actions, group titles, and table headers."
+      },
+      "console": {
+        "displayName": "Console Output",
+        "purpose": "Dense server process output only."
+      }
+    },
+    "shadows": [],
+    "motion": [],
+    "breakpoints": []
+  },
+  "components": [],
+  "narrative": {
+    "northStar": "Fleet Operations Workspace",
+    "overview": "The approved direction (seed aa8e1623) treats server management as a focused native operations surface: fleet state stays scannable at the left, the selected server and safest process action remain visible above the workspace, and administration tools switch without erasing that command context. It is compact, direct, and premium through precision rather than ornament.\n\nThe system belongs to J Launcher through native Qt palette behavior and the launcher's blue icon identity. Flat tonal layers, restrained separators, compact system typography, and small rounded controls keep both light and dark appearances readable without imposing a fixed theme.",
+    "keyCharacteristics": [
+      "Native Qt palette semantics across launcher themes.",
+      "Launcher-palette primary actions and active navigation.",
+      "Blue launcher icons as the persistent identity signal.",
+      "Flat tonal layering with restrained one-pixel separators.",
+      "Compact operational typography and dense, keyboard-accessible controls.",
+      "Persistent selected-server context and text-backed status communication."
+    ],
+    "rules": [
+      {
+        "name": "The Palette Owns the Theme Rule",
+        "body": "Resolve surfaces, ordinary text, dividers, selections, and button fills through Qt palette roles so saved launcher themes remain authoritative.",
+        "section": "colors"
+      },
+      {
+        "name": "The Action Blue Is Semantic Rule",
+        "body": "Use the launcher highlight role for the current primary action and selected navigation; never introduce a competing fixed accent.",
+        "section": "colors"
+      },
+      {
+        "name": "The Status Is Never Color Alone Rule",
+        "body": "Every status dot, metric color, or warning color must be paired with explicit text naming the state or condition.",
+        "section": "colors"
+      },
+      {
+        "name": "The Operational Ladder Rule",
+        "body": "Use bold weight and the established 18pt, 14pt, and 12pt steps for hierarchy; keep routine controls and metadata at the native application size.",
+        "section": "typography"
+      },
+      {
+        "name": "The Console Is the Only Mono Rule",
+        "body": "Reserve Courier New for server output; do not turn navigation, metadata, or settings into terminal-styled text.",
+        "section": "typography"
+      },
+      {
+        "name": "The Context Before Tools Rule",
+        "body": "Keep the selected server, its status summary, and the safest available start or stop action visible while users move among Home, Console, Mods or Plugins, Players, Files, Backups, Tools, and Settings.",
+        "section": "layout"
+      },
+      {
+        "name": "The Flat Tonal Layers Rule",
+        "body": "Separate regions with palette tone and restrained one-pixel borders; do not add drop shadows, glow, blur, or floating-card elevation.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Three-Radius Rule",
+        "body": "Use 8px for controls, 10px for contained cards or groups, and 12px for major workspace surfaces.",
+        "section": "shapes"
+      }
+    ],
+    "dos": [
+      "Do resolve ordinary surfaces, text, dividers, selection, and primary emphasis through Qt palette roles.",
+      "Do preserve valid saved user icon themes through `QIcon::fromTheme`, then fall back to the built-in blue launcher set before using a native platform icon.",
+      "Do keep the selected server and safest process action visible across administration tools.",
+      "Do pair every status color with a written state, warning, or diagnosis.",
+      "Do verify both approved light and dark appearances whenever a fixed semantic color is introduced.",
+      "Do preserve native keyboard focus, disabled states, and command-entry behavior."
+    ],
+    "donts": [
+      "Don't replace palette-adaptive surfaces with fixed light or dark hex backgrounds.",
+      "Don't add shadows, glass effects, decorative gradients, or floating-card depth.",
+      "Don't introduce a second accent that competes with the launcher highlight and blue icon identity.",
+      "Don't hide destructive meaning in an icon or color alone; keep the Delete label and appearance-aware danger text.",
+      "Don't collapse server selection, selected-server context, and tool navigation into an undifferentiated row of tabs or buttons.",
+      "Don't restyle the command console as a system-wide visual language."
+    ]
+  }
+}
