@@ -14,6 +14,13 @@
 - Public packages, when available, are listed on the [J Launcher releases page](https://github.com/Jom3a-J/J-Launcher-Minecraft/releases).
 - Build and test status is shown in the [J Launcher GitHub Actions](https://github.com/Jom3a-J/J-Launcher-Minecraft/actions) tab.
 
+J Launcher stable releases currently support Windows x64 only. Do not treat a
+local build, workflow artifact, tag, or draft release as stable unless it is
+published on the Releases page from an exact public source tag with matching
+SHA-256 files. The initial stable release is intentionally unsigned; its
+release page and [known issues](KNOWN_ISSUES.md) explain the resulting Windows
+warnings and blocking limitations.
+
 ### Development Builds
 
 Please understand that these builds are not intended for most users. There may be bugs, and other instabilities. You have been warned.
@@ -25,6 +32,18 @@ Development builds, if published, are announced through the [J Launcher GitHub A
 Use the [J Launcher issue tracker](https://github.com/Jom3a-J/J-Launcher-Minecraft/issues) for public bug reports and feature requests. Read the relevant logs first and remove credentials, personal paths, and private server addresses.
 
 Report vulnerabilities privately through [GitHub security advisories](https://github.com/Jom3a-J/J-Launcher-Minecraft/security/advisories/new); do not publish account, token, signing, or release-integrity problems in a public issue.
+
+Release and user documentation:
+
+- [Privacy policy](PRIVACY.md)
+- [External integrations](INTEGRATIONS.md)
+- [Support guide](SUPPORT.md)
+- [Known issues](KNOWN_ISSUES.md)
+- [Security policy](SECURITY.md)
+- [Code signing policy](CODE_SIGNING_POLICY.md)
+- [Release withdrawal and recovery](RELEASE_RECOVERY.md)
+- [Stable release checklist](RELEASE_CHECKLIST.md)
+- [Draft release notes](RELEASE_NOTES.md)
 
 ## Translations
 

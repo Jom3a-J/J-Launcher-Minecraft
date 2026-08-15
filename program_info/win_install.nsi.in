@@ -364,8 +364,9 @@ Section "@Launcher_DisplayName@"
   File "qt.conf"
   File "qtlogging.ini"
   ; GPL-3.0 requires the licence and upstream notices to accompany the program.
-  ; This script names its files explicitly, so installing COPYING.md into the
-  ; build's install tree is not enough on its own.
+  ; This script names its files explicitly, so installing the legal files into
+  ; the build's install tree is not enough on its own.
+  File "LICENSE"
   File "COPYING.md"
   File *.dll
   File /r "iconengines"
@@ -477,6 +478,7 @@ Section "Uninstall"
   Delete $INSTDIR\@Launcher_APP_BINARY_NAME@_updater.exe
   Delete $INSTDIR\qt.conf
   Delete $INSTDIR\qtlogging.ini
+  Delete $INSTDIR\LICENSE
   Delete $INSTDIR\COPYING.md
   Delete $INSTDIR\*.dll
 
