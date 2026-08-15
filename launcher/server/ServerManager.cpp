@@ -400,6 +400,51 @@ bool ServerManager::deleteServer(const QString &id)
     return true;
 }
 
+bool ServerManager::deleteServerPermanently(const QString &id)
+{
+    if (!m_servers.contains(id)) {
+        return false;
+    }
+
+    auto server = m_servers[id];
+    if (server->status() != ServerStatus::Stopped && server->status() != ServerStatus::Error) {
+        return false;
+    }
+
+    const QString originalPath = server->serverDirectory();
+    QString stagedPath;
+    if (QFileInfo::exists(originalPath)) {
+        stagedPath = originalPath + QStringLiteral(".deleting-")
+            + QUuid::createUuid().toString(QUuid::WithoutBraces);
+        if (!QDir().rename(originalPath, stagedPath)) {
+            return false;
+        }
+    }
+
+    m_servers.remove(id);
+    if (!save()) {
+        m_servers.insert(id, server);
+        if (!stagedPath.isEmpty()) {
+            QDir().rename(stagedPath, originalPath);
+        }
+        return false;
+    }
+
+    if (!stagedPath.isEmpty() && !FS::deletePath(stagedPath)) {
+        QString restoredPath = originalPath;
+        if (!QDir().rename(stagedPath, originalPath)) {
+            restoredPath = stagedPath;
+            server->setServerDirectory(restoredPath);
+        }
+        m_servers.insert(id, server);
+        save();
+        return false;
+    }
+
+    emit serverRemoved(id);
+    return true;
+}
+
 bool ServerManager::restoreLastDeletedServer(QString *restoredId)
 {
     if (m_trashHistory.isEmpty()) {

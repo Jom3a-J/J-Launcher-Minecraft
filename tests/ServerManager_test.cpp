@@ -436,6 +436,32 @@ class ServerManagerTest : public QObject {
         QVERIFY(QFileInfo::exists(QDir(restored->serverDirectory()).filePath("marker.txt")));
     }
 
+    void permanentlyDeletesManagedServer()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+
+        QString serverId;
+        QString serverDirectory;
+        {
+            ServerManager manager(temporaryRoot.path());
+            const auto server = manager.createServer("Permanent deletion", "1.21.8");
+            QVERIFY(server);
+            serverId = server->id();
+            serverDirectory = server->serverDirectory();
+            QVERIFY(writeFile(QDir(serverDirectory).filePath("marker.txt"), "delete me"));
+
+            QVERIFY(manager.deleteServerPermanently(serverId));
+            QCOMPARE(manager.serverCount(), 0);
+            QVERIFY(!manager.hasDeletedServer());
+            QVERIFY(!QFileInfo::exists(serverDirectory));
+        }
+
+        ServerManager reloaded(temporaryRoot.path());
+        QVERIFY(reloaded.load());
+        QVERIFY(!reloaded.getServer(serverId));
+    }
+
     void stagesBackupRestoreAndCreatesSafetySnapshot()
     {
         QTemporaryDir temporaryRoot;
@@ -657,6 +683,7 @@ class ServerManagerTest : public QObject {
         QVERIFY(server->start());
         QTRY_COMPARE_WITH_TIMEOUT(server->status(), ServerStatus::Running, 5000);
         QVERIFY(!manager.deleteServer(server->id()));
+        QVERIFY(!manager.deleteServerPermanently(server->id()));
         QCOMPARE(manager.serverCount(), 1);
         QVERIFY(QFileInfo::exists(server->serverDirectory()));
 
