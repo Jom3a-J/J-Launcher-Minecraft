@@ -1,6 +1,6 @@
 # Phase 9 — Stable Release and Maintenance
 
-**Status:** In progress — 14 August 2026
+**Status:** In progress — 17 August 2026
 
 **Scope:** Windows x64 only
 
@@ -21,10 +21,15 @@ limited to defects found by the gates below.
 ## Current position
 
 - The canonical repository is `Jom3a-J/J-Launcher-Minecraft`; its default branch
-  is `develop` and it currently has no tags, releases, or workflow runs.
-- The active feature branch is merged into `official/develop`, but the local
-  worktree still contains intentional, uncommitted Phase 11 and Server Manager
-  changes. No candidate commit can be selected while that state remains dirty.
+  is `develop`. It had no J Launcher product tag or release when rechecked on
+  16 August 2026.
+- Pull request #5 merged the complete release infrastructure and final modeless
+  window work into `official/develop` on 16 August. The merged tree is clean and
+  is the base for the final candidate-preparation change; no exact candidate
+  commit or tag has been selected.
+- GitHub Actions run `31918017505` passed on the merged tree: the Windows x64
+  job checked out the recursive source, selected Temurin Java 17, built with
+  MSVC, and passed all 34 deterministic CTest targets.
 - Phase 11's optimized Release package passed local empty and populated
   performance, dependency-isolation, visual, and data-safety checks.
 - A Phase 9 stable-channel MSVC Release build with LTO completed locally on
@@ -41,12 +46,15 @@ limited to defects found by the gates below.
   still lists trusted signing as open; the updated script no longer does so.
 - Those Phase 11 results are supporting evidence only. Candidate qualification
   must be rerun against the exact clean commit and artifact that would ship.
-- A manual-only Windows x64 workflow is prepared locally. It validates an
-  existing annotated `jlauncher-X.Y.Z` tag on canonical `develop`,
+- A manual-only Windows x64 workflow is merged on canonical `develop`. It
+  validates an existing annotated `jlauncher-X.Y.Z` tag on canonical `develop`,
   builds/tests/packages it, produces an exact tracked-source archive with
   populated submodules, preserved Git link/executable metadata, and checksums,
-  and can create only a GitHub draft release. It has not been committed or run
-  publicly yet.
+  and can create only a GitHub draft release. It has not run against an exact
+  release tag yet.
+- The final candidate-preparation change keeps every workflow job on Windows
+  2022 and refreshes all GitHub-owned actions to reviewed, full-commit pins that
+  use the current Node 24 action runtime.
 - The inherited history already contains an annotated `0.1.1` tag for MultiMC
   from January 2014. J Launcher must not move or reuse that historical tag, so
   the collision-safe candidate tag is `jlauncher-0.1.1`; the application
@@ -76,7 +84,7 @@ limited to defects found by the gates below.
 | Native regression | Local preflight passed; exact-candidate rerun needed | Windows x64 MSVC Release build and all 34 deterministic CTest targets passing |
 | Performance | Local one-sample smokes passed; exact-candidate rerun needed | Empty and populated package reports within the Phase 11 budgets |
 | Packaging | Local portable/installer preflight passed | Portable ZIP, standard-user installer, exact-source archive, licences/notices, and matching SHA-256 files from the tag |
-| Hosted provenance | Workflow prepared locally; public run missing | Public manual workflow run that checks out the tag, builds/tests it, and creates only a draft release |
+| Hosted provenance | Workflow merged; exact-tag run missing | Public manual workflow run that checks out the tag, builds/tests it, and creates only a draft release |
 | Signature disclosure | Decided | Exact artifacts report `NotSigned`; release page, README, notes, and known issues clearly explain Windows warnings/blocking and never imply a publisher signature |
 | Post-reboot cold start | Missing | First launch after an actual reboot, before any J Launcher warm-up, recorded with the test machine and package hash |
 | Fresh-machine smoke | Missing | Fully updated, genuinely fresh Windows x64 machine using a standard-user account and the exact candidate artifacts |
@@ -87,14 +95,14 @@ limited to defects found by the gates below.
 
 ## Qualification order
 
-1. Review and preserve the current Phase 11 changes, then place the complete
-   product state on `official/develop` through the maintainer's normal Git
-   process.
+1. Keep the complete product and release-infrastructure state merged on
+   `official/develop`; PR #5 completed this on 16 August 2026.
 2. Review the Phase 9 public documents and the Windows x64-only scope.
 3. Reconfirm the canonical J Launcher homepage, GitHub Issues, and private
    vulnerability reporting remain enabled when the exact tag is reviewed.
-4. Review and commit the prepared manual, draft-only hosted release workflow.
-   It must never publish on a push or tag event and must never consume a local
+4. Merge the final candidate-preparation change after its Windows CI passes.
+   The manual, draft-only hosted release workflow must remain Windows-only,
+   must never publish on a push or tag event, and must never consume a local
    binary for release.
 5. Select the candidate commit, set the stable channel, create the annotated
    version tag, and stop feature changes for that candidate.
@@ -214,3 +222,7 @@ build-migration-build2/phase9-preflight-20260814-003829
   vulnerability reporting were enabled and the repository homepage was changed
   from Prism Launcher to the reviewed J Launcher website; API and public-route
   verification passed.
+- PR #5 merged the audited release infrastructure into `official/develop` on
+  16 August 2026. Windows Actions run `31918017505` then built the merged tree
+  and passed all 34 deterministic CTest targets. The remaining workflow change
+  is the final Windows-only runner and current full-commit action-pin refresh.
