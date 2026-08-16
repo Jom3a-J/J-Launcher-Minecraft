@@ -112,7 +112,7 @@ not the development account or a profile merely emptied on the same machine.
 - [ ] Publish manually. A successful workflow or tag push must
       never publish by itself.
 
-## Current 0.1.1 candidate status — 15 August 2026
+## Current 0.1.1 candidate status — 17 August 2026
 
 - [x] Phase 11 local Release packaging, dependency isolation, empty/populated
       performance, visual, and data-safety checks passed on the current working
@@ -130,21 +130,26 @@ not the development account or a profile merely emptied on the same machine.
 - [x] One-sample dependency-isolated empty and populated package smokes passed
       every Phase 11 budget. They are observational and are not the certified
       post-reboot cold-start result.
-- [x] A manual-only, draft-only Windows x64 workflow and exact tracked-source
-      archive script are prepared locally. They still require review, commit,
-      and a public run against the final annotated tag.
+- [x] PR #5 merged the manual-only, draft-only Windows x64 workflow and exact
+      tracked-source archive script into canonical `develop` on 16 August.
+- [x] GitHub Actions run `31918017505` built the merged tree on Windows 2022
+      with Temurin Java 17 and passed all 34 deterministic CTest targets.
+- [ ] The final candidate-preparation change makes the draft workflow
+      Windows-only throughout and refreshes every GitHub-owned action to a
+      reviewed full-commit pin. It still requires Windows CI and merge.
 - [x] A focused release-infrastructure audit corrected canonical-branch
       ancestry validation, made dirty-source detection include every untracked
       file and dirty submodule, preserved Git symlinks/executable metadata in
       deterministic source archives, and made the combined checksum cover the
       exact ten-file draft asset set.
 - [x] The public release-page template and first-release withdrawal/recovery
-      policy are prepared locally for exact-tag review.
+      policy are merged for exact-tag review.
 - [x] The inherited annotated `0.1.1` tag was found to belong to MultiMC's 2014
       history. The collision-safe candidate tag is `jlauncher-0.1.1`; the
       product version and artifact filenames remain `0.1.1`.
-- [ ] The worktree is not clean and no exact candidate commit or tag has been
-      selected; existing results are therefore supporting evidence only.
+- [ ] No exact candidate commit or tag has been selected. The merged base is
+      clean, but existing build and package results remain supporting evidence
+      until the exact-tag workflow and external gates pass.
 - [ ] The canonical repository has no hosted release run or draft artifacts.
 - [x] On 15 August 2026, the canonical repository enabled Issues and private
       vulnerability reporting and replaced the inherited Prism Launcher
