@@ -141,6 +141,16 @@ jobs:
       - name: Build, test, package, and audit
         shell: pwsh
         run: |
+          # This tag predates the preflight script's detached-HEAD fix. Give its
+          # exact commit a local branch name without changing source files.
+          if ($env:RELEASE_TAG -eq 'jlauncher-0.1.1') {
+              $qualificationBranch = "release-workflow-$env:GITHUB_RUN_ID"
+              & git switch --create $qualificationBranch
+              if ($LASTEXITCODE -ne 0) {
+                  throw "Unable to attach the tagged commit to $qualificationBranch."
+              }
+          }
+
           $qtPrefix = Join-Path $env:QT_ROOT "$env:QT_VERSION\msvc2022_64"
           & .\scripts\phase9-windows-preflight.ps1 `
               -BuildDirectory $env:BUILD_DIRECTORY `
