@@ -1,0 +1,504 @@
+name: Prepare Windows stable release draft
+
+# This workflow can run only when a maintainer starts it manually. It builds an
+# existing annotated tag and can create a GitHub draft, but it cannot publish a
+# release and never runs because a branch or tag was pushed.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing annotated product tag, for example jlauncher-0.1.1
+        required: true
+        type: string
+      create_draft:
+        description: Create a GitHub draft release after the build passes
+        required: true
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: stable-release-draft-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows-x64:
+    name: Build and audit Windows x64
+    runs-on: windows-2022
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      QT_VERSION: 6.10.2
+      QT_ARCH: win64_msvc2022_64
+      QT_ROOT: C:\Qt
+      BUILD_DIRECTORY: ${{ github.workspace }}\build-release
+      PREFLIGHT_DIRECTORY: ${{ github.workspace }}\build-release\phase9-hosted-preflight
+
+    steps:
+      - name: Check out the exact tag and submodules
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Validate repository, annotated tag, version, and release branch
+        id: source
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REPOSITORY -ne 'Jom3a-J/J-Launcher-Minecraft') {
+              throw "Stable drafts may run only in the canonical repository."
+          }
+          if ($env:RELEASE_TAG -notmatch '^jlauncher-(\d+\.\d+\.\d+)$') {
+              throw "Release tag must use the jlauncher-X.Y.Z format."
+          }
+          $releaseVersion = $Matches[1]
+
+          $tagReference = "refs/tags/$env:RELEASE_TAG"
+          $tagType = (& git cat-file -t $tagReference).Trim()
+          if ($LASTEXITCODE -ne 0 -or $tagType -ne 'tag') {
+              throw "Release tag is missing or is not annotated: $env:RELEASE_TAG"
+          }
+
+          $head = (& git rev-parse HEAD).Trim()
+          $tagCommit = (& git rev-list -n 1 $tagReference).Trim()
+          if ($LASTEXITCODE -ne 0 -or $head -ne $tagCommit) {
+              throw "Checked-out source does not match tag $env:RELEASE_TAG."
+          }
+
+          $cmake = Get-Content -LiteralPath CMakeLists.txt -Raw
+          $major = [Regex]::Match($cmake, 'set\(Launcher_VERSION_MAJOR\s+(\d+)\)').Groups[1].Value
+          $minor = [Regex]::Match($cmake, 'set\(Launcher_VERSION_MINOR\s+(\d+)\)').Groups[1].Value
+          $patch = [Regex]::Match($cmake, 'set\(Launcher_VERSION_PATCH\s+(\d+)\)').Groups[1].Value
+          $configuredVersion = "$major.$minor.$patch"
+          if ($configuredVersion -ne $releaseVersion) {
+              throw "Configured version $configuredVersion does not match tag $env:RELEASE_TAG."
+          }
+
+          $status = @(& git status --short --untracked-files=all `
+              --ignore-submodules=none)
+          if ($LASTEXITCODE -ne 0 -or $status.Count -gt 0) {
+              throw "The checked-out release source is not clean."
+          }
+          & git show --check --format= --no-renames HEAD
+          if ($LASTEXITCODE -ne 0) {
+              throw "The tagged commit failed git's whitespace check."
+          }
+
+          & git fetch --no-tags origin `
+              refs/heads/develop:refs/remotes/origin/develop
+          if ($LASTEXITCODE -ne 0) {
+              throw "Unable to fetch the canonical develop branch."
+          }
+          & git merge-base --is-ancestor HEAD refs/remotes/origin/develop
+          if ($LASTEXITCODE -ne 0) {
+              throw "Tag $env:RELEASE_TAG is not reachable from canonical develop."
+          }
+
+          "commit=$head" >> $env:GITHUB_OUTPUT
+          "version=$configuredVersion" >> $env:GITHUB_OUTPUT
+
+      - name: Set up Java 17
+        uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install the pinned Qt SDK
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check aqtinstall==3.3.0
+          if ($LASTEXITCODE -ne 0) {
+              throw "Unable to install aqtinstall 3.3.0."
+          }
+          python -m aqt install-qt windows desktop $env:QT_VERSION $env:QT_ARCH `
+              -m qtimageformats qtnetworkauth --outputdir $env:QT_ROOT
+          if ($LASTEXITCODE -ne 0) {
+              throw "Unable to install Qt $env:QT_VERSION."
+          }
+
+          $qtCMake = Join-Path $env:QT_ROOT "$env:QT_VERSION\msvc2022_64\lib\cmake\Qt6"
+          if (-not (Test-Path -LiteralPath $qtCMake -PathType Container)) {
+              throw "Qt CMake package was not installed at $qtCMake."
+          }
+
+      - name: Bootstrap the pinned vcpkg submodule
+        shell: pwsh
+        run: |
+          & .\cmake\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) {
+              throw "Unable to bootstrap the repository's vcpkg revision."
+          }
+
+      - name: Build, test, package, and audit
+        shell: pwsh
+        run: |
+          $qtPrefix = Join-Path $env:QT_ROOT "$env:QT_VERSION\msvc2022_64"
+          & .\scripts\phase9-windows-preflight.ps1 `
+              -BuildDirectory $env:BUILD_DIRECTORY `
+              -OutputDirectory $env:PREFLIGHT_DIRECTORY `
+              -QtRoot $qtPrefix `
+              -CMakeToolchainFile .\cmake\vcpkg\scripts\buildsystems\vcpkg.cmake `
+              -Generator 'Ninja Multi-Config' `
+              -ExpectedTag $env:RELEASE_TAG `
+              -ParallelJobs 2
+
+      - name: Create and verify the exact-source archive
+        shell: pwsh
+        run: |
+          & .\scripts\phase9-source-archive.ps1 `
+              -ExpectedTag $env:RELEASE_TAG `
+              -OutputDirectory $env:PREFLIGHT_DIRECTORY
+
+      - name: Assemble versioned release assets and checksums
+        shell: pwsh
+        run: |
+          $assets = Join-Path $env:GITHUB_WORKSPACE 'release-assets'
+          $null = New-Item -ItemType Directory -Path $assets
+
+          $portable = @(Get-ChildItem -LiteralPath $env:PREFLIGHT_DIRECTORY -File `
+              -Filter 'JLauncher-Windows-x64-Portable-*.zip')
+          $installer = @(Get-ChildItem -LiteralPath $env:PREFLIGHT_DIRECTORY -File `
+              -Filter 'JLauncher-Windows-x64-Setup-*.exe')
+          $source = @(Get-ChildItem -LiteralPath $env:PREFLIGHT_DIRECTORY -File `
+              -Filter 'JLauncher-*-Source.tar.gz')
+          if ($portable.Count -ne 1 -or $installer.Count -ne 1 -or $source.Count -ne 1) {
+              throw 'Expected exactly one portable ZIP, installer, and source archive.'
+          }
+
+          $assetFiles = @(
+              $portable[0].FullName,
+              "$($portable[0].FullName).sha256",
+              $installer[0].FullName,
+              "$($installer[0].FullName).sha256",
+              $source[0].FullName,
+              "$($source[0].FullName).sha256"
+          )
+          $sourceManifest = @(Get-ChildItem -LiteralPath $env:PREFLIGHT_DIRECTORY -File `
+              -Filter 'JLauncher-*-Source-Files.sha256')
+          $sourceProvenance = @(Get-ChildItem -LiteralPath $env:PREFLIGHT_DIRECTORY -File `
+              -Filter 'JLauncher-*-Source-Provenance.json')
+          if ($sourceManifest.Count -ne 1 -or $sourceProvenance.Count -ne 1) {
+              throw 'Expected exactly one source manifest and provenance record.'
+          }
+
+          $provenance = Get-Content -LiteralPath $sourceProvenance[0].FullName `
+              -Raw | ConvertFrom-Json
+          $expectedWorkflowRun = `
+              "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          $actualSourceHash = (Get-FileHash -LiteralPath $source[0].FullName `
+              -Algorithm SHA256).Hash
+          $actualManifestHash = (Get-FileHash -LiteralPath $sourceManifest[0].FullName `
+              -Algorithm SHA256).Hash
+          if ($provenance.repository -ne $env:GITHUB_REPOSITORY -or
+              $provenance.tag -ne $env:RELEASE_TAG -or
+              $provenance.sourceCommit -ne '${{ steps.source.outputs.commit }}' -or
+              $provenance.sourceFileCount -le 0 -or
+              -not $provenance.sourceBytesExportedFromGitObjects -or
+              -not $provenance.sourceArchivePreservesGitLinksAndExecutability -or
+              -not $provenance.sourceArchiveDeterministic -or
+              $provenance.sourceArchive -ne $source[0].Name -or
+              $provenance.sourceArchiveSha256 -ne $actualSourceHash -or
+              $provenance.sourceFileManifest -ne $sourceManifest[0].Name -or
+              $provenance.sourceFileManifestSha256 -ne $actualManifestHash -or
+              $provenance.workflowRun -ne $expectedWorkflowRun) {
+              throw 'Exact-source provenance does not satisfy hosted candidate policy.'
+          }
+          $assetFiles += $sourceManifest[0].FullName
+          $assetFiles += $sourceProvenance[0].FullName
+
+          $preflightReport = Join-Path $env:PREFLIGHT_DIRECTORY 'phase9-preflight-report.json'
+          if (-not (Test-Path -LiteralPath $preflightReport -PathType Leaf)) {
+              throw 'Phase 9 preflight report is missing.'
+          }
+          $report = Get-Content -LiteralPath $preflightReport -Raw | ConvertFrom-Json
+          if ($report.sourceDirty -or -not $report.exactTagVerified -or
+              $report.expectedTag -ne $env:RELEASE_TAG -or
+              -not $report.hostedBuild -or -not $report.hostedProvenanceUrl -or
+              -not $report.buildExecuted -or -not $report.testsExecuted -or
+              -not $report.installerPayloadAudited -or
+              -not $report.signatureStateMatchesPolicy -or
+              $report.launcherSignatureStatus -ne 'NotSigned' -or
+              $report.installerSignatureStatus -ne 'NotSigned' -or
+              -not $report.readyForExternalGates -or $report.publicationReady) {
+              throw 'Phase 9 preflight report does not satisfy hosted candidate policy.'
+          }
+          $versionedReport = Join-Path $assets `
+              'JLauncher-${{ steps.source.outputs.version }}-Preflight-Report.json'
+          Copy-Item -LiteralPath $preflightReport -Destination $versionedReport
+
+          foreach ($file in $assetFiles) {
+              if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+                  throw "Required release asset is missing: $file"
+              }
+              Copy-Item -LiteralPath $file -Destination $assets
+          }
+
+          $checksumLines = [Collections.Generic.List[string]]::new()
+          Get-ChildItem -LiteralPath $assets -File |
+              Sort-Object Name |
+              ForEach-Object {
+                  $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+                  $checksumLines.Add("$hash *$($_.Name)")
+              }
+          $checksumLines | Set-Content -LiteralPath (Join-Path $assets 'SHA256SUMS.txt') -Encoding ascii
+
+          if (@(Get-ChildItem -LiteralPath $assets -File).Count -ne 10) {
+              throw 'The assembled release asset set is incomplete.'
+          }
+
+      - name: Upload audited draft inputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: JLauncher-${{ inputs.tag }}-draft-assets
+          path: release-assets/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Record build provenance
+        shell: pwsh
+        run: |
+          @"
+          ## Windows x64 release candidate
+
+          - Tag: ``$env:RELEASE_TAG``
+          - Commit: ``${{ steps.source.outputs.commit }}``
+          - Version: ``${{ steps.source.outputs.version }}``
+          - Signing: intentionally unsigned; expected Authenticode status is ``NotSigned``
+          - Publication: not performed by this job
+          "@ >> $env:GITHUB_STEP_SUMMARY
+
+  create-draft:
+    name: Create GitHub draft release
+    if: ${{ inputs.create_draft }}
+    needs: build-windows-x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+
+    steps:
+      - name: Check out release documentation at the exact tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: false
+
+      - name: Download audited draft inputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: JLauncher-${{ inputs.tag }}-draft-assets
+          path: release-assets
+
+      - name: Independently verify downloaded checksums
+        shell: pwsh
+        run: |
+          $assets = Join-Path $env:GITHUB_WORKSPACE 'release-assets'
+          $checksumFile = Join-Path $assets 'SHA256SUMS.txt'
+          if (-not (Test-Path -LiteralPath $checksumFile -PathType Leaf)) {
+              throw 'Combined checksum file is missing.'
+          }
+
+          $checksumTargets = [Collections.Generic.HashSet[string]]::new(
+              [StringComparer]::Ordinal
+          )
+          foreach ($line in (Get-Content -LiteralPath $checksumFile)) {
+              if ($line -notmatch '^([0-9A-Fa-f]{64}) \*(.+)$') {
+                  throw "Invalid checksum line: $line"
+              }
+              $expectedHash = $Matches[1].ToUpperInvariant()
+              $fileName = $Matches[2]
+              if ([IO.Path]::IsPathRooted($fileName) -or
+                  $fileName.Contains('/') -or $fileName.Contains('\') -or
+                  -not $checksumTargets.Add($fileName)) {
+                  throw "Unsafe or duplicate checksum target: $fileName"
+              }
+              $filePath = Join-Path $assets $fileName
+              if (-not (Test-Path -LiteralPath $filePath -PathType Leaf)) {
+                  throw "Checksum target is missing: $fileName"
+              }
+              $actualHash = (Get-FileHash -LiteralPath $filePath -Algorithm SHA256).Hash
+              if ($actualHash -ne $expectedHash) {
+                  throw "Downloaded asset checksum mismatch: $fileName"
+              }
+          }
+          $expectedChecksumTargets = @(
+              Get-ChildItem -LiteralPath $assets -File |
+                  Where-Object Name -NE 'SHA256SUMS.txt' |
+                  Select-Object -ExpandProperty Name
+          )
+          $checksumDifference = @(Compare-Object `
+              -ReferenceObject $expectedChecksumTargets `
+              -DifferenceObject @($checksumTargets) `
+              -CaseSensitive)
+          if ($checksumDifference.Count -gt 0 -or
+              $checksumTargets.Count -ne $expectedChecksumTargets.Count) {
+              throw 'Combined checksum file does not cover the exact release asset set.'
+          }
+
+          $primarySidecars = @(Get-ChildItem -LiteralPath $assets -File |
+              Where-Object { $_.Name -match '\.(zip|exe|tar\.gz)\.sha256$' })
+          if ($primarySidecars.Count -ne 3) {
+              throw 'Expected one checksum sidecar for each primary release artifact.'
+          }
+          foreach ($sidecar in $primarySidecars) {
+              $line = (Get-Content -LiteralPath $sidecar.FullName -Raw).Trim()
+              if ($line -notmatch '^([0-9A-Fa-f]{64}) \*(.+)$') {
+                  throw "Invalid primary checksum sidecar: $($sidecar.Name)"
+              }
+              $expectedHash = $Matches[1].ToUpperInvariant()
+              $targetName = $Matches[2]
+              $target = Join-Path $assets $targetName
+              if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
+                  throw "Primary checksum target is missing: $targetName"
+              }
+              if ((Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne
+                  $expectedHash) {
+                  throw "Primary checksum mismatch: $targetName"
+              }
+          }
+
+          $sourceArchive = @(Get-ChildItem -LiteralPath $assets -File `
+              -Filter 'JLauncher-*-Source.tar.gz')
+          $sourceManifest = @(Get-ChildItem -LiteralPath $assets -File `
+              -Filter 'JLauncher-*-Source-Files.sha256')
+          if ($sourceArchive.Count -ne 1 -or $sourceManifest.Count -ne 1) {
+              throw 'Exact-source archive or per-file manifest is missing.'
+          }
+
+          $sourceVerification = Join-Path $env:RUNNER_TEMP 'jlauncher-source-verification'
+          if (Test-Path -LiteralPath $sourceVerification) {
+              throw "Source-verification directory unexpectedly exists: $sourceVerification"
+          }
+          $null = New-Item -ItemType Directory -Path $sourceVerification
+          & tar -xzf $sourceArchive[0].FullName -C $sourceVerification
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Unable to extract the downloaded exact-source archive.'
+          }
+
+          $sourceRoot = @(Get-ChildItem -LiteralPath $sourceVerification -Directory)
+          if ($sourceRoot.Count -ne 1) {
+              throw 'Exact-source archive must contain one versioned root directory.'
+          }
+          $manifestCount = 0
+          foreach ($line in (Get-Content -LiteralPath $sourceManifest[0].FullName)) {
+              if ($line -notmatch '^([0-9A-Fa-f]{64}) \*(.+)$') {
+                  throw "Invalid source-file manifest line: $line"
+              }
+              $expectedHash = $Matches[1].ToUpperInvariant()
+              $relativePath = $Matches[2]
+              if ($relativePath -match '(^|/)\.\.(/|$)' -or
+                  [IO.Path]::IsPathRooted($relativePath)) {
+                  throw "Unsafe source-file manifest path: $relativePath"
+              }
+              $sourceFile = Join-Path $sourceRoot[0].FullName $relativePath
+              if (-not (Test-Path -LiteralPath $sourceFile -PathType Leaf)) {
+                  throw "Archived tracked source file is missing: $relativePath"
+              }
+              $sourceItem = Get-Item -LiteralPath $sourceFile -Force
+              if ($sourceItem.LinkType -eq 'SymbolicLink') {
+                  $linkTargets = @($sourceItem.Target)
+                  if ($linkTargets.Count -ne 1) {
+                      throw "Archived symbolic link has an invalid target: $relativePath"
+                  }
+                  $targetBytes = [Text.Encoding]::UTF8.GetBytes($linkTargets[0])
+                  $actualHash = [Convert]::ToHexString(
+                      [Security.Cryptography.SHA256]::HashData($targetBytes)
+                  )
+              }
+              else {
+                  $actualHash = (Get-FileHash -LiteralPath $sourceFile `
+                      -Algorithm SHA256).Hash
+              }
+              if ($actualHash -ne $expectedHash) {
+                  throw "Archived tracked source hash mismatch: $relativePath"
+              }
+              $manifestCount++
+          }
+          $extractedCount = @(Get-ChildItem -LiteralPath $sourceRoot[0].FullName `
+              -Recurse -File).Count
+          if ($manifestCount -ne $extractedCount) {
+              throw "Source archive contains unlisted files ($extractedCount versus $manifestCount)."
+          }
+
+      - name: Generate exact release page
+        id: release
+        shell: pwsh
+        run: |
+          $tagReference = "refs/tags/$env:RELEASE_TAG"
+          $tagType = (& git cat-file -t $tagReference).Trim()
+          $commit = (& git rev-list -n 1 $tagReference).Trim()
+          if ($LASTEXITCODE -ne 0 -or $tagType -ne 'tag' -or -not $commit) {
+              throw 'Unable to revalidate the annotated release tag.'
+          }
+          if ($env:RELEASE_TAG -notmatch '^jlauncher-(\d+\.\d+\.\d+)$') {
+              throw 'Release tag does not use the required product-scoped format.'
+          }
+          $releaseVersion = $Matches[1]
+
+          $provenanceUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          $body = Get-Content -LiteralPath RELEASE_BODY.md -Raw
+          $body = $body.Replace('{{VERSION}}', $releaseVersion)
+          $body = $body.Replace('{{TAG}}', $env:RELEASE_TAG)
+          $body = $body.Replace('{{COMMIT}}', $commit)
+          $body = $body.Replace('{{PROVENANCE_URL}}', $provenanceUrl)
+          if ($body.Contains('{{')) {
+              throw 'Release body still contains an unresolved placeholder.'
+          }
+          $body | Set-Content -LiteralPath release-body.generated.md -Encoding utf8
+          "commit=$commit" >> $env:GITHUB_OUTPUT
+          "version=$releaseVersion" >> $env:GITHUB_OUTPUT
+
+      - name: Create draft release only
+        shell: pwsh
+        run: |
+          & gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+              throw "A release already exists for $env:RELEASE_TAG; refusing to replace it or its assets."
+          }
+
+          $assets = @(Get-ChildItem -LiteralPath release-assets -File |
+              Sort-Object Name | Select-Object -ExpandProperty FullName)
+          if ($assets.Count -ne 10) {
+              throw 'Downloaded draft asset set is incomplete.'
+          }
+
+          $arguments = @(
+              'release', 'create', $env:RELEASE_TAG,
+              '--repo', $env:GITHUB_REPOSITORY,
+              '--verify-tag',
+              '--draft',
+              '--title', "J Launcher ${{ steps.release.outputs.version }}",
+              '--notes-file', 'release-body.generated.md'
+          )
+          $arguments += $assets
+          & gh @arguments
+          if ($LASTEXITCODE -ne 0) {
+              throw 'GitHub CLI failed to create the draft release.'
+          }
+
+          $release = & gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY `
+              --json isDraft,tagName,url | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or -not $release.isDraft -or
+              $release.tagName -ne $env:RELEASE_TAG) {
+              throw 'Created release did not verify as the expected draft.'
+          }
+
+          @"
+          ## Draft created
+
+          - Draft URL: $($release.url)
+          - Tag: ``$($release.tagName)``
+          - Commit: ``${{ steps.release.outputs.commit }}``
+          - The workflow did **not** publish the release.
+          "@ >> $env:GITHUB_STEP_SUMMARY

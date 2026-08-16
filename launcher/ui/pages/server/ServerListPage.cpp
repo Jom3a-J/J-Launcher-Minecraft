@@ -1340,16 +1340,39 @@ void ServerListPage::onDeleteServer()
         QMessageBox::Yes | QMessageBox::No);
 
     if (reply == QMessageBox::Yes) {
-        // Disconnect signals before deletion
+        if (!m_serverManager->deleteServer(m_selectedServerId)) {
+            QMessageBox permanentDeletePrompt(
+                QMessageBox::Warning,
+                tr("Delete Server"),
+                tr("The server could not be moved to the recycle bin."),
+                QMessageBox::NoButton,
+                this);
+            permanentDeletePrompt.setInformativeText(
+                tr("Permanently delete '%1' and all of its files instead?\n\n"
+                   "This cannot be undone.").arg(server->name()));
+            auto *cancelButton = permanentDeletePrompt.addButton(QMessageBox::Cancel);
+            auto *permanentDeleteButton = permanentDeletePrompt.addButton(
+                tr("Delete Permanently"), QMessageBox::DestructiveRole);
+            permanentDeletePrompt.setDefaultButton(qobject_cast<QPushButton *>(cancelButton));
+            permanentDeletePrompt.exec();
+            if (permanentDeletePrompt.clickedButton() != permanentDeleteButton) {
+                return;
+            }
+
+            if (!m_serverManager->deleteServerPermanently(m_selectedServerId)) {
+                QMessageBox::warning(
+                    this,
+                    tr("Delete Server"),
+                    tr("J Launcher could not delete the server folder. Close any program using its files, then try again.\n\n"
+                       "Folder: %1").arg(QDir::toNativeSeparators(server->serverDirectory())));
+                return;
+            }
+        }
+
+        // Keep the live connection intact until deletion has actually succeeded.
         if (m_currentConnectedServer && m_currentConnectedServer->id() == m_selectedServerId) {
             disconnect(m_currentConnectedServer.get(), nullptr, this, nullptr);
             m_currentConnectedServer = nullptr;
-        }
-
-        if (!m_serverManager->deleteServer(m_selectedServerId)) {
-            QMessageBox::warning(this, tr("Delete Server"),
-                                 tr("The server could not be moved to the recycle bin."));
-            return;
         }
         m_selectedServerId.clear();
         ui->consoleOutput->clear();
@@ -3086,6 +3109,8 @@ void ServerListPage::updateServerList()
     ui->serverList->setVisible(hasServers);
     ui->serverSearchInput->setVisible(hasServers);
     ui->serverListTitle->setVisible(hasServers);
+    ui->createFromModpackButton->setVisible(hasServers);
+    ui->createServerButton->setVisible(hasServers);
 
     // With no servers, use the full content width for the single create prompt
     // instead of showing a second empty-state illustration beside it.

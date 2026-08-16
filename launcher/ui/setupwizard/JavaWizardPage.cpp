@@ -1,5 +1,6 @@
 #include "JavaWizardPage.h"
 #include "Application.h"
+#include "BuildConfig.h"
 #include "settings/SettingsObject.h"
 
 #include <QFileDialog>
