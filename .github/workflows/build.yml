@@ -51,13 +51,15 @@ jobs:
               throw 'Unable to install aqtinstall 3.3.0.'
           }
           $sevenZip = (Get-Command 7z -ErrorAction Stop).Source
-          python -m aqt install-qt windows desktop $env:QT_VERSION $env:QT_ARCH `
+          $qtPrefix = Join-Path $env:QT_ROOT "$env:QT_VERSION\msvc2022_64"
+          New-Item -ItemType Directory -Force -Path $qtPrefix | Out-Null
+          python -m aqt --config .github/aqt-settings.ini `
+              install-qt windows desktop $env:QT_VERSION $env:QT_ARCH `
               -m qtimageformats qtnetworkauth --outputdir $env:QT_ROOT --external $sevenZip
           if ($LASTEXITCODE -ne 0) {
               throw "Unable to install Qt $env:QT_VERSION."
           }
 
-          $qtPrefix = Join-Path $env:QT_ROOT "$env:QT_VERSION\msvc2022_64"
           if (-not (Test-Path -LiteralPath "$qtPrefix\lib\cmake\Qt6" -PathType Container)) {
               throw "Qt CMake package was not installed at $qtPrefix."
           }
