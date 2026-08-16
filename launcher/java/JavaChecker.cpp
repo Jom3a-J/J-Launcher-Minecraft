@@ -43,6 +43,7 @@
 
 #include "Commandline.h"
 #include "Application.h"
+#include "FileSystem.h"
 #include "java/JavaUtils.h"
 #include "logs/Privacy.h"
 

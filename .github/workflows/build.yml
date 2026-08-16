@@ -1,7 +1,7 @@
-name: Build and test
+name: Build and test Windows x64
 
-# This fork intentionally validates pull requests and explicit manual runs only.
-# It does not run on pushes and does not package, publish, sign, or upload files.
+# Phase 9 supports Windows x64 only. This workflow validates pull requests and
+# explicit manual runs without packaging, publishing, signing, or uploading.
 on:
   pull_request:
     branches:
@@ -17,61 +17,91 @@ concurrency:
 
 jobs:
   build-test:
-    name: Build and test (Ubuntu)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    name: Build and test (Windows x64)
+    runs-on: windows-2022
+    timeout-minutes: 90
     permissions:
       contents: read
+    env:
+      QT_VERSION: 6.10.2
+      QT_ARCH: win64_msvc2022_64
+      QT_ROOT: C:\Qt
+      BUILD_DIRECTORY: ${{ github.workspace }}\build-ci
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 1
+          persist-credentials: false
           submodules: recursive
 
-      - name: Install build dependencies
-        shell: bash
+      - name: Install the pinned Qt SDK
+        shell: pwsh
         run: |
-          set -euxo pipefail
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y \
-            cmark \
-            dpkg-dev \
-            extra-cmake-modules \
-            gamemode-dev \
-            libarchive-dev \
-            libcmark-dev \
-            libqrencode-dev \
-            libqt6opengl6-dev \
-            libtomlplusplus-dev \
-            libxcb-cursor-dev \
-            ninja-build \
-            pkg-config \
-            qt6-base-dev \
-            qt6-base-dev-tools \
-            qt6-image-formats-plugins \
-            qt6-networkauth-dev \
-            scdoc \
-            zlib1g-dev
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --disable-pip-version-check aqtinstall==3.3.0
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Unable to install aqtinstall 3.3.0.'
+          }
+          python -m aqt install-qt windows desktop $env:QT_VERSION $env:QT_ARCH `
+              -m qtimageformats qtnetworkauth --outputdir $env:QT_ROOT
+          if ($LASTEXITCODE -ne 0) {
+              throw "Unable to install Qt $env:QT_VERSION."
+          }
 
-      - name: Configure
-        shell: bash
-        run: >-
-          cmake -S . -B build-ci -G Ninja
-          -DCMAKE_BUILD_TYPE=Debug
-          -DBUILD_TESTING=ON
-          -DLauncher_USE_PCH=OFF
-          -DENABLE_LTO=OFF
-          -DLauncher_BUILD_ARTIFACT=ci
-          -DLauncher_BUILD_PLATFORM=Linux
-          -DLauncher_UPDATER_GITHUB_REPO=
-          -DLauncher_CURSEFORGE_API_KEY=
+          $qtPrefix = Join-Path $env:QT_ROOT "$env:QT_VERSION\msvc2022_64"
+          if (-not (Test-Path -LiteralPath "$qtPrefix\lib\cmake\Qt6" -PathType Container)) {
+              throw "Qt CMake package was not installed at $qtPrefix."
+          }
 
-      - name: Build
-        shell: bash
-        run: cmake --build build-ci --parallel 2
+      - name: Bootstrap the pinned vcpkg submodule
+        shell: pwsh
+        run: |
+          & .\cmake\vcpkg\bootstrap-vcpkg.bat -disableMetrics
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Unable to bootstrap the repository vcpkg revision.'
+          }
 
-      - name: Test
-        shell: bash
-        run: ctest --test-dir build-ci --output-on-failure --timeout 300
+      - name: Configure, build, and test Windows x64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $qtPrefix = Join-Path $env:QT_ROOT "$env:QT_VERSION\msvc2022_64"
+          $toolchain = Join-Path $env:GITHUB_WORKSPACE `
+              'cmake\vcpkg\scripts\buildsystems\vcpkg.cmake'
+          $configureArguments = @(
+              '-S', $env:GITHUB_WORKSPACE,
+              '-B', $env:BUILD_DIRECTORY,
+              '-G', 'Visual Studio 17 2022',
+              '-A', 'x64',
+              '-DBUILD_TESTING=ON',
+              '-DLauncher_USE_PCH=OFF',
+              '-DENABLE_LTO=OFF',
+              '-DLauncher_RELEASE_STAGE=development',
+              '-DLauncher_BUILD_ARTIFACT=ci',
+              '-DLauncher_BUILD_PLATFORM=Windows-MSVC-x64',
+              '-DLauncher_ENABLE_JAVA_DOWNLOADER=ON',
+              '-DLauncher_UPDATER_GITHUB_REPO=',
+              '-DLauncher_CURSEFORGE_API_KEY=',
+              "-DCMAKE_PREFIX_PATH=$qtPrefix",
+              "-DCMAKE_TOOLCHAIN_FILE=$toolchain",
+              '-DVCPKG_TARGET_TRIPLET=x64-windows'
+          )
+          & cmake @configureArguments
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Windows x64 CMake configuration failed.'
+          }
+
+          & cmake --build $env:BUILD_DIRECTORY --config Debug --parallel 2
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Windows x64 build failed.'
+          }
+
+          $env:Path = "$qtPrefix\bin;$env:Path"
+          & ctest --test-dir $env:BUILD_DIRECTORY -C Debug `
+              --output-on-failure --timeout 300
+          if ($LASTEXITCODE -ne 0) {
+              throw 'Windows x64 tests failed.'
+          }

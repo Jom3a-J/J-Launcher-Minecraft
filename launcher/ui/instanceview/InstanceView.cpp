@@ -481,8 +481,8 @@ void InstanceView::paintEvent([[maybe_unused]] QPaintEvent* event)
         auto innerBounds = bounds;
         innerBounds.adjust(10, 10, -10, -10);
 
-        QColor background = QApplication::palette().color(QPalette::WindowText);
-        QColor foreground = QApplication::palette().color(QPalette::Base);
+        QColor background = palette().color(QPalette::Base);
+        QColor foreground = palette().color(QPalette::Text);
         foreground.setAlpha(190);
         painter.setFont(font);
         auto fontMetrics = painter.fontMetrics();
