@@ -192,7 +192,16 @@ $head = (& git -C $repository rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0) {
     throw 'Unable to determine the source commit.'
 }
-$branch = (& git -C $repository branch --show-current).Trim()
+$branchLines = @(& git -C $repository branch --show-current)
+if ($LASTEXITCODE -ne 0) {
+    throw 'Unable to determine the source branch.'
+}
+$branch = if ($branchLines.Count -gt 0) {
+    $branchLines[-1].Trim()
+}
+else {
+    $null
+}
 $statusLines = @(& git -C $repository status --short --untracked-files=all `
     --ignore-submodules=none)
 if ($LASTEXITCODE -ne 0) {
