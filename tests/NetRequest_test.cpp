@@ -15,6 +15,7 @@
 #include "net/ByteArraySink.h"
 #include "net/Download.h"
 #include "net/RawHeaderProxy.h"
+#include "net/NetUtils.h"
 
 namespace {
 struct Response {
@@ -155,6 +156,38 @@ class NetRequestTest final : public QObject
     Q_OBJECT
 
    private slots:
+    void parsesRetryAfterDelaySeconds()
+    {
+        const QDateTime nowUtc(QDate(2026, 8, 17), QTime(22, 0), Qt::UTC);
+        const auto thirtySeconds = Net::parseRetryAfterDelay("30", nowUtc);
+        const auto zeroSeconds = Net::parseRetryAfterDelay(" 0 ", nowUtc);
+        QVERIFY(thirtySeconds);
+        QVERIFY(zeroSeconds);
+        QCOMPARE(*thirtySeconds, int64_t(30));
+        QCOMPARE(*zeroSeconds, int64_t(0));
+    }
+
+    void parsesRetryAfterHttpDateAsUtc()
+    {
+        const QDateTime nowUtc(QDate(2026, 8, 17), QTime(22, 0), Qt::UTC);
+        const auto future = Net::parseRetryAfterDelay(
+            "Mon, 17 Aug 2026 22:00:45 GMT", nowUtc);
+        const auto past = Net::parseRetryAfterDelay(
+            "Mon, 17 Aug 2026 21:59:00 GMT", nowUtc);
+        QVERIFY(future);
+        QVERIFY(past);
+        QCOMPARE(*future, int64_t(45));
+        QCOMPARE(*past, int64_t(0));
+    }
+
+    void rejectsInvalidRetryAfterValue()
+    {
+        const QDateTime nowUtc(QDate(2026, 8, 17), QTime(22, 0), Qt::UTC);
+        QVERIFY(!Net::parseRetryAfterDelay("soon", nowUtc));
+        QVERIFY(!Net::parseRetryAfterDelay("-10", nowUtc));
+        QVERIFY(!Net::parseRetryAfterDelay("", nowUtc));
+    }
+
     void credentialedCrossOriginRedirectIsRejected()
     {
         LoopbackHttpServer origin;

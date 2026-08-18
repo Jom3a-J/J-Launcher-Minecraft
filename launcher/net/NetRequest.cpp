@@ -57,6 +57,7 @@
 #include "MMCTime.h"
 #include "StringUtils.h"
 #include "logs/Privacy.h"
+#include "net/NetUtils.h"
 
 namespace Net {
 
@@ -235,13 +236,10 @@ void NetRequest::downloadError(QNetworkReply::NetworkError error)
         qCDebug(logCat) << getUid().toString() << "Rate Limited!";
         int64_t delay = 10 * std::pow(2, m_retryCount);
         if (m_reply->hasRawHeader("Retry-After")) {
-            auto retryAfter = m_reply->rawHeader("Retry-After");
-            if (retryAfter.trimmed().endsWith("GMT")) /* HTTP Date format */ {
-                auto afterTimestamp = QDateTime::fromString(QString::fromUtf8(retryAfter.trimmed()), "ddd, dd MMM yyyy HH:mm:ss 'GMT'");
-                auto now = QDateTime::currentDateTime();
-                delay = now.secsTo(afterTimestamp);
-            } else {
-                delay = retryAfter.toLong();
+            const auto parsedDelay = Net::parseRetryAfterDelay(
+                m_reply->rawHeader("Retry-After"), QDateTime::currentDateTimeUtc());
+            if (parsedDelay) {
+                delay = *parsedDelay;
             }
         }
         handleAutoRetry(delay);

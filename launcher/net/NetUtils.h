@@ -18,10 +18,44 @@
 
 #pragma once
 
+#include <QByteArray>
+#include <QDateTime>
+#include <QLocale>
 #include <QNetworkReply>
 #include <QSet>
+#include <QTimeZone>
+#include <optional>
 
 namespace Net {
+inline std::optional<qint64> parseRetryAfterDelay(const QByteArray& header,
+                                                 const QDateTime& nowUtc)
+{
+    const QByteArray trimmed = header.trimmed();
+    bool secondsOk = !trimmed.isEmpty();
+    for (const char character : trimmed) {
+        if (character < '0' || character > '9') {
+            secondsOk = false;
+            break;
+        }
+    }
+    if (secondsOk) {
+        bool converted = false;
+        const qlonglong seconds = trimmed.toLongLong(&converted);
+        if (converted) {
+            return seconds;
+        }
+    }
+
+    const QDateTime parsed = QLocale::c().toDateTime(
+        QString::fromLatin1(trimmed), QStringLiteral("ddd, dd MMM yyyy HH:mm:ss 'GMT'"));
+    if (!parsed.isValid() || !trimmed.endsWith(" GMT")) {
+        return std::nullopt;
+    }
+    const QDateTime retryAt(parsed.date(), parsed.time(), QTimeZone(QTimeZone::UTC));
+    const qint64 delay = nowUtc.toUTC().secsTo(retryAt.toUTC());
+    return delay > 0 ? delay : 0;
+}
+
 inline bool isApplicationError(QNetworkReply::NetworkError x)
 {
     // Mainly taken from https://github.com/qt/qtbase/blob/dev/src/network/access/qhttpthreaddelegate.cpp
