@@ -447,9 +447,20 @@ function Test-ExactSourceArchive {
                             $archiveExecuteBits -ne 0) {
                             throw "Non-executable Git file gained execute bits: $($archiveEntry.Name)"
                         }
-                        $actualHash = [Convert]::ToHexString(
-                            [Security.Cryptography.SHA256]::HashData($archiveEntry.DataStream)
-                        )
+                        if ($null -eq $archiveEntry.DataStream) {
+                            $actualHash = [Convert]::ToHexString(
+                                [Security.Cryptography.SHA256]::HashData(
+                                    [byte[]]::new(0)
+                                )
+                            )
+                        }
+                        else {
+                            $actualHash = [Convert]::ToHexString(
+                                [Security.Cryptography.SHA256]::HashData(
+                                    [IO.Stream] $archiveEntry.DataStream
+                                )
+                            )
+                        }
                     }
 
                     $relativePath = $archiveEntry.Name.Substring($RootName.Length + 1)

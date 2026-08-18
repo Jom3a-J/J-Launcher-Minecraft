@@ -2,6 +2,7 @@
 
 #include <QAbstractItemModelTester>
 #include <QFile>
+#include <QRegularExpression>
 #include <QTemporaryDir>
 
 #include "translations/TranslationsModel.h"
@@ -10,6 +11,18 @@ class TranslationsModelTest : public QObject {
     Q_OBJECT
 
    private slots:
+    void emptyInitialSelectionDefaultsWithoutWarning()
+    {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+
+        QTest::failOnWarning(QRegularExpression(
+            QStringLiteral("Selected invalid language.*")));
+        TranslationsModel model(directory.path(), QString(), false, nullptr);
+
+        QCOMPARE(model.selectedLanguage(), QStringLiteral("en_US"));
+    }
+
     void constructionDoesNotStartNetworkWork()
     {
         QTemporaryDir directory;

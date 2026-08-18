@@ -496,7 +496,9 @@ bool TranslationsModel::selectLanguage(QString key) const
     }
 
     if (!langPtr.has_value()) {
-        qWarning() << "Selected invalid language" << key << ", defaulting to" << g_defaultLangCode;
+        if (!key.isEmpty()) {
+            qWarning() << "Selected invalid language" << key << ", defaulting to" << g_defaultLangCode;
+        }
         langCode = g_defaultLangCode;
     } else {
         langCode = langPtr->key;

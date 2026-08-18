@@ -40,6 +40,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QIcon>
 #include <QIODevice>
 #include <QJsonArray>
@@ -451,6 +452,13 @@ bool AccountList::loadList()
     // Try to open the file and fail if we can't.
     // TODO: We should probably report this error to the user.
     if (!file.open(QIODevice::ReadOnly)) {
+        // A new profile has no account list until the first account is added.
+        // Treat only that expected error as an empty list; other I/O failures
+        // must remain visible.
+        if (!QFileInfo::exists(m_listFilePath)) {
+            qDebug() << "No account list file exists yet; starting with an empty list.";
+            return true;
+        }
         qCritical() << "Failed to read the account list file"
                     << Privacy::sanitizePath(m_listFilePath) << "("
                     << Privacy::sanitizeText(file.errorString()) << ")";
