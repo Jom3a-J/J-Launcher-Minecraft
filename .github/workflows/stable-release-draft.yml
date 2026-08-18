@@ -173,10 +173,27 @@ jobs:
               -ExpectedTag $env:RELEASE_TAG `
               -ParallelJobs 2
 
+      - name: Check out release tooling from the workflow revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: build-release/workflow-tools
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: scripts/phase9-source-archive.ps1
+          sparse-checkout-cone-mode: false
+          submodules: false
+
       - name: Create and verify the exact-source archive
         shell: pwsh
         run: |
-          & .\scripts\phase9-source-archive.ps1 `
+          $sourceExporter = Join-Path $env:BUILD_DIRECTORY `
+              'workflow-tools\scripts\phase9-source-archive.ps1'
+          if (-not (Test-Path -LiteralPath $sourceExporter -PathType Leaf)) {
+              throw "Release source exporter is missing: $sourceExporter"
+          }
+          & $sourceExporter `
+              -Repository $env:GITHUB_WORKSPACE `
               -ExpectedTag $env:RELEASE_TAG `
               -OutputDirectory $env:PREFLIGHT_DIRECTORY
 
@@ -518,11 +535,20 @@ jobs:
                                   [System.Formats.Tar.TarEntryType]::RegularFile,
                                   [System.Formats.Tar.TarEntryType]::V7RegularFile
                               )) {
-                              $actualHash = [Convert]::ToHexString(
-                                  [Security.Cryptography.SHA256]::HashData(
-                                      $entry.DataStream
+                              if ($null -eq $entry.DataStream) {
+                                  $actualHash = [Convert]::ToHexString(
+                                      [Security.Cryptography.SHA256]::HashData(
+                                          [byte[]]::new(0)
+                                      )
                                   )
-                              )
+                              }
+                              else {
+                                  $actualHash = [Convert]::ToHexString(
+                                      [Security.Cryptography.SHA256]::HashData(
+                                          [IO.Stream] $entry.DataStream
+                                      )
+                                  )
+                              }
                           }
                           else {
                               throw "Source archive contains an unsupported entry: $relativePath"
