@@ -64,7 +64,48 @@ configure_file(jlauncher.ico ${Launcher_APP_BINARY_NAME}.ico COPYONLY)
 configure_file(${Launcher_SVGFileName} ${Launcher_SVGFileName} COPYONLY)
 configure_file(org.prismlauncher.PrismLauncher.mime.xml ${Launcher_AppID}.xml COPYONLY)
 
+set(Launcher_MSVC_Redist_NSIS_File "")
 set(Launcher_MSVC_Redist_NSIS_Section "")
+set(Launcher_MSVC_REDISTRIBUTABLE "" CACHE FILEPATH
+    "Path to the supported Microsoft Visual C++ x64 redistributable")
+
+if(MSVC)
+    if(NOT Launcher_MSVC_REDISTRIBUTABLE)
+        file(TO_CMAKE_PATH "${CMAKE_CXX_COMPILER}" _jlauncher_msvc_compiler)
+        string(REGEX REPLACE "/Tools/MSVC/[^/]+/bin/.*$" ""
+            _jlauncher_vc_root "${_jlauncher_msvc_compiler}")
+        if(NOT _jlauncher_vc_root STREQUAL _jlauncher_msvc_compiler)
+            file(GLOB _jlauncher_redist_candidates LIST_DIRECTORIES FALSE
+                "${_jlauncher_vc_root}/Redist/MSVC/[0-9]*/vc_redist.x64.exe")
+            list(SORT _jlauncher_redist_candidates COMPARE NATURAL ORDER DESCENDING)
+            if(_jlauncher_redist_candidates)
+                list(GET _jlauncher_redist_candidates 0 _jlauncher_redist)
+                set(Launcher_MSVC_REDISTRIBUTABLE "${_jlauncher_redist}" CACHE FILEPATH
+                    "Path to the supported Microsoft Visual C++ x64 redistributable" FORCE)
+            endif()
+        endif()
+    endif()
+
+    if(EXISTS "${Launcher_MSVC_REDISTRIBUTABLE}")
+        install(FILES "${Launcher_MSVC_REDISTRIBUTABLE}" DESTINATION ".")
+        set(Launcher_MSVC_Redist_NSIS_File [[File "vc_redist.x64.exe"]])
+        set(Launcher_MSVC_Redist_NSIS_Section [=[
+Section "-Microsoft Visual C++ Runtime"
+  DetailPrint "Installing the Microsoft Visual C++ runtime..."
+  ExecWait '"$INSTDIR\vc_redist.x64.exe" /install /quiet /norestart' $0
+  ${If} $0 != 0
+  ${AndIf} $0 != 1638
+  ${AndIf} $0 != 3010
+    MessageBox MB_ICONSTOP "The Microsoft Visual C++ runtime installation failed with code $0. J Launcher cannot start without this prerequisite."
+    Abort
+  ${EndIf}
+SectionEnd
+]=])
+    else()
+        message(WARNING
+            "Microsoft Visual C++ x64 redistributable was not found; Windows package audits will fail")
+    endif()
+endif()
 
 if(Launcher_BUILD_UPDATER)
     set(Launcher_NSIS_UPDATER_FILE "File \"${Launcher_APP_BINARY_NAME}_updater.exe\"")

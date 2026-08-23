@@ -251,12 +251,31 @@ class ServerInstanceTest : public QObject {
                  ServerCrashCause::Eula);
         QCOMPARE(ServerDiagnostics::classifyCrash("Mod resolution encountered an error"),
                  ServerCrashCause::Content);
+        const QString missingDependencyLog = QStringLiteral(
+            "[main/WARN]: Mod resolution failed\n"
+            "[main/ERROR]: Incompatible mods found!\n"
+            "Mod 'FancyMenu' (fancymenu) 3.3.5 requires version 1.0.6 or later of melody, which is missing!");
+        QCOMPARE(ServerDiagnostics::classifyCrash(missingDependencyLog),
+                 ServerCrashCause::Content);
+        const QString relevantLine =
+            ServerDiagnostics::crashRelevantLine(missingDependencyLog);
+        QVERIFY(relevantLine.contains("FancyMenu"));
+        QVERIFY(relevantLine.contains("melody"));
         QCOMPARE(ServerDiagnostics::classifyCrash("java.lang.OutOfMemoryError"),
                  ServerCrashCause::Memory);
         QCOMPARE(ServerDiagnostics::classifyCrash("Unexpected synthetic failure"),
                  ServerCrashCause::Unknown);
         QVERIFY(ServerDiagnostics::crashCauseExplanation(ServerCrashCause::Memory)
                     .contains("memory", Qt::CaseInsensitive));
+
+        const QString wrongSideLog = QStringLiteral(
+            "Caused by: java.lang.RuntimeException: Cannot load class "
+            "com.example.ClientConfig in environment type SERVER\n"
+            "at example.handler$abc$mr_toad_palladium$configure(example.java:1)");
+        QCOMPARE(ServerDiagnostics::classifyCrash(wrongSideLog),
+                 ServerCrashCause::Content);
+        QCOMPARE(ServerDiagnostics::suspectedModIds(wrongSideLog),
+                 QStringList({ "mr_toad_palladium" }));
     }
 
     void supportedServerTypesRemainAvailable()
@@ -291,10 +310,14 @@ class ServerInstanceTest : public QObject {
             << QString("forge")
             << QByteArray(R"({"promos":{"1.20.1-latest":"47.4.0","1.20.1-recommended":"47.3.0","1.21.1-latest":"52.0.1"}})")
             << QStringList({ "1.21.1", "1.20.1" });
+        QTest::newRow("forge maven")
+            << QString("forge")
+            << QByteArray(R"(<?xml version="1.0"?><metadata><versioning><versions><version>1.12.2-14.23.5.2860</version><version>1.20.1-47.4.0</version><version>1.21.1-52.0.1</version><version>1.20.1-47.3.0</version></versions></versioning></metadata>)")
+            << QStringList({ "1.21.1", "1.20.1", "1.12.2" });
         QTest::newRow("neoforge")
             << QString("neoforge")
             << QByteArray(R"({"versions":["20.4.100","21.1.50-beta","21.1.51"]})")
-            << QStringList({ "1.21.1", "1.20.4" });
+            << QStringList({ "1.21.1", "1.20.4", "1.20.1" });
     }
 
     void parsesProviderSpecificVersionResponses()
@@ -339,6 +362,9 @@ class ServerInstanceTest : public QObject {
         QTest::newRow("neoforge") << QString("neoforge") << QString("1.21.1")
             << QByteArray(R"({"versions":["20.4.100","21.1.50-beta","21.1.51"]})")
             << QStringList({ "21.1.51", "21.1.50-beta" });
+        QTest::newRow("legacy neoforge") << QString("neoforge") << QString("1.20.1")
+            << QByteArray(R"(<?xml version="1.0"?><metadata><versioning><versions><version>1.20.1-47.1.106</version><version>1.20.1-47.1.105</version><version>1.21.1-52.0.1</version></versions></versioning></metadata>)")
+            << QStringList({ "47.1.106", "47.1.105" });
     }
 
     void parsesProviderSpecificBuildResponses()
@@ -383,6 +409,33 @@ class ServerInstanceTest : public QObject {
         QFETCH(QString, version);
         QFETCH(int, expectedChannel);
         QCOMPARE(static_cast<int>(ServerDownloader::versionChannel(version)), expectedChannel);
+    }
+
+    void choosesJavaByLoaderAndMinecraftVersion_data()
+    {
+        QTest::addColumn<QString>("loader");
+        QTest::addColumn<QString>("minecraftVersion");
+        QTest::addColumn<int>("javaMajor");
+
+        QTest::newRow("vanilla 1.16.5") << QString("vanilla") << QString("1.16.5") << 8;
+        QTest::newRow("paper 1.11") << QString("paper") << QString("1.11") << 8;
+        QTest::newRow("paper 1.12.2") << QString("paper") << QString("1.12.2") << 11;
+        QTest::newRow("purpur 1.16.4") << QString("purpur") << QString("1.16.4") << 11;
+        QTest::newRow("paper 1.16.5") << QString("paper") << QString("1.16.5") << 16;
+        QTest::newRow("paper 1.19.4") << QString("paper") << QString("1.19.4") << 17;
+        QTest::newRow("paper 1.20.1") << QString("paper") << QString("1.20.1") << 21;
+        QTest::newRow("forge 1.20.1") << QString("forge") << QString("1.20.1") << 17;
+        QTest::newRow("neoforge 1.20.1") << QString("neoforge") << QString("1.20.1") << 17;
+        QTest::newRow("fabric 1.20.6") << QString("fabric") << QString("1.20.6") << 21;
+        QTest::newRow("future release") << QString("paper") << QString("26.1") << 25;
+    }
+
+    void choosesJavaByLoaderAndMinecraftVersion()
+    {
+        QFETCH(QString, loader);
+        QFETCH(QString, minecraftVersion);
+        QFETCH(int, javaMajor);
+        QCOMPARE(ServerInstance::recommendedJavaMajor(minecraftVersion, loader), javaMajor);
     }
 
     void persistsAllServerSettings()
@@ -894,7 +947,235 @@ class ServerInstanceTest : public QObject {
             QVERIFY2(finished.last().at(0).toBool(),
                      qPrintable(provider.at(0) + ": "
                                 + finished.last().at(1).toString()));
+            QCOMPARE(downloader.resolvedLoaderVersion(), provider.at(2));
         }
+    }
+
+    void rejectsForgeInstallWhenMinecraftServerPayloadIsMissing()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        QVERIFY(writeFile(
+            root.filePath(
+                "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/"
+                "forge-1.21.1-52.0.1-installer.jar"),
+            "synthetic incomplete forge installer"));
+
+        ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
+        endpoints.forgeMavenBase = directoryUrl(root.filePath("forge-maven"));
+        ServerDownloader downloader(endpoints);
+        QSignalSpy finished(&downloader, &ServerDownloader::finished);
+        const QString destination = root.filePath("incomplete-forge");
+        ScopedEnvironmentVariable omitPayload(
+            "JLAUNCHER_TEST_OMIT_SERVER_PAYLOAD", "1");
+
+        downloader.startDownload("1.21.1", "forge", destination,
+                                 fakeMinecraftServerPath(), "52.0.1");
+        QTRY_VERIFY_WITH_TIMEOUT(!finished.isEmpty(), 5000);
+        QVERIFY(!finished.last().at(0).toBool());
+        QVERIFY(finished.last().at(1).toString().contains(
+            "did not download the Minecraft server files"));
+#ifdef Q_OS_WIN
+        QVERIFY(!QFileInfo::exists(QDir(destination).filePath("run.bat")));
+#else
+        QVERIFY(!QFileInfo::exists(QDir(destination).filePath("run.sh")));
+#endif
+    }
+
+    void rejectsForgeUpdateThatOnlyLeavesStaleLoaderArguments()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        QVERIFY(writeFile(
+            root.filePath(
+                "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/"
+                "forge-1.21.1-52.0.1-installer.jar"),
+            "synthetic incomplete forge update installer"));
+
+        const QString destination = root.filePath("existing-forge");
+#ifdef Q_OS_WIN
+        QVERIFY(writeFile(QDir(destination).filePath("run.bat"),
+                          "java @libraries/old/win_args.txt %*\r\n"));
+        QVERIFY(writeFile(QDir(destination).filePath("libraries/old/win_args.txt"),
+                          "-jar old-loader.jar\r\n"));
+#else
+        QVERIFY(writeFile(QDir(destination).filePath("run.sh"),
+                          "java @libraries/old/unix_args.txt \"$@\"\n"));
+        QVERIFY(writeFile(QDir(destination).filePath("libraries/old/unix_args.txt"),
+                          "-jar old-loader.jar\n"));
+#endif
+        QVERIFY(writeFile(
+            QDir(destination).filePath(
+                "libraries/net/minecraft/server/1.21.1/server-1.21.1-bundled.jar"),
+            "existing minecraft server payload"));
+
+        ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
+        endpoints.forgeMavenBase = directoryUrl(root.filePath("forge-maven"));
+        ServerDownloader downloader(endpoints);
+        QSignalSpy finished(&downloader, &ServerDownloader::finished);
+
+        downloader.startDownload("1.21.1", "forge", destination,
+                                 fakeMinecraftServerPath(), "52.0.1");
+        QTRY_VERIFY_WITH_TIMEOUT(!finished.isEmpty(), 5000);
+        QVERIFY(!finished.last().at(0).toBool());
+        QVERIFY(finished.last().at(1).toString().contains(
+            "did not create its loader argument file"));
+    }
+
+    void rejectsForgeUpdateWhoseScriptStillTargetsTheOldBuild()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        QVERIFY(writeFile(
+            root.filePath(
+                "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/"
+                "forge-1.21.1-52.0.1-installer.jar"),
+            "synthetic incomplete forge update installer"));
+
+        const QString destination = root.filePath("partially-updated-forge");
+#ifdef Q_OS_WIN
+        QVERIFY(writeFile(QDir(destination).filePath("run.bat"),
+                          "java @libraries/old/win_args.txt %*\r\n"));
+        QVERIFY(writeFile(
+            QDir(destination).filePath(
+                "libraries/net/minecraftforge/forge/1.21.1-52.0.1/win_args.txt"),
+            "-jar new-loader.jar\r\n"));
+#else
+        QVERIFY(writeFile(QDir(destination).filePath("run.sh"),
+                          "java @libraries/old/unix_args.txt \"$@\"\n"));
+        QVERIFY(writeFile(
+            QDir(destination).filePath(
+                "libraries/net/minecraftforge/forge/1.21.1-52.0.1/unix_args.txt"),
+            "-jar new-loader.jar\n"));
+#endif
+        QVERIFY(writeFile(
+            QDir(destination).filePath(
+                "libraries/net/minecraft/server/1.21.1/server-1.21.1-bundled.jar"),
+            "existing minecraft server payload"));
+
+        ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
+        endpoints.forgeMavenBase = directoryUrl(root.filePath("forge-maven"));
+        ServerDownloader downloader(endpoints);
+        QSignalSpy finished(&downloader, &ServerDownloader::finished);
+
+        downloader.startDownload("1.21.1", "forge", destination,
+                                 fakeMinecraftServerPath(), "52.0.1");
+        QTRY_VERIFY_WITH_TIMEOUT(!finished.isEmpty(), 5000);
+        QVERIFY(!finished.last().at(0).toBool());
+        QVERIFY(finished.last().at(1).toString().contains(
+            "did not connect", Qt::CaseInsensitive));
+    }
+
+    void installsLegacyNeoForgeServerFromForgeStyleCoordinates()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        QVERIFY(writeFile(
+            root.filePath(
+                "neoforge-maven/net/neoforged/forge/1.20.1-47.1.106/"
+                "forge-1.20.1-47.1.106-installer.jar"),
+            "legacy neoforge installer"));
+
+        ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
+        endpoints.neoForgeMavenBase = directoryUrl(
+            root.filePath("neoforge-maven"));
+        ServerDownloader downloader(endpoints);
+        QSignalSpy finished(&downloader, &ServerDownloader::finished);
+        const QString destination = root.filePath("legacy-neoforge-server");
+
+        downloader.startDownload("1.20.1", "neoforge", destination,
+                                 fakeMinecraftServerPath(), "47.1.106");
+        QTRY_VERIFY_WITH_TIMEOUT(!finished.isEmpty(), 5000);
+        QVERIFY2(finished.last().at(0).toBool(),
+                 qPrintable(finished.last().at(1).toString()));
+        QCOMPARE(downloader.resolvedLoaderVersion(), QString("47.1.106"));
+#ifdef Q_OS_WIN
+        QVERIFY(QFileInfo::exists(QDir(destination).filePath("run.bat")));
+#else
+        QVERIFY(QFileInfo::exists(QDir(destination).filePath("run.sh")));
+#endif
+        QVERIFY(QFileInfo::exists(QDir(destination).filePath(
+            "libraries/net/minecraft/server/1.20.1/server-1.20.1-bundled.jar")));
+    }
+
+    void resolvesAndInstallsLatestLegacyNeoForgeBuild()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        QVERIFY(writeFile(
+            root.filePath("neoforge-maven/net/neoforged/forge/maven-metadata.xml"),
+            R"(<?xml version="1.0"?><metadata><versioning><versions><version>1.20.1-47.1.105</version><version>1.20.1-47.1.106</version><version>1.21.1-52.0.1</version></versions></versioning></metadata>)"));
+        QVERIFY(writeFile(
+            root.filePath(
+                "neoforge-maven/net/neoforged/forge/1.20.1-47.1.106/"
+                "forge-1.20.1-47.1.106-installer.jar"),
+            "latest legacy neoforge installer"));
+
+        ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
+        endpoints.neoForgeMavenBase = directoryUrl(
+            root.filePath("neoforge-maven"));
+        ServerDownloader downloader(endpoints);
+        QSignalSpy finished(&downloader, &ServerDownloader::finished);
+        const QString destination = root.filePath("resolved-legacy-neoforge-server");
+
+        // The New Server flow intentionally leaves the loader build blank;
+        // the downloader must resolve and persist the newest published build.
+        downloader.startDownload("1.20.1", "neoforge", destination,
+                                 fakeMinecraftServerPath());
+        QTRY_VERIFY_WITH_TIMEOUT(!finished.isEmpty(), 5000);
+        QVERIFY2(finished.last().at(0).toBool(),
+                 qPrintable(finished.last().at(1).toString()));
+        QCOMPARE(downloader.resolvedLoaderVersion(), QString("47.1.106"));
+#ifdef Q_OS_WIN
+        QVERIFY(QFileInfo::exists(QDir(destination).filePath("run.bat")));
+#else
+        QVERIFY(QFileInfo::exists(QDir(destination).filePath("run.sh")));
+#endif
+    }
+
+    void installsLiveLoaderServer_data()
+    {
+        QTest::addColumn<QString>("provider");
+        QTest::addColumn<QString>("minecraftVersion");
+
+        QTest::newRow("forge 1.20.1")
+            << QString("forge") << QString("1.20.1");
+        QTest::newRow("legacy neoforge 1.20.1")
+            << QString("neoforge") << QString("1.20.1");
+    }
+
+    void installsLiveLoaderServer()
+    {
+        const QString javaPath = qEnvironmentVariable(
+            "JLAUNCHER_LIVE_SERVER_JAVA").trimmed();
+        if (javaPath.isEmpty()) {
+            QSKIP("Set JLAUNCHER_LIVE_SERVER_JAVA to run the live Forge/NeoForge installer gate.");
+        }
+        QVERIFY2(QFileInfo(javaPath).isFile(), qPrintable(javaPath));
+
+        QFETCH(QString, provider);
+        QFETCH(QString, minecraftVersion);
+        QTemporaryDir destination;
+        QVERIFY(destination.isValid());
+
+        ServerDownloader downloader;
+        QSignalSpy finished(&downloader, &ServerDownloader::finished);
+        downloader.startDownload(minecraftVersion, provider, destination.path(),
+                                 javaPath);
+        QTRY_VERIFY_WITH_TIMEOUT(!finished.isEmpty(), 300000);
+        QVERIFY2(finished.last().at(0).toBool(),
+                 qPrintable(finished.last().at(1).toString()));
+        QVERIFY(!downloader.resolvedLoaderVersion().isEmpty());
+#ifdef Q_OS_WIN
+        QVERIFY(QFileInfo::exists(QDir(destination.path()).filePath("run.bat")));
+#else
+        QVERIFY(QFileInfo::exists(QDir(destination.path()).filePath("run.sh")));
+#endif
     }
 
     void rejectsUnverifiedVanillaDownloadWithoutCommittingJar()
@@ -1110,9 +1391,10 @@ class ServerInstanceTest : public QObject {
         fixtureHttp.addRoute("/purpur/purpur/1.21.8/2412/download",
                              serverPayload);
 
-        const QString forgePromotions = root.filePath("fixtures/forge-promotions.json");
-        QVERIFY(writeFile(forgePromotions,
-                          R"({"promos":{"1.21.1-recommended":"52.0.1"}})"));
+        const QString forgeMetadata = root.filePath(
+            "fixtures/forge-maven/net/minecraftforge/forge/maven-metadata.xml");
+        QVERIFY(writeFile(forgeMetadata,
+                          R"(<?xml version="1.0"?><metadata><versioning><versions><version>1.21.1-52.0.1</version></versions></versioning></metadata>)"));
         QVERIFY(writeFile(
             root.filePath(
                 "fixtures/forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/"
@@ -1132,7 +1414,7 @@ class ServerInstanceTest : public QObject {
             directoryUrl(root.filePath("fixtures/paper")),
             fixtureHttp.baseUrl("fabric"),
             fixtureHttp.baseUrl("purpur"),
-            QUrl::fromLocalFile(forgePromotions),
+            QUrl::fromLocalFile(forgeMetadata),
             directoryUrl(root.filePath("fixtures/forge-maven")),
             QUrl::fromLocalFile(neoForgeVersions),
             directoryUrl(root.filePath("fixtures/neoforge-maven")),
@@ -1190,8 +1472,9 @@ class ServerInstanceTest : public QObject {
                              R"([{"loader":{"version":"0.16.10"}}])");
         fixtureHttp.addRoute("/purpur/purpur/1.21.8",
                              R"({"builds":{"latest":"2412"}})");
-        fixtureHttp.addRoute("/forge/promotions",
-                             R"({"promos":{"1.21.1-recommended":"52.0.1"}})");
+        fixtureHttp.addRoute(
+            "/forge-maven/net/minecraftforge/forge/maven-metadata.xml",
+            R"(<?xml version="1.0"?><metadata><versioning><versions><version>1.21.1-52.0.1</version></versions></versioning></metadata>)");
         fixtureHttp.addRoute("/neoforge/versions",
                              R"({"versions":["21.1.50"]})");
 
@@ -1324,6 +1607,59 @@ class ServerInstanceTest : public QObject {
         const ServerContentUpdateCandidate current =
             ServerContentUpdater::parseModrinthVersionResponse(
                 valid, "example-2.jar", &error);
+        QVERIFY(current.upToDate);
+        QVERIFY(!current.available);
+    }
+
+    void validatesCurseForgeContentUpdateMetadata()
+    {
+        QString error;
+        QVERIFY(ServerContentUpdater::parseCurseForgeFilesResponse(
+                    "not json", "example-1.jar", "forge", &error).fileName.isEmpty());
+        QVERIFY(error.contains("invalid", Qt::CaseInsensitive));
+
+        const auto file = [](qint64 id, const QString& name, const QString& date,
+                             const QStringList& gameVersions, const QString& sha1,
+                             const QString& downloadUrl = QString()) {
+            QJsonArray versions;
+            for (const QString& version : gameVersions) versions.append(version);
+            return QJsonObject{
+                { "id", id },
+                { "fileName", name },
+                { "displayName", QString("Release %1").arg(id) },
+                { "fileDate", date },
+                { "gameVersions", versions },
+                { "downloadUrl", downloadUrl },
+                { "hashes", QJsonArray{ QJsonObject{{ "algo", 1 }, { "value", sha1 }} } },
+            };
+        };
+        const QByteArray response = QJsonDocument(QJsonObject{
+            { "data", QJsonArray{
+                file(99, "fabric-only.jar", "2026-08-18T12:00:00Z",
+                     {"1.21.1", "Fabric"}, QString(40, 'a')),
+                file(22, "example-2.jar", "2026-08-17T12:00:00Z",
+                     {"1.21.1", "Forge"}, QString(40, 'b')),
+                file(21, "example-1.jar", "2026-08-16T12:00:00Z",
+                     {"1.21.1", "Forge"}, QString(40, 'c')),
+            } }
+        }).toJson(QJsonDocument::Compact);
+
+        error.clear();
+        const ServerContentUpdateCandidate candidate =
+            ServerContentUpdater::parseCurseForgeFilesResponse(
+                response, "example-1.jar", "forge", &error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QVERIFY(candidate.available);
+        QCOMPARE(candidate.versionId, QString("22"));
+        QCOMPARE(candidate.providerFileId, QString("22"));
+        QCOMPARE(candidate.fileName, QString("example-2.jar"));
+        QCOMPARE(candidate.hashAlgorithm, QCryptographicHash::Sha1);
+        QCOMPARE(candidate.expectedHash.size(), 20);
+        QVERIFY(candidate.url.isEmpty());
+
+        const ServerContentUpdateCandidate current =
+            ServerContentUpdater::parseCurseForgeFilesResponse(
+                response, "example-2.jar", "forge", &error);
         QVERIFY(current.upToDate);
         QVERIFY(!current.available);
     }

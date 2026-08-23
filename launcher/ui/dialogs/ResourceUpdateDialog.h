@@ -32,6 +32,10 @@ class ResourceUpdateDialog final : public ReviewMessageBox {
 
     auto noUpdates() const -> bool { return m_noUpdates; };
     auto aborted() const -> bool { return m_aborted; };
+    auto incompleteCheck() const -> bool
+    {
+        return !m_failedMetadata.empty() || !m_failedCheckUpdate.empty();
+    }
 
    private:
     auto ensureMetadata() -> bool;

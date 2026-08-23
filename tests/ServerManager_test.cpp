@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include <QDir>
+#include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QFile>
 #include <QFileInfo>
 #include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSettings>
 #include <QTcpServer>
 #include <QTemporaryDir>
 #include <QTest>
@@ -33,6 +36,21 @@ bool writeSyntheticJar(const QString& path)
     return archive.open()
         && archive.addFile("META-INF/MANIFEST.MF",
                            QByteArray("Main-Class: net.minecraft.bundler.Main\n"))
+        && archive.close();
+}
+
+bool writeFabricModJar(const QString& path, const QString& id,
+                       const QString& environment)
+{
+    MMCZip::ArchiveWriter archive(path);
+    const QByteArray metadata = QJsonDocument(QJsonObject{
+        { "schemaVersion", 1 },
+        { "id", id },
+        { "version", "1.0.0" },
+        { "environment", environment },
+    }).toJson(QJsonDocument::Compact);
+    return archive.open()
+        && archive.addFile("fabric.mod.json", metadata)
         && archive.close();
 }
 
@@ -224,6 +242,58 @@ class ServerManagerTest : public QObject {
         QVERIFY(skipped.contains("mods/ftb-client.jar"));
     }
 
+    void filtersLegacyAndJarDeclaredClientOnlyMods()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        const QString destination = root.filePath("prepared");
+
+        QVERIFY(writeFile(QDir(gameRoot).filePath("mods/legacy-client.jar"),
+                          "legacy client"));
+        QVERIFY(writeFile(QDir(gameRoot).filePath("mods/server.jar"), "server"));
+        QVERIFY(writeFile(QDir(gameRoot).filePath("mods/both.jar"), "both"));
+        QVERIFY(writeFabricModJar(QDir(gameRoot).filePath("mods/jar-client.jar"),
+                                  "jar_client", "client"));
+        QVERIFY(writeFabricModJar(QDir(gameRoot).filePath("mods/jar-both.jar"),
+                                  "jar_both", "*"));
+
+        const auto writeLegacyMetadata = [&](const QString& metadataName,
+                                             const QString& filename,
+                                             const QString& side) {
+            return writeFile(
+                QDir(gameRoot).filePath("jarmods/" + metadataName + ".pw.toml"),
+                QString("name = \"%1\"\nfilename = \"%1\"\nside = \"%2\"\n"
+                        "[download]\nmode = \"url\"\nurl = \"https://example.invalid/%1\"\n"
+                        "hash-format = \"sha1\"\nhash = \"00\"\n"
+                        "[update]\n[update.modrinth]\n"
+                        "mod-id = \"test-%1\"\nversion = \"1\"\n")
+                    .arg(filename, side)
+                    .toUtf8());
+        };
+        QVERIFY(writeLegacyMetadata("legacy-client", "legacy-client.jar", "client"));
+        QVERIFY(writeLegacyMetadata("server", "server.jar", "server"));
+        QVERIFY(writeLegacyMetadata("both", "both.jar", "both"));
+
+        QStringList skipped;
+        QString error;
+        QVERIFY2(ServerModpackInstaller::prepareContent(
+                     instanceRoot, gameRoot, destination, &skipped, &error),
+                 qPrintable(error));
+
+        QVERIFY(!QFileInfo::exists(
+            QDir(destination).filePath("mods/legacy-client.jar")));
+        QVERIFY(!QFileInfo::exists(
+            QDir(destination).filePath("mods/jar-client.jar")));
+        QVERIFY(QFileInfo::exists(QDir(destination).filePath("mods/server.jar")));
+        QVERIFY(QFileInfo::exists(QDir(destination).filePath("mods/both.jar")));
+        QVERIFY(QFileInfo::exists(QDir(destination).filePath("mods/jar-both.jar")));
+        QVERIFY(skipped.contains("mods/legacy-client.jar"));
+        QVERIFY(skipped.contains("mods/jar-client.jar"));
+    }
+
     void rejectsIncompleteProviderServerManifest()
     {
         QTemporaryDir temporaryRoot;
@@ -338,13 +408,41 @@ class ServerManagerTest : public QObject {
 
     void createsMatchingStoppedServerFromInstance()
     {
+        const QString previousOrganization = QCoreApplication::organizationName();
+        const QString previousApplication = QCoreApplication::applicationName();
+        QCoreApplication::setOrganizationName(QStringLiteral("JLauncherTests"));
+        QCoreApplication::setApplicationName(QStringLiteral("ServerManagerTracking"));
+
         QTemporaryDir temporaryRoot;
         QVERIFY(temporaryRoot.isValid());
         const QDir root(temporaryRoot.path());
         const QString instanceRoot = root.filePath("instance");
         const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
-        QVERIFY(writeFile(QDir(gameRoot).filePath("mods/common.jar"),
-                          "common"));
+        const QByteArray commonContents("common");
+        const QString commonSha1 = QString::fromLatin1(
+            QCryptographicHash::hash(commonContents, QCryptographicHash::Sha1).toHex());
+        QVERIFY(writeFile(QDir(gameRoot).filePath("mods/common.jar"), commonContents));
+        QVERIFY(writeFile(
+            QDir(gameRoot).filePath("jarmods/common.pw.toml"),
+            QString(
+                "name = \"Common\"\n"
+                "filename = \"common.jar\"\n"
+                "side = \"both\"\n"
+                "[download]\n"
+                "mode = \"metadata:curseforge\"\n"
+                "url = \"\"\n"
+                "hash-format = \"sha1\"\n"
+                "hash = \"%1\"\n"
+                "[update.curseforge]\n"
+                "file-id = 456\n"
+                "project-id = 123\n")
+                .arg(commonSha1).toUtf8()));
+        QCOMPARE(ServerModpackInstaller::contentTrackingSource(
+                     gameRoot, QDir(gameRoot).filePath("mods/common.jar")),
+                 QString("curseforge:123:456"));
+        QVERIFY(writeFile(QDir(gameRoot).filePath("mods/changed.jar"), "changed"));
+        QVERIFY(ServerModpackInstaller::contentTrackingSource(
+                    gameRoot, QDir(gameRoot).filePath("mods/changed.jar")).isEmpty());
         QVERIFY(writeFile(QDir(gameRoot).filePath("config/common.toml"),
                           "config"));
 
@@ -366,6 +464,13 @@ class ServerManagerTest : public QObject {
             QDir(server->serverDirectory()).filePath("mods/common.jar")));
         QVERIFY(QFileInfo::exists(
             QDir(server->serverDirectory()).filePath("config/common.toml")));
+        const QString trackingPrefix =
+            QString("ServerContentSources/%1/").arg(server->id());
+        QCOMPARE(QSettings().value(trackingPrefix + "common.jar").toString(),
+                 QString("curseforge:123:456"));
+        QSettings().remove(trackingPrefix);
+        QCoreApplication::setOrganizationName(previousOrganization);
+        QCoreApplication::setApplicationName(previousApplication);
         QVERIFY(!QFileInfo::exists(server->serverJarPath()));
     }
 

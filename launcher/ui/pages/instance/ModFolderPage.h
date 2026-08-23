@@ -68,12 +68,14 @@ class ModFolderPage : public ExternalResourcesPage {
 
     void downloadMods();
     void downloadDialogFinished(int result);
-    void updateMods(bool includeDeps = false);
+    void updateMods();
+    void updateAllMods();
     void deleteModMetadata();
     void exportModMetadata();
     void changeModVersion();
 
    protected:
+    void updateModsInternal(bool includeDeps, bool forceAll);
     ModFolderModel* m_model;
     QPointer<ResourceDownload::ResourceDownloadDialog> m_downloadDialog;
 };

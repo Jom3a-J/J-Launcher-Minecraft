@@ -37,6 +37,7 @@
 #include "NewInstanceDialog.h"
 #include "Application.h"
 #include "ui/pages/modplatform/ModpackProviderBasePage.h"
+#include "ui/pages/BasePage.h"
 #include "ui/pages/modplatform/import_ftb/ImportFTBPage.h"
 #include "ui_NewInstanceDialog.h"
 
@@ -52,6 +53,7 @@
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QLayout>
+#include <QLabel>
 #include <QPushButton>
 #include <QScreen>
 #include <QTimer>
@@ -67,6 +69,61 @@
 #include "ui/pages/modplatform/modrinth/ModrinthPage.h"
 #include "ui/pages/modplatform/technic/TechnicPage.h"
 #include "ui/widgets/PageContainer.h"
+
+namespace {
+class CurseForgeSetupPage final : public QWidget, public BasePage
+{
+public:
+    explicit CurseForgeSetupPage(QWidget* parent = nullptr)
+        : QWidget(parent)
+    {
+        auto* layout = new QVBoxLayout(this);
+        layout->setContentsMargins(24, 24, 24, 24);
+
+        auto* title = new QLabel(tr("CurseForge needs an API key"), this);
+        QFont titleFont = title->font();
+        titleFont.setBold(true);
+        titleFont.setPointSize(titleFont.pointSize() + 3);
+        title->setFont(titleFont);
+
+        auto* explanation = new QLabel(
+            tr("This build does not include a shared CurseForge API key, so its catalog is unavailable. Add your own key in Settings → Services. J Launcher stores it securely in Windows Credential Manager."),
+            this);
+        explanation->setWordWrap(true);
+        explanation->setTextInteractionFlags(Qt::TextSelectableByMouse);
+
+        auto* setupButton = new QPushButton(tr("Open Services Settings"), this);
+        setupButton->setObjectName(QStringLiteral("setupCurseForgeButton"));
+        setupButton->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+
+        auto* restartHint = new QLabel(
+            tr("After saving a valid key, close and reopen this window to load CurseForge."),
+            this);
+        restartHint->setWordWrap(true);
+
+        layout->addWidget(title);
+        layout->addWidget(explanation);
+        layout->addSpacing(8);
+        layout->addWidget(setupButton);
+        layout->addWidget(restartHint);
+        layout->addStretch();
+
+        connect(setupButton, &QPushButton::clicked, this,
+                [this, setupButton, restartHint]() {
+            APPLICATION->ShowGlobalSettings(this, QStringLiteral("apis"));
+            if (APPLICATION->capabilities() & Application::SupportsFlame) {
+                setupButton->setEnabled(false);
+                restartHint->setText(
+                    tr("CurseForge is enabled. Close and reopen this window to load its catalog."));
+            }
+        });
+    }
+
+    QString displayName() const override { return tr("CurseForge"); }
+    QIcon icon() const override { return QIcon::fromTheme(QStringLiteral("flame")); }
+    QString id() const override { return QStringLiteral("curseforge-setup"); }
+};
+}
 
 NewInstanceDialog::NewInstanceDialog(const QString& initialGroup,
                                      const QString& url,
@@ -204,6 +261,8 @@ QList<BasePage*> NewInstanceDialog::getPages()
     pages.append(new AtlPage(this));
     if (APPLICATION->capabilities() & Application::SupportsFlame) {
         pages.append(new FlamePage(this));
+    } else {
+        pages.append(new CurseForgeSetupPage(this));
     }
     pages.append(new FtbPage(this));
     pages.append(new LegacyFTB::Page(this));

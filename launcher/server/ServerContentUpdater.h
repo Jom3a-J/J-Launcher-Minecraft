@@ -48,6 +48,7 @@ struct ServerContentUpdateCandidate {
     bool upToDate = false;
     QString versionId;
     QString versionNumber;
+    QString providerFileId;
     QString fileName;
     QUrl url;
     QCryptographicHash::Algorithm hashAlgorithm = QCryptographicHash::Sha512;
@@ -71,6 +72,9 @@ public:
     bool isRunning() const;
     static ServerContentUpdateCandidate parseModrinthVersionResponse(
         const QByteArray& data, const QString& installedName, QString* error = nullptr);
+    static ServerContentUpdateCandidate parseCurseForgeFilesResponse(
+        const QByteArray& data, const QString& installedName, const QString& loader,
+        QString* error = nullptr);
 
 signals:
     void progress(qint64 received, qint64 total);

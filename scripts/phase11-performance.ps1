@@ -63,7 +63,7 @@ Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Drawing
 
 if (-not ('JLauncherPhase11.WindowProbe' -as [type])) {
-    Add-Type -TypeDefinition @'
+    $windowProbeSource = @'
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -168,7 +168,21 @@ namespace JLauncherPhase11
         }
     }
 }
-'@ -ReferencedAssemblies System.Drawing
+'@
+    $powerShellRuntime = [IO.Path]::GetDirectoryName([object].Assembly.Location)
+    $referenceDirectory = Join-Path $powerShellRuntime 'ref'
+    if (Test-Path -LiteralPath $referenceDirectory -PathType Container) {
+        $references = @(
+            (Get-ChildItem -LiteralPath $referenceDirectory -Filter '*.dll').FullName
+            [System.Drawing.Bitmap].Assembly.Location
+            (Join-Path $powerShellRuntime 'System.Private.Windows.Core.dll')
+            (Join-Path $powerShellRuntime 'System.Private.Windows.GdiPlus.dll')
+        )
+        Add-Type -TypeDefinition $windowProbeSource -ReferencedAssemblies $references
+    }
+    else {
+        Add-Type -TypeDefinition $windowProbeSource -ReferencedAssemblies System.Drawing
+    }
 }
 
 $resolvedExecutable = (Resolve-Path -LiteralPath $Executable).Path

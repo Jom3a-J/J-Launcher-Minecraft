@@ -155,6 +155,7 @@ private:
     QPushButton *m_changeMinecraftVersionButton = nullptr;
     QPushButton *m_restoreLatestUpdateBackupButton = nullptr;
     QPushButton *m_checkContentUpdatesButton = nullptr;
+    QPushButton *m_setupCurseForgeButton = nullptr;
     QPushButton *m_installContentUpdateButton = nullptr;
     QNetworkAccessManager *m_updatesNetwork = nullptr;
     ServerContentUpdater *m_activeContentUpdater = nullptr;

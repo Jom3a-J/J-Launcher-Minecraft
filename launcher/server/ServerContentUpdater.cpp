@@ -16,6 +16,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <algorithm>
 
 namespace {
 int expectedDigestSize(QCryptographicHash::Algorithm algorithm)
@@ -36,6 +37,25 @@ QNetworkRequest updateRequest(const QUrl& url)
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
     return request;
+}
+
+QString curseForgeLoaderName(const QString& loader)
+{
+    const QString normalized = loader.trimmed().toLower();
+    if (normalized == QStringLiteral("paper") || normalized == QStringLiteral("spigot")
+        || normalized == QStringLiteral("bukkit")) {
+        return QStringLiteral("bukkit");
+    }
+    return normalized;
+}
+
+bool hasGameVersion(const QJsonObject& file, const QString& expected)
+{
+    if (expected.isEmpty()) return true;
+    for (const QJsonValue& value : file.value(QStringLiteral("gameVersions")).toArray()) {
+        if (value.toString().compare(expected, Qt::CaseInsensitive) == 0) return true;
+    }
+    return false;
 }
 }
 
@@ -108,6 +128,77 @@ ServerContentUpdateCandidate ServerContentUpdater::parseModrinthVersionResponse(
 
     candidate.versionId = version.value("id").toString();
     candidate.versionNumber = version.value("version_number").toString();
+    candidate.upToDate = candidate.fileName == QFileInfo(installedName).fileName();
+    candidate.available = !candidate.upToDate;
+    return candidate;
+}
+
+ServerContentUpdateCandidate ServerContentUpdater::parseCurseForgeFilesResponse(
+    const QByteArray& data, const QString& installedName, const QString& loader,
+    QString* error)
+{
+    ServerContentUpdateCandidate candidate;
+    if (error) error->clear();
+
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(data, &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()
+        || !document.object().value(QStringLiteral("data")).isArray()) {
+        if (error) *error = QObject::tr("CurseForge returned invalid update metadata.");
+        return candidate;
+    }
+
+    QList<QJsonObject> compatibleFiles;
+    const QString expectedLoader = curseForgeLoaderName(loader);
+    for (const QJsonValue& value : document.object().value(QStringLiteral("data")).toArray()) {
+        const QJsonObject file = value.toObject();
+        if (!file.isEmpty() && hasGameVersion(file, expectedLoader)) {
+            compatibleFiles.append(file);
+        }
+    }
+    if (compatibleFiles.isEmpty()) return candidate;
+
+    std::sort(compatibleFiles.begin(), compatibleFiles.end(),
+              [](const QJsonObject& left, const QJsonObject& right) {
+                  return left.value(QStringLiteral("fileDate")).toString()
+                      > right.value(QStringLiteral("fileDate")).toString();
+              });
+    const QJsonObject version = compatibleFiles.first();
+    const QString providerName = version.value(QStringLiteral("fileName")).toString().trimmed();
+    candidate.fileName = QFileInfo(providerName).fileName();
+    candidate.url = QUrl(version.value(QStringLiteral("downloadUrl")).toString());
+    candidate.providerFileId = QString::number(version.value(QStringLiteral("id")).toInteger());
+
+    const bool invalidUrl = !candidate.url.isEmpty()
+        && (!candidate.url.isValid()
+            || (candidate.url.scheme() != QStringLiteral("https")
+                && candidate.url.scheme() != QStringLiteral("http")));
+    if (providerName.isEmpty() || candidate.fileName != providerName
+        || !candidate.fileName.endsWith(QStringLiteral(".jar"), Qt::CaseInsensitive)
+        || candidate.providerFileId == QStringLiteral("0") || invalidUrl) {
+        if (error) *error = QObject::tr("CurseForge returned unsafe or incomplete update file metadata.");
+        return {};
+    }
+
+    QString sha1;
+    for (const QJsonValue& value : version.value(QStringLiteral("hashes")).toArray()) {
+        const QJsonObject hash = value.toObject();
+        if (hash.value(QStringLiteral("algo")).toInt() == 1) {
+            sha1 = hash.value(QStringLiteral("value")).toString().trimmed();
+            break;
+        }
+    }
+    candidate.hashAlgorithm = QCryptographicHash::Sha1;
+    candidate.expectedHash = QByteArray::fromHex(sha1.toLatin1());
+    if (sha1.size() != 40 || candidate.expectedHash.size() != 20
+        || QString::fromLatin1(candidate.expectedHash.toHex()).compare(sha1, Qt::CaseInsensitive) != 0) {
+        if (error) *error = QObject::tr("CurseForge did not supply a valid SHA-1 update hash.");
+        return {};
+    }
+
+    candidate.versionId = candidate.providerFileId;
+    candidate.versionNumber = version.value(QStringLiteral("displayName")).toString();
+    if (candidate.versionNumber.isEmpty()) candidate.versionNumber = candidate.fileName;
     candidate.upToDate = candidate.fileName == QFileInfo(installedName).fileName();
     candidate.available = !candidate.upToDate;
     return candidate;

@@ -77,17 +77,23 @@ ModFolderPage::ModFolderPage(MinecraftInstance* inst, ModFolderModel* model, QWi
 
     connect(ui->actionDownloadItem, &QAction::triggered, this, &ModFolderPage::downloadMods);
 
-    ui->actionUpdateItem->setToolTip(tr("Try to check or update all selected mods (all mods if none are selected)"));
+    ui->actionUpdateItem->setText(tr("Update Mods"));
+    ui->actionUpdateItem->setToolTip(tr("Check selected mods for compatible updates. If nothing is selected, all installed mods are checked."));
     connect(ui->actionUpdateItem, &QAction::triggered, this, &ModFolderPage::updateMods);
     ui->actionsToolbar->insertActionBefore(ui->actionAddItem, ui->actionUpdateItem);
 
     auto* updateMenu = new QMenu(this);
 
-    auto* update = updateMenu->addAction(tr("Check for Updates"));
+    auto* update = updateMenu->addAction(tr("Update Selected Mods"));
     connect(update, &QAction::triggered, this, &ModFolderPage::updateMods);
 
+    auto* updateAll = updateMenu->addAction(tr("Update All Mods"));
+    updateAll->setToolTip(tr("Check every installed mod from its tracked provider."));
+    connect(updateAll, &QAction::triggered, this, &ModFolderPage::updateAllMods);
+
     updateMenu->addAction(ui->actionVerifyItemDependencies);
-    connect(ui->actionVerifyItemDependencies, &QAction::triggered, this, [this] { updateMods(true); });
+    connect(ui->actionVerifyItemDependencies, &QAction::triggered, this,
+            [this] { updateModsInternal(true, false); });
 
     auto depsDisabled = APPLICATION->settings()->getSetting("ModDependenciesDisabled");
     ui->actionVerifyItemDependencies->setVisible(!depsDisabled->get().toBool());
@@ -213,7 +219,17 @@ void ModFolderPage::downloadDialogFinished(int result)
     }
 }
 
-void ModFolderPage::updateMods(bool includeDeps)
+void ModFolderPage::updateMods()
+{
+    updateModsInternal(false, false);
+}
+
+void ModFolderPage::updateAllMods()
+{
+    updateModsInternal(false, true);
+}
+
+void ModFolderPage::updateModsInternal(bool includeDeps, bool forceAll)
 {
     auto* profile = m_instance->getPackProfile();
     if (!profile->getModLoaders().has_value() && handleNoModLoader()) {
@@ -236,12 +252,22 @@ void ModFolderPage::updateMods(bool includeDeps)
             return;
         }
     }
-    auto selection = m_filterModel->mapSelectionToSource(ui->treeView->selectionModel()->selection()).indexes();
+    auto selection = forceAll
+        ? QModelIndexList()
+        : m_filterModel->mapSelectionToSource(
+              ui->treeView->selectionModel()->selection()).indexes();
 
     auto modsList = m_model->selectedResources(selection);
-    bool useAll = modsList.empty();
+    bool useAll = forceAll || modsList.empty();
     if (useAll) {
         modsList = m_model->allResources();
+    }
+    if (modsList.empty()) {
+        CustomMessageBox::selectable(
+            this, tr("No Mods to Update"),
+            tr("This instance has no installed mods to check."),
+            QMessageBox::Information)->exec();
+        return;
     }
 
     ResourceUpdateDialog updateDialog(this, m_instance, m_model, modsList, includeDeps, profile->getModLoadersList());
@@ -251,6 +277,13 @@ void ModFolderPage::updateMods(bool includeDeps)
         return;
     }
     if (updateDialog.noUpdates()) {
+        if (updateDialog.incompleteCheck()) {
+            CustomMessageBox::selectable(
+                this, tr("Update Check Incomplete"),
+                tr("No updates were confirmed, but one or more mods could not be checked. Review the provider warning and try again after fixing it."),
+                QMessageBox::Warning)->exec();
+            return;
+        }
         QString message{ tr("'%1' is up-to-date! :)").arg(modsList.front()->name()) };
         if (modsList.size() > 1) {
             if (useAll) {

@@ -38,6 +38,8 @@ public:
     static bool prepareContent(const QString &instanceRoot, const QString &gameRoot,
                                const QString &destination, QStringList *skippedClientFiles,
                                QString *error);
+    static QString contentTrackingSource(const QString &gameRoot,
+                                         const QString &installedFilePath);
 
     static ServerModpackInstallResult createMatchingServer(ServerManager *manager,
                                                            const MinecraftInstance &instance,

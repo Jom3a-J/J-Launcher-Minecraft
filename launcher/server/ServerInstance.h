@@ -121,6 +121,8 @@ public:
     static bool isReadyOutput(const QString &line);
     static bool isPortAvailable(quint16 port);
     static bool isJavaMajorCompatible(int requiredVersion, int detectedVersion);
+    static int recommendedJavaMajor(const QString &minecraftVersion,
+                                    const QString &loaderType);
 
     // Save/Load
     QJsonObject toJson() const;
@@ -170,7 +172,6 @@ private:
     QString loaderScriptPath() const;
     QString loaderArgumentsFile() const;
     int requiredJavaVersion() const;
-    int minimumJavaForMinecraftVersion() const;
     int javaMajorVersion(const QString &path) const;
     QString compatibleJavaPath(int requiredVersion, int *detectedVersion) const;
     bool installCompatibleJava(int requiredVersion);

@@ -21,6 +21,8 @@
 #include <QList>
 
 #include <QPushButton>
+#include <QHBoxLayout>
+#include <QLabel>
 #include <algorithm>
 #include <utility>
 
@@ -133,6 +135,30 @@ void ResourceDownloadDialog::initializeContainer()
 #ifndef Q_OS_MACOS
     layout()->setContentsMargins(0, 0, 0, 0);
 #endif
+
+    if (!(APPLICATION->capabilities() & Application::SupportsFlame)) {
+        auto* setupRow = new QWidget(this);
+        auto* setupLayout = new QHBoxLayout(setupRow);
+        setupLayout->setContentsMargins(12, 8, 12, 0);
+        auto* explanation = new QLabel(
+            tr("CurseForge is hidden because this build has no CurseForge API key. Add your own key in Settings → Services to enable its catalog and updates."),
+            setupRow);
+        explanation->setWordWrap(true);
+        auto* setupButton = new QPushButton(tr("Set Up CurseForge"), setupRow);
+        setupButton->setObjectName(QStringLiteral("setupCurseForgeButton"));
+        setupLayout->addWidget(explanation, 1);
+        setupLayout->addWidget(setupButton);
+        connect(setupButton, &QPushButton::clicked, this,
+                [this, explanation, setupButton]() {
+            APPLICATION->ShowGlobalSettings(this, QStringLiteral("apis"));
+            if (APPLICATION->capabilities() & Application::SupportsFlame) {
+                explanation->setText(
+                    tr("CurseForge is enabled. Close and reopen this download window to load its catalog."));
+                setupButton->setEnabled(false);
+            }
+        });
+        m_vertical_layout.addWidget(setupRow);
+    }
 
     m_container = new PageContainer(this, {}, this);
     m_container->setSizePolicy(QSizePolicy::Policy::Preferred, QSizePolicy::Policy::Expanding);

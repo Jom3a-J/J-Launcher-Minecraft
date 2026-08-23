@@ -4,10 +4,12 @@
 #include "server/ServerManager.h"
 #include "server/ServerPackCompatibility.h"
 
+#include "archive/ArchiveReader.h"
 #include "minecraft/MinecraftInstance.h"
 #include "minecraft/PackProfile.h"
 #include "minecraft/mod/MetadataHandler.h"
 #include "modplatform/ModIndex.h"
+#include "modplatform/helpers/HashUtils.h"
 
 #include <QDir>
 #include <QDirIterator>
@@ -17,7 +19,9 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <QSet>
+#include <QSettings>
 #include <QTemporaryDir>
 
 #include <algorithm>
@@ -367,22 +371,86 @@ bool readModrinthRules(const QString &instanceRoot, const QString &gameRoot,
     return true;
 }
 
-void readIndexedClientOnlyMods(const QString &gameRoot, QSet<QString> *excludedPaths,
-                               QStringList *skippedClientFiles)
+bool jarDeclaresClientOnly(const QString &path)
 {
-    const QDir indexDirectory(QDir(gameRoot).filePath(QStringLiteral("mods/.index")));
-    for (const QString &entry : indexDirectory.entryList(
-             QStringList() << QStringLiteral("*.pw.toml"), QDir::Files)) {
-        const auto metadata = Metadata::get(indexDirectory, entry);
-        if (!metadata.isValid() || metadata.side != ModPlatform::SideType::ClientSide
-            || metadata.filename.isEmpty()) {
-            continue;
+    MMCZip::ArchiveReader archive(path);
+    if (const auto fabricMetadata = archive.goToFile(QStringLiteral("fabric.mod.json"))) {
+        QJsonParseError parseError;
+        const QJsonDocument document = QJsonDocument::fromJson(
+            fabricMetadata->readAll(), &parseError);
+        if (parseError.error == QJsonParseError::NoError && document.isObject()) {
+            const QString environment = document.object()
+                                            .value(QStringLiteral("environment"))
+                                            .toString()
+                                            .trimmed();
+            if (environment.compare(QStringLiteral("client"), Qt::CaseInsensitive) == 0) {
+                return true;
+            }
         }
-        const QString path = normalizedRelativePath(
-            QStringLiteral("mods/") + metadata.filename);
-        excludedPaths->insert(path.toLower());
-        if (skippedClientFiles) {
-            skippedClientFiles->append(path);
+    }
+
+    // Older Forge metadata has an explicit clientSideOnly flag. Modern
+    // displayTest values describe network-version checks, not physical side,
+    // so they must not be treated as proof that a mod is client-only.
+    for (const QString &metadataPath : {
+             QStringLiteral("META-INF/mods.toml"),
+             QStringLiteral("META-INF/neoforge.mods.toml") }) {
+        MMCZip::ArchiveReader forgeArchive(path);
+        if (const auto forgeMetadata = forgeArchive.goToFile(metadataPath)) {
+            const QString contents = QString::fromUtf8(forgeMetadata->readAll());
+            static const QRegularExpression clientOnlyExpression(
+                QStringLiteral(R"((?im)^\s*clientSideOnly\s*=\s*true\s*(?:#.*)?$)"));
+            if (clientOnlyExpression.match(contents).hasMatch()) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void excludeClientOnlyMod(const QString &filename, QSet<QString> *excludedPaths,
+                          QStringList *skippedClientFiles)
+{
+    if (filename.isEmpty()) return;
+    const QString relativePath = normalizedRelativePath(
+        QStringLiteral("mods/") + filename);
+    excludedPaths->insert(relativePath.toLower());
+    if (skippedClientFiles) {
+        skippedClientFiles->append(relativePath);
+    }
+}
+
+void readDeclaredClientOnlyMods(const QString &gameRoot, QSet<QString> *excludedPaths,
+                                QStringList *skippedClientFiles)
+{
+    // New downloads use mods/.index. Prism-compatible legacy instances use
+    // jarmods. Both describe files installed in the same minecraft/mods folder.
+    const QList<QDir> metadataDirectories{
+        QDir(QDir(gameRoot).filePath(QStringLiteral("mods/.index"))),
+        QDir(QDir(gameRoot).filePath(QStringLiteral("jarmods"))),
+    };
+    for (const QDir &indexDirectory : metadataDirectories) {
+        for (const QString &entry : indexDirectory.entryList(
+                 QStringList() << QStringLiteral("*.pw.toml"), QDir::Files)) {
+            const auto metadata = Metadata::get(indexDirectory, entry);
+            if (!metadata.isValid()
+                || metadata.side != ModPlatform::SideType::ClientSide) {
+                continue;
+            }
+            excludeClientOnlyMod(metadata.filename, excludedPaths,
+                                 skippedClientFiles);
+        }
+    }
+
+    const QDir modsDirectory(QDir(gameRoot).filePath(QStringLiteral("mods")));
+    for (const QFileInfo &jar : modsDirectory.entryInfoList(
+             QStringList() << QStringLiteral("*.jar"), QDir::Files)) {
+        const QString relativePath = normalizedRelativePath(
+            QStringLiteral("mods/") + jar.fileName());
+        if (!excludedPaths->contains(relativePath.toLower())
+            && jarDeclaresClientOnly(jar.absoluteFilePath())) {
+            excludeClientOnlyMod(jar.fileName(), excludedPaths,
+                                 skippedClientFiles);
         }
     }
 }
@@ -461,6 +529,23 @@ bool copyIncludedServerFiles(const QString &instanceRoot, const QString &gameRoo
     }
     return true;
 }
+
+void importContentTracking(const QString &gameRoot,
+                           const std::shared_ptr<ServerInstance> &server)
+{
+    if (!server) return;
+    QSettings settings;
+    const QString sourcePrefix = QStringLiteral("ServerContentSources/%1/").arg(server->id());
+    const QFileInfoList installedFiles = QDir(server->modsDirectory()).entryInfoList(
+        QStringList() << QStringLiteral("*.jar"), QDir::Files);
+    for (const QFileInfo &installed : installedFiles) {
+        const QString source = ServerModpackInstaller::contentTrackingSource(
+            gameRoot, installed.absoluteFilePath());
+        if (!source.isEmpty()) {
+            settings.setValue(sourcePrefix + installed.fileName(), source);
+        }
+    }
+}
 }
 
 ServerModpackProfile ServerModpackInstaller::profileForVersions(
@@ -501,6 +586,56 @@ ServerModpackProfile ServerModpackInstaller::profileForVersions(
             "The selected pack is not a supported Fabric, Forge, or NeoForge modpack.");
     }
     return result;
+}
+
+QString ServerModpackInstaller::contentTrackingSource(
+    const QString &gameRoot, const QString &installedFilePath)
+{
+    const QFileInfo installed(installedFilePath);
+    if (!installed.isFile()) return {};
+
+    const QList<QDir> metadataDirectories{
+        QDir(QDir(gameRoot).filePath(QStringLiteral("mods/.index"))),
+        QDir(QDir(gameRoot).filePath(QStringLiteral("jarmods"))),
+    };
+    for (const QDir &indexDirectory : metadataDirectories) {
+        for (const QString &entry : indexDirectory.entryList(
+                 QStringList() << QStringLiteral("*.pw.toml"), QDir::Files)) {
+            const auto metadata = Metadata::get(indexDirectory, entry);
+            if (!metadata.isValid()
+                || metadata.filename.compare(installed.fileName(), Qt::CaseInsensitive) != 0) {
+                continue;
+            }
+
+            bool matches = false;
+            const Hashing::Algorithm algorithm =
+                Hashing::algorithmFromString(metadata.hash_format.toLower());
+            if (!metadata.hash.isEmpty() && algorithm != Hashing::Algorithm::Unknown) {
+                const QString actualHash = Hashing::hash(installed.absoluteFilePath(), algorithm);
+                matches = !actualHash.isEmpty()
+                    && actualHash.compare(metadata.hash, Qt::CaseInsensitive) == 0;
+            } else {
+                const QFileInfo sourceFile(
+                    QDir(gameRoot).filePath(QStringLiteral("mods/") + metadata.filename));
+                if (sourceFile.isFile() && sourceFile.size() == installed.size()) {
+                    const QString installedHash = Hashing::hash(
+                        installed.absoluteFilePath(), Hashing::Algorithm::Sha1);
+                    const QString sourceHash = Hashing::hash(
+                        sourceFile.absoluteFilePath(), Hashing::Algorithm::Sha1);
+                    matches = !installedHash.isEmpty() && installedHash == sourceHash;
+                }
+            }
+            if (!matches) continue;
+
+            const QString provider =
+                metadata.provider == ModPlatform::ResourceProvider::MODRINTH
+                ? QStringLiteral("modrinth") : QStringLiteral("curseforge");
+            return QStringLiteral("%1:%2:%3")
+                .arg(provider, metadata.project_id.toString(),
+                     metadata.file_id.toString());
+        }
+    }
+    return {};
 }
 
 ServerModpackProfile ServerModpackInstaller::inspect(const MinecraftInstance &instance)
@@ -619,7 +754,7 @@ bool ServerModpackInstaller::prepareContent(const QString &instanceRoot,
             &includedPaths, error)) {
         return false;
     }
-    readIndexedClientOnlyMods(gameRoot, &excludedPaths, skippedClientFiles);
+    readDeclaredClientOnlyMods(gameRoot, &excludedPaths, skippedClientFiles);
     readServerPairClientOnlyFiles(instanceRoot, &excludedPaths,
                                   skippedClientFiles);
 
@@ -757,6 +892,7 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
         manager->deleteServer(server->id());
         return result;
     }
+    importContentTracking(gameRoot, server);
     result.serverId = server->id();
     return result;
 }

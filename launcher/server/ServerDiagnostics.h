@@ -4,6 +4,7 @@
 
 #include <QtGlobal>
 #include <QString>
+#include <QStringList>
 
 enum class ServerHealthState {
     Inactive,
@@ -57,4 +58,6 @@ public:
     static ServerHealthAssessment assessHealth(const ServerHealthInput& input);
     static ServerCrashCause classifyCrash(const QString& log);
     static QString crashCauseExplanation(ServerCrashCause cause);
+    static QString crashRelevantLine(const QString& log);
+    static QStringList suspectedModIds(const QString& log);
 };
