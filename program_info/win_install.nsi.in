@@ -368,6 +368,7 @@ Section "@Launcher_DisplayName@"
   ; the build's install tree is not enough on its own.
   File "LICENSE"
   File "COPYING.md"
+  @Launcher_MSVC_Redist_NSIS_File@
   File *.dll
   File /r "iconengines"
   File /r "imageformats"
@@ -480,6 +481,7 @@ Section "Uninstall"
   Delete $INSTDIR\qtlogging.ini
   Delete $INSTDIR\LICENSE
   Delete $INSTDIR\COPYING.md
+  Delete $INSTDIR\vc_redist.x64.exe
   Delete $INSTDIR\*.dll
 
   Delete $INSTDIR\uninstall.exe

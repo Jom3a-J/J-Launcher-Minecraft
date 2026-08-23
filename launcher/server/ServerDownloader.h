@@ -64,6 +64,7 @@ public:
     // Fetch provider build/loader versions for one Minecraft version.
     void fetchAvailableBuilds(const QString &version, const QString &type);
     void cancel();
+    QString resolvedLoaderVersion() const { return m_resolvedLoaderVersion; }
 
     // Supported server types
     static QStringList supportedTypes();
@@ -91,6 +92,8 @@ private:
                       QCryptographicHash::Algorithm hashAlgorithm = QCryptographicHash::Sha256);
     bool appendDownloadData(const QByteArray &data);
     bool finalizeDownloadedFile(QString *errorMessage);
+    bool validateLoaderInstallation(const QString &loaderName,
+                                    QString *errorMessage) const;
     void cleanUp();
 
     // Generic reply handler
@@ -178,6 +181,8 @@ private:
     QString m_targetJarPath;
     QString m_javaPath;
     QString m_loaderVersion;
+    QString m_resolvedLoaderVersion;
+    bool m_loaderScriptExistedBeforeInstall = false;
     QString m_versionsType;
     QString m_buildsType;
     QString m_buildsVersion;

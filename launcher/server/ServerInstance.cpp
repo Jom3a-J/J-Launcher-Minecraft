@@ -57,6 +57,7 @@ ServerInstance::ServerInstance(const QString &id, const QString &name, QObject *
         appendLog("[ERROR] " + message);
         emit errorReceived(message);
         emit serverError(message);
+        emit serverCrashed(message, m_consoleLog.right(6000));
         setStatus(ServerStatus::Error);
         if (m_process && m_process->state() != QProcess::NotRunning) {
             m_process->write("stop\n");
@@ -215,7 +216,8 @@ bool ServerInstance::start()
         return false;
     }
 
-    const int requiredJava = qMax(requiredJavaVersion(), minimumJavaForMinecraftVersion());
+    const int requiredJava = qMax(
+        requiredJavaVersion(), recommendedJavaMajor(m_version, m_loaderType));
     int detectedJava = 0;
     const QString javaPath = compatibleJavaPath(requiredJava, &detectedJava);
     if (javaPath.isEmpty()) {
@@ -597,6 +599,12 @@ QString ServerInstance::loaderArgumentsFile() const
         conventionalPaths << serverDir.filePath(
             QStringLiteral("libraries/net/neoforged/neoforge/%1/%2")
                 .arg(m_loaderVersion, argumentsFileName));
+        if (m_version == QStringLiteral("1.20.1")
+            || m_loaderVersion.startsWith(QStringLiteral("47."))) {
+            conventionalPaths.prepend(serverDir.filePath(
+                QStringLiteral("libraries/net/neoforged/forge/%1-%2/%3")
+                    .arg(m_version, m_loaderVersion, argumentsFileName)));
+        }
     }
     for (const QString& path : conventionalPaths) {
         if (QFileInfo::exists(path)) {
@@ -653,16 +661,39 @@ int ServerInstance::requiredJavaVersion() const
     return classVersion >= 45 ? classVersion - 44 : 0;
 }
 
-int ServerInstance::minimumJavaForMinecraftVersion() const
+int ServerInstance::recommendedJavaMajor(const QString &minecraftVersion,
+                                         const QString &loaderType)
 {
     // Some loaders (notably Fabric) start from a small bootstrap JAR whose
     // own class version is lower than the Minecraft server it loads. Keep a
     // Minecraft-version floor in addition to inspecting the launcher JAR.
     const QRegularExpression releasePattern("^1\\.(\\d+)(?:\\.(\\d+))?$");
-    const QRegularExpressionMatch release = releasePattern.match(m_version);
+    const QRegularExpressionMatch release = releasePattern.match(
+        minecraftVersion.trimmed());
     if (release.hasMatch()) {
         const int minor = release.captured(1).toInt();
         const int patch = release.captured(2).toInt();
+        const QString loader = loaderType.trimmed().toLower();
+
+        // Paper and Purpur publish a stricter runtime matrix than the game
+        // itself. Purpur is Paper-based and follows the same Java floor.
+        if (loader == QStringLiteral("paper")
+            || loader == QStringLiteral("purpur")) {
+            if (minor >= 20) {
+                return 21;
+            }
+            if (minor >= 17) {
+                return 17;
+            }
+            if (minor == 16 && patch >= 5) {
+                return 16;
+            }
+            if (minor >= 12) {
+                return 11;
+            }
+            return 8;
+        }
+
         if (minor > 20 || (minor == 20 && patch >= 5)) {
             return 21;
         }
@@ -677,10 +708,10 @@ int ServerInstance::minimumJavaForMinecraftVersion() const
 
     // Mojang's post-1.21 release line (26.x) requires Java 25. This also
     // covers Fabric/Forge bootstrap JARs that do not expose the game class.
-    if (QRegularExpression("^2[6-9]\\.").match(m_version).hasMatch()) {
+    if (QRegularExpression("^2[6-9]\\.").match(minecraftVersion).hasMatch()) {
         return 25;
     }
-    if (QRegularExpression("^24w(1[4-9]|[2-9]\\d)[a-z]$").match(m_version).hasMatch()) {
+    if (QRegularExpression("^24w(1[4-9]|[2-9]\\d)[a-z]$").match(minecraftVersion).hasMatch()) {
         return 21;
     }
     return 0;
@@ -1166,12 +1197,17 @@ void ServerInstance::onProcessError(QProcess::ProcessError error)
             break;
     }
 
+    appendLog("[ERROR] " + errorMsg);
     emit serverError(errorMsg);
+    if (error == QProcess::FailedToStart) {
+        emit serverCrashed(errorMsg, m_consoleLog.right(6000));
+    }
 }
 
 bool ServerInstance::downloadServerJar(const QString &javaPath, bool startAfterDownload)
 {
-    return beginServerDownload(m_version, m_loaderVersion, javaPath, startAfterDownload, false, false);
+    return beginServerDownload(m_version, m_loaderVersion, javaPath, startAfterDownload,
+                               false, m_loaderVersion.trimmed().isEmpty());
 }
 
 bool ServerInstance::downloadServerJarForVersion(const QString &targetVersion,
@@ -1245,7 +1281,8 @@ bool ServerInstance::beginServerDownload(const QString &targetVersion,
             return;
         }
         if (success) {
-            QString formatted = "[DOWNLOAD] Server jar downloaded successfully!";
+            const QString resolvedLoaderVersion = m_downloader->resolvedLoaderVersion();
+            QString formatted = "[DOWNLOAD] Server software installed successfully!";
             appendLog(formatted);
             emit outputReceived(formatted);
             m_downloader->deleteLater();
@@ -1254,7 +1291,8 @@ bool ServerInstance::beginServerDownload(const QString &targetVersion,
                 setVersion(targetVersion);
             }
             if (commitTargetLoaderVersion) {
-                setLoaderVersion(targetLoaderVersion);
+                setLoaderVersion(targetLoaderVersion.isEmpty()
+                                     ? resolvedLoaderVersion : targetLoaderVersion);
             }
             setStatus(ServerStatus::Stopped);
             emit serverSoftwareDownloadFinished(targetVersion, true, false, QString());

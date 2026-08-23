@@ -3,6 +3,9 @@
 #include "ServerDiagnostics.h"
 
 #include <QObject>
+#include <QRegularExpression>
+#include <QSet>
+#include <QStringList>
 
 namespace {
 ServerMetricLevel percentLevel(double value, int warning)
@@ -60,7 +63,9 @@ ServerCrashCause ServerDiagnostics::classifyCrash(const QString& log)
 {
     const QString lower = log.toLower();
     if (lower.contains("unsupportedclassversionerror")
-        || lower.contains("requires the use of java")) {
+        || lower.contains("requires the use of java")
+        || lower.contains("class file version")
+        || lower.contains("failed to start server. is java installed")) {
         return ServerCrashCause::JavaVersion;
     }
     if (lower.contains("unable to access jarfile")
@@ -76,7 +81,15 @@ ServerCrashCause ServerDiagnostics::classifyCrash(const QString& log)
     }
     if (lower.contains("nosuchmethoderror")
         || lower.contains("classnotfoundexception")
-        || lower.contains("mod resolution encountered")) {
+        || lower.contains("mod resolution encountered")
+        || lower.contains("mod resolution failed")
+        || lower.contains("incompatible mods found")
+        || lower.contains("missing mandatory dependenc")
+        || lower.contains("modloadingexception")
+        || lower.contains("duplicate mods found")
+        || (lower.contains("cannot load class")
+            && lower.contains("environment type server"))
+        || (lower.contains("requires version") && lower.contains("missing"))) {
         return ServerCrashCause::Content;
     }
     if (lower.contains("outofmemoryerror")
@@ -98,11 +111,83 @@ QString ServerDiagnostics::crashCauseExplanation(ServerCrashCause cause)
         case ServerCrashCause::Eula:
             return QObject::tr("The Minecraft EULA has not been accepted in eula.txt.");
         case ServerCrashCause::Content:
-            return QObject::tr("A mod, plugin, loader, or dependency is incompatible or missing.");
+            return QObject::tr("A mod, plugin, loader, or dependency is missing or incompatible. Review the reported error and make the server content versions agree.");
         case ServerCrashCause::Memory:
             return QObject::tr("The Java process ran out of memory or could not reserve the configured amount.");
         case ServerCrashCause::Unknown:
             return QObject::tr("Check the final log lines below for the server's reported cause.");
     }
     return {};
+}
+
+QString ServerDiagnostics::crashRelevantLine(const QString& log)
+{
+    const QStringList lines = log.split('\n', Qt::SkipEmptyParts);
+    const QStringList priorityMarkers = {
+        QStringLiteral("which is missing"),
+        QStringLiteral("missing mandatory dependenc"),
+        QStringLiteral("unsupportedclassversionerror"),
+        QStringLiteral("could not reserve enough space"),
+        QStringLiteral("outofmemoryerror"),
+        QStringLiteral("unable to access jarfile"),
+        QStringLiteral("could not find or load main class"),
+        QStringLiteral("failed to bind to port"),
+        QStringLiteral("address already in use"),
+        QStringLiteral("you need to agree to the eula"),
+        QStringLiteral("incompatible mods found"),
+        QStringLiteral("mod resolution failed"),
+        QStringLiteral("modloadingexception"),
+        QStringLiteral("duplicate mods found"),
+        QStringLiteral("environment type server"),
+        QStringLiteral("caused by:"),
+        QStringLiteral("[error]")
+    };
+
+    for (const QString& marker : priorityMarkers) {
+        for (auto iterator = lines.crbegin(); iterator != lines.crend(); ++iterator) {
+            if (!iterator->contains(marker, Qt::CaseInsensitive)) {
+                continue;
+            }
+            QString relevant = iterator->trimmed();
+            if (relevant.size() > 1000) {
+                relevant = relevant.left(997) + QStringLiteral("...");
+            }
+            return relevant;
+        }
+    }
+
+    for (auto iterator = lines.crbegin(); iterator != lines.crend(); ++iterator) {
+        const QString relevant = iterator->trimmed();
+        if (!relevant.isEmpty() && !relevant.startsWith(QStringLiteral("at "))) {
+            return relevant.size() > 1000
+                ? relevant.left(997) + QStringLiteral("...")
+                : relevant;
+        }
+    }
+    return {};
+}
+
+QStringList ServerDiagnostics::suspectedModIds(const QString& log)
+{
+    QSet<QString> identifiers;
+    const QList<QRegularExpression> patterns{
+        // Fabric mixin handler names embed the responsible mod id between
+        // dollar signs, for example handler$abc$my_mod$method.
+        QRegularExpression(
+            QStringLiteral(R"(handler\$[^\s$]*\$([a-z0-9_.-]+)\$)"),
+            QRegularExpression::CaseInsensitiveOption),
+        QRegularExpression(
+            QStringLiteral(R"(mixin[^\r\n]*?\bfrom mod\s+['\"]?([a-z0-9_.-]+))"),
+            QRegularExpression::CaseInsensitiveOption),
+    };
+    for (const QRegularExpression& pattern : patterns) {
+        auto matches = pattern.globalMatch(log);
+        while (matches.hasNext()) {
+            const QString identifier = matches.next().captured(1).toLower();
+            if (!identifier.isEmpty()) identifiers.insert(identifier);
+        }
+    }
+    QStringList result(identifiers.cbegin(), identifiers.cend());
+    result.sort(Qt::CaseInsensitive);
+    return result;
 }

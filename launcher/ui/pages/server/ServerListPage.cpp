@@ -15,6 +15,7 @@
 
 #include "ServerListPage.h"
 #include "ui_ServerListPage.h"
+#include "archive/ArchiveReader.h"
 #include "Application.h"
 #include "server/ServerManager.h"
 #include "server/ServerInstance.h"
@@ -31,12 +32,15 @@
 #include "minecraft/MinecraftInstance.h"
 #include "minecraft/PackProfile.h"
 #include "minecraft/mod/ModFolderModel.h"
+#include "modplatform/flame/FlameAPI.h"
+#include "BuildConfig.h"
 #include "InstanceList.h"
 #include "QObjectPtr.h"
 #include "settings/INISettingsObject.h"
 #include "tasks/ConcurrentTask.h"
 #include "logs/Privacy.h"
 #include <QMessageBox>
+#include <QAbstractButton>
 #include <QFileDialog>
 #include <QFile>
 #include <QDesktopServices>
@@ -88,6 +92,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <QMap>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -165,6 +170,31 @@ QNetworkRequest updateRequest(const QUrl &url)
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
     return request;
+}
+
+QNetworkRequest curseForgeUpdateRequest(const QUrl &url)
+{
+    QNetworkRequest request = updateRequest(url);
+    request.setRawHeader("x-api-key", APPLICATION->getFlameAPIKey().toUtf8());
+    return request;
+}
+
+void showContentUpdate(QTreeWidgetItem *item,
+                       const ServerContentUpdateCandidate &update)
+{
+    if (!item) return;
+    if (!update.available && !update.upToDate) {
+        item->setText(2, QObject::tr("No compatible update"));
+    } else if (update.upToDate) {
+        item->setText(2, QObject::tr("Up to date"));
+    } else {
+        item->setText(2, QObject::tr("Update available: %1").arg(update.versionNumber));
+        item->setData(0, Qt::UserRole, update.url.toString());
+        item->setData(0, Qt::UserRole + 3, update.fileName);
+        item->setData(0, Qt::UserRole + 4, static_cast<int>(update.hashAlgorithm));
+        item->setData(0, Qt::UserRole + 5, update.expectedHash);
+        item->setData(0, Qt::UserRole + 6, update.versionId);
+    }
 }
 
 QStringList installedContentDetails(const QFileInfo &file)
@@ -257,7 +287,7 @@ QIcon serverFileIcon(const QFileInfo &file)
 }
 
 QString structuredCrashDetails(const std::shared_ptr<ServerInstance> &server, const QString &message,
-                              const QString &rawLog)
+                               const QString &rawLog)
 {
     if (!server) return Privacy::sanitizeText(rawLog, 8192);
     const QString loader = server->loaderVersion().isEmpty()
@@ -276,11 +306,16 @@ QString structuredCrashDetails(const std::shared_ptr<ServerInstance> &server, co
     }
 
     QStringList report;
+    const QString relevantLine = Privacy::sanitizeText(
+        ServerDiagnostics::crashRelevantLine(rawLog), 1000);
     report << QObject::tr("Crash summary")
            << QObject::tr("Time: %1").arg(QDateTime::currentDateTime().toString(Qt::ISODate))
            << QObject::tr("Message: %1").arg(Privacy::sanitizeText(message))
            << QObject::tr("Likely cause: %1").arg(ServerDiagnostics::crashCauseExplanation(
                   ServerDiagnostics::classifyCrash(rawLog)))
+           << QObject::tr("Reported error: %1").arg(relevantLine.isEmpty()
+                                                        ? QObject::tr("No specific error line was found.")
+                                                        : relevantLine)
            << QObject::tr("Minecraft: %1").arg(server->version())
            << QObject::tr("Server type: %1").arg(loader)
            << QObject::tr("Java: %1").arg(server->javaPath().isEmpty()
@@ -296,11 +331,151 @@ QString structuredCrashDetails(const std::shared_ptr<ServerInstance> &server, co
 
 QString crashSummary(const QString& message, const QString& rawLog)
 {
-    return QObject::tr("%1 — %2\nLikely cause: %3")
+    const QString relevantLine = Privacy::sanitizeText(
+        ServerDiagnostics::crashRelevantLine(rawLog), 1000);
+    QString summary = QObject::tr("%1 — %2\nLikely cause: %3")
         .arg(QDateTime::currentDateTime().toString(Qt::ISODate),
              Privacy::sanitizeText(message),
              ServerDiagnostics::crashCauseExplanation(
-                 ServerDiagnostics::classifyCrash(rawLog)));
+                  ServerDiagnostics::classifyCrash(rawLog)));
+    if (!relevantLine.isEmpty()) {
+        summary += QObject::tr("\nServer reported: %1").arg(relevantLine);
+    }
+    return summary;
+}
+
+QStringList modIdsFromJar(const QString& path)
+{
+    QStringList identifiers;
+    MMCZip::ArchiveReader fabricArchive(path);
+    if (const auto metadata = fabricArchive.goToFile(QStringLiteral("fabric.mod.json"))) {
+        QJsonParseError parseError;
+        const QJsonDocument document = QJsonDocument::fromJson(
+            metadata->readAll(), &parseError);
+        if (parseError.error == QJsonParseError::NoError && document.isObject()) {
+            const QJsonObject object = document.object();
+            identifiers << object.value(QStringLiteral("id")).toString().toLower();
+            for (const QJsonValue& provided :
+                 object.value(QStringLiteral("provides")).toArray()) {
+                identifiers << provided.toString().toLower();
+            }
+        }
+    }
+
+    MMCZip::ArchiveReader quiltArchive(path);
+    if (const auto metadata = quiltArchive.goToFile(QStringLiteral("quilt.mod.json"))) {
+        QJsonParseError parseError;
+        const QJsonDocument document = QJsonDocument::fromJson(
+            metadata->readAll(), &parseError);
+        if (parseError.error == QJsonParseError::NoError && document.isObject()) {
+            identifiers << document.object()
+                               .value(QStringLiteral("quilt_loader"))
+                               .toObject()
+                               .value(QStringLiteral("id"))
+                               .toString()
+                               .toLower();
+        }
+    }
+
+    for (const QString& metadataPath : {
+             QStringLiteral("META-INF/mods.toml"),
+             QStringLiteral("META-INF/neoforge.mods.toml") }) {
+        MMCZip::ArchiveReader forgeArchive(path);
+        if (const auto metadata = forgeArchive.goToFile(metadataPath)) {
+            const QString contents = QString::fromUtf8(metadata->readAll());
+            static const QRegularExpression modIdExpression(
+                QStringLiteral(R"((?im)^\s*modId\s*=\s*[\"']([a-z0-9_.-]+)[\"'])"));
+            auto matches = modIdExpression.globalMatch(contents);
+            while (matches.hasNext()) {
+                identifiers << matches.next().captured(1).toLower();
+            }
+        }
+    }
+    identifiers.removeAll(QString());
+    identifiers.removeDuplicates();
+    return identifiers;
+}
+
+QStringList suspectedModFiles(const std::shared_ptr<ServerInstance>& server,
+                              const QString& rawLog)
+{
+    if (!server) return {};
+    const QStringList suspectedIds = ServerDiagnostics::suspectedModIds(rawLog);
+    if (suspectedIds.isEmpty()) return {};
+
+    QStringList matches;
+    const QDir directory(server->modsDirectory());
+    for (const QFileInfo& jar : directory.entryInfoList(
+             QStringList() << QStringLiteral("*.jar"), QDir::Files)) {
+        const QStringList ids = modIdsFromJar(jar.absoluteFilePath());
+        for (const QString& suspectedId : suspectedIds) {
+            if (ids.contains(suspectedId, Qt::CaseInsensitive)) {
+                matches << jar.absoluteFilePath();
+                break;
+            }
+        }
+    }
+    return matches;
+}
+
+void showServerFailureDialog(QWidget *parent,
+                             const std::shared_ptr<ServerInstance> &server,
+                             const QString &message, const QString &rawLog)
+{
+    const QString likelyCause = ServerDiagnostics::crashCauseExplanation(
+        ServerDiagnostics::classifyCrash(rawLog));
+    const QString reportedError = Privacy::sanitizeText(
+        ServerDiagnostics::crashRelevantLine(rawLog), 1000);
+
+    QMessageBox dialog(parent);
+    dialog.setWindowTitle(QObject::tr("Server Failure"));
+    dialog.setIcon(QMessageBox::Critical);
+    dialog.setText(QObject::tr("The server stopped before it was ready or ended unexpectedly."));
+
+    QString explanation = QObject::tr("Likely cause: %1").arg(likelyCause);
+    if (!reportedError.isEmpty()) {
+        explanation += QObject::tr("\n\nServer reported:\n%1").arg(reportedError);
+    }
+    const QStringList suspectFiles = suspectedModFiles(server, rawLog);
+    if (!suspectFiles.isEmpty()) {
+        explanation += QObject::tr(
+            "\n\nThe log identifies this installed mod as the likely cause: %1. "
+            "You can disable it on this server and retry; the client copy is not changed.")
+                           .arg(QFileInfo(suspectFiles.constFirst()).fileName());
+    }
+    explanation += QObject::tr("\n\nChoose Show Details to view the server version, Java runtime, installed content, and final log lines.");
+    dialog.setInformativeText(explanation);
+    dialog.setDetailedText(structuredCrashDetails(server, message, rawLog));
+    dialog.setStandardButtons(QMessageBox::Close);
+    QAbstractButton *disableAndRetryButton = nullptr;
+    if (!suspectFiles.isEmpty()) {
+        disableAndRetryButton = dialog.addButton(
+            QObject::tr("Disable and Retry"), QMessageBox::ActionRole);
+    }
+    dialog.exec();
+
+    if (disableAndRetryButton && dialog.clickedButton() == disableAndRetryButton) {
+        QStringList failures;
+        QStringList disabledNames;
+        for (const QString& source : suspectFiles) {
+            const QString destination = source + QStringLiteral(".disabled");
+            if (QFileInfo::exists(destination) || !QFile::rename(source, destination)) {
+                failures << QFileInfo(source).fileName();
+            } else {
+                disabledNames << QFileInfo(source).fileName();
+            }
+        }
+        if (!failures.isEmpty()) {
+            QMessageBox::warning(
+                parent, QObject::tr("Could Not Disable Mod"),
+                QObject::tr("These files could not be disabled: %1")
+                    .arg(failures.join(QStringLiteral(", "))));
+            return;
+        }
+        if (!disabledNames.isEmpty() && server) {
+            QTimer::singleShot(0, server.get(), [server]() { server->start(); });
+        }
+    }
 }
 }
 
@@ -498,10 +673,13 @@ ServerListPage::ServerListPage(QWidget *parent)
     contentLayout->addWidget(m_contentUpdatesTree);
     auto *contentActions = new QHBoxLayout();
     m_checkContentUpdatesButton = new QPushButton(tr("Check for Updates"), contentGroup);
+    m_setupCurseForgeButton = new QPushButton(tr("Set Up CurseForge"), contentGroup);
     m_installContentUpdateButton = new QPushButton(tr("Install Selected Update"), contentGroup);
     m_checkContentUpdatesButton->setObjectName(QStringLiteral("checkContentUpdatesButton"));
+    m_setupCurseForgeButton->setObjectName(QStringLiteral("setupCurseForgeButton"));
     m_installContentUpdateButton->setObjectName(QStringLiteral("installContentUpdateButton"));
     contentActions->addWidget(m_checkContentUpdatesButton);
+    contentActions->addWidget(m_setupCurseForgeButton);
     contentActions->addWidget(m_installContentUpdateButton);
     contentActions->addStretch();
     contentLayout->addLayout(contentActions);
@@ -721,6 +899,14 @@ ServerListPage::ServerListPage(QWidget *parent)
     connect(m_changeMinecraftVersionButton, &QPushButton::clicked, this, &ServerListPage::onChangeMinecraftVersion);
     connect(m_restoreLatestUpdateBackupButton, &QPushButton::clicked, this, &ServerListPage::onRestoreLatestUpdateBackup);
     connect(m_checkContentUpdatesButton, &QPushButton::clicked, this, &ServerListPage::onCheckContentUpdates);
+    connect(m_setupCurseForgeButton, &QPushButton::clicked, this, [this]() {
+        APPLICATION->ShowGlobalSettings(this, QStringLiteral("apis"));
+        updateUI();
+        if (APPLICATION->capabilities() & Application::SupportsFlame) {
+            m_updatesInfoLabel->setText(
+                tr("CurseForge is enabled. Check for updates again to include CurseForge mods."));
+        }
+    });
     connect(m_installContentUpdateButton, &QPushButton::clicked, this, &ServerListPage::onInstallContentUpdate);
     connect(m_refreshPlayersButton, &QPushButton::clicked, this, &ServerListPage::onRefreshPlayers);
     connect(m_whitelistPlayerButton, &QPushButton::clicked, this, &ServerListPage::onWhitelistPlayer);
@@ -1229,7 +1415,7 @@ void ServerListPage::onCreateServer()
 
         QMessageBox::information(this, tr("Server Created"),
                                  tr("Server '%1' has been created.\n"
-                                    "Click 'Start' to download the server jar and launch it.")
+                                    "Click 'Start' to install the server software and launch it.")
                                  .arg(name));
     } else {
         QMessageBox::warning(this, tr("Error"),
@@ -1602,7 +1788,9 @@ void ServerListPage::onBrowseMods()
         const QString provider = download->getProvider() == ModPlatform::ResourceProvider::MODRINTH
             ? QStringLiteral("modrinth")
             : QStringLiteral("curseforge");
-        const QString source = QString("%1:%2").arg(provider, download->getPack()->addonId.toString());
+        const QString source = QString("%1:%2:%3")
+            .arg(provider, download->getPack()->addonId.toString(),
+                 download->getVersion().fileId.toString());
         connect(download.get(), &Task::succeeded, this, [serverId, filename, source]() {
             QSettings().setValue(QString("ServerContentSources/%1/%2").arg(serverId, filename), source);
         });
@@ -2348,32 +2536,74 @@ void ServerListPage::onCheckContentUpdates()
     const QString sourcePrefix = QString("ServerContentSources/%1/").arg(server->id());
     int requests = 0;
     int untracked = 0;
+    int curseForgeNeedsKey = 0;
+    int recoveredTracking = 0;
     for (const QFileInfo &installed : files) {
-        const QString source = settings.value(sourcePrefix + installed.fileName()).toString();
+        QString source = settings.value(sourcePrefix + installed.fileName()).toString();
+        if (source.isEmpty() && APPLICATION->instances()) {
+            for (int instanceIndex = 0;
+                 instanceIndex < APPLICATION->instances()->count(); ++instanceIndex) {
+                MinecraftInstance *instance = APPLICATION->instances()->at(instanceIndex);
+                if (!instance) continue;
+                source = ServerModpackInstaller::contentTrackingSource(
+                    instance->gameRoot(), installed.absoluteFilePath());
+                if (!source.isEmpty()) {
+                    settings.setValue(sourcePrefix + installed.fileName(), source);
+                    ++recoveredTracking;
+                    break;
+                }
+            }
+        }
+        const QString provider = source.section(':', 0, 0).toLower();
+        const QString projectId = source.section(':', 1, 1);
+        const QString installedVersionId = source.section(':', 2, 2);
         auto *item = new QTreeWidgetItem(m_contentUpdatesTree);
         item->setText(0, installed.fileName());
-        item->setText(1, source.isEmpty() ? tr("Not tracked") : source.section(':', 0, 0));
+        item->setText(1, source.isEmpty() ? tr("Not tracked")
+            : provider == QStringLiteral("curseforge") ? tr("CurseForge") : tr("Modrinth"));
         item->setData(0, Qt::UserRole + 1, installed.absoluteFilePath());
         item->setData(0, Qt::UserRole + 2, source);
-        if (!source.startsWith("modrinth:")) {
+        if (source.isEmpty() || projectId.isEmpty()) {
             item->setText(2, source.isEmpty()
                 ? tr("Downloaded before update tracking")
                 : tr("Check from the content browser"));
             ++untracked;
             continue;
         }
+        if (provider == QStringLiteral("curseforge")
+            && !(APPLICATION->capabilities() & Application::SupportsFlame)) {
+            item->setText(2, tr("CurseForge API key required — use Set Up CurseForge"));
+            ++curseForgeNeedsKey;
+            continue;
+        }
+        if (provider != QStringLiteral("modrinth")
+            && provider != QStringLiteral("curseforge")) {
+            item->setText(2, tr("Unknown update provider"));
+            ++untracked;
+            continue;
+        }
 
-        const QString projectId = source.mid(QString("modrinth:").size());
-        QUrl url(QString("https://api.modrinth.com/v2/project/%1/version").arg(projectId));
+        QUrl url(provider == QStringLiteral("curseforge")
+            ? QString(BuildConfig.FLAME_BASE_URL + "/mods/%1/files").arg(projectId)
+            : QString("https://api.modrinth.com/v2/project/%1/version").arg(projectId));
         QUrlQuery query;
-        query.addQueryItem("loaders", QString("[\"%1\"]").arg(loader));
-        query.addQueryItem("game_versions", QString("[\"%1\"]").arg(server->version()));
+        if (provider == QStringLiteral("curseforge")) {
+            query.addQueryItem(QStringLiteral("pageSize"), QStringLiteral("10000"));
+            query.addQueryItem(QStringLiteral("gameVersion"), server->version());
+        } else {
+            query.addQueryItem("loaders", QString("[\"%1\"]").arg(loader));
+            query.addQueryItem("game_versions", QString("[\"%1\"]").arg(server->version()));
+        }
         url.setQuery(query);
         item->setText(2, tr("Checking…"));
         ++requests;
-        QNetworkReply *reply = m_updatesNetwork->get(updateRequest(url));
+        QNetworkReply *reply = m_updatesNetwork->get(
+            provider == QStringLiteral("curseforge")
+                ? curseForgeUpdateRequest(url) : updateRequest(url));
         const QString installedName = installed.fileName();
-        connect(reply, &QNetworkReply::finished, this, [this, reply, source, installedName]() {
+        connect(reply, &QNetworkReply::finished, this,
+                [this, reply, source, provider, projectId, installedVersionId,
+                 installedName, loader]() {
             QTreeWidgetItem *item = nullptr;
             for (int row = 0; row < m_contentUpdatesTree->topLevelItemCount(); ++row) {
                 QTreeWidgetItem *candidate = m_contentUpdatesTree->topLevelItem(row);
@@ -2384,35 +2614,81 @@ void ServerListPage::onCheckContentUpdates()
             }
             if (!item) { reply->deleteLater(); return; }
             if (reply->error() != QNetworkReply::NoError) {
-                item->setText(2, tr("Could not check"));
+                item->setText(2, tr("Could not check — %1").arg(reply->errorString()));
                 reply->deleteLater();
                 return;
             }
             QString metadataError;
-            const ServerContentUpdateCandidate update =
-                ServerContentUpdater::parseModrinthVersionResponse(
-                    reply->readAll(), installedName, &metadataError);
+            ServerContentUpdateCandidate update = provider == QStringLiteral("curseforge")
+                ? ServerContentUpdater::parseCurseForgeFilesResponse(
+                      reply->readAll(), installedName, loader, &metadataError)
+                : ServerContentUpdater::parseModrinthVersionResponse(
+                      reply->readAll(), installedName, &metadataError);
+            if (!installedVersionId.isEmpty() && update.versionId == installedVersionId) {
+                update.available = false;
+                update.upToDate = true;
+            }
             if (!metadataError.isEmpty()) {
                 item->setText(2, tr("Could not check — %1").arg(metadataError));
-            } else if (!update.available && !update.upToDate) {
-                item->setText(2, tr("No compatible update"));
-            } else if (update.upToDate) {
-                item->setText(2, tr("Up to date"));
+            } else if (provider == QStringLiteral("curseforge") && update.available
+                       && update.url.isEmpty()) {
+                item->setText(2, tr("Resolving CurseForge download…"));
+                const QUrl downloadUrlEndpoint =
+                    FlameAPI::fileDownloadUrlEndpoint(projectId, update.providerFileId);
+                QNetworkReply *downloadReply = m_updatesNetwork->get(
+                    curseForgeUpdateRequest(downloadUrlEndpoint));
+                connect(downloadReply, &QNetworkReply::finished, this,
+                        [this, downloadReply, source, installedName, update]() mutable {
+                    QTreeWidgetItem *currentItem = nullptr;
+                    for (int row = 0; row < m_contentUpdatesTree->topLevelItemCount(); ++row) {
+                        QTreeWidgetItem *candidate = m_contentUpdatesTree->topLevelItem(row);
+                        if (candidate->text(0) == installedName
+                            && candidate->data(0, Qt::UserRole + 2).toString() == source) {
+                            currentItem = candidate;
+                            break;
+                        }
+                    }
+                    if (!currentItem) {
+                        downloadReply->deleteLater();
+                        return;
+                    }
+                    if (downloadReply->error() != QNetworkReply::NoError) {
+                        currentItem->setText(
+                            2, tr("CurseForge download unavailable — %1")
+                                   .arg(downloadReply->errorString()));
+                    } else {
+                        QString urlError;
+                        update.url = FlameAPI::loadFileDownloadUrl(
+                            downloadReply->readAll(), &urlError);
+                        if (update.url.isEmpty()) {
+                            currentItem->setText(
+                                2, tr("CurseForge download unavailable — %1").arg(urlError));
+                        } else {
+                            showContentUpdate(currentItem, update);
+                        }
+                    }
+                    downloadReply->deleteLater();
+                    updateUI();
+                });
             } else {
-                item->setText(2, tr("Update available: %1").arg(update.versionNumber));
-                item->setData(0, Qt::UserRole, update.url.toString());
-                item->setData(0, Qt::UserRole + 3, update.fileName);
-                item->setData(0, Qt::UserRole + 4, static_cast<int>(update.hashAlgorithm));
-                item->setData(0, Qt::UserRole + 5, update.expectedHash);
-                item->setData(0, Qt::UserRole + 6, update.versionId);
+                showContentUpdate(item, update);
             }
             reply->deleteLater();
             updateUI();
         });
     }
-    m_updatesInfoLabel->setText(requests
-        ? tr("Checking %1 tracked Modrinth file(s). %2 file(s) need manual source selection.").arg(requests).arg(untracked)
-        : tr("No tracked Modrinth files found. Download content from the Mods or Plugins tab once to enable update checks."));
+    if (requests) {
+        m_updatesInfoLabel->setText(
+            tr("Checking %1 tracked file(s) from Modrinth and CurseForge. Recovered tracking for %2 old file(s); %3 file(s) still need manual source selection; %4 CurseForge file(s) need an API key.")
+                .arg(requests).arg(recoveredTracking).arg(untracked)
+                .arg(curseForgeNeedsKey));
+    } else if (curseForgeNeedsKey) {
+        m_updatesInfoLabel->setText(
+            tr("CurseForge updates need an API key. Use Set Up CurseForge, save a valid key in Services, then check again."));
+    } else {
+        m_updatesInfoLabel->setText(
+            tr("No tracked files were found. Mods imported by new modpack servers and files downloaded from the Mods or Plugins tab are tracked automatically."));
+    }
     updateUI();
 }
 
@@ -2470,8 +2746,10 @@ void ServerListPage::onInstallContentUpdate()
         if (result.success) {
             QSettings settings;
             const QString prefix = QString("ServerContentSources/%1/").arg(serverId);
+            const QString updatedSource = QStringLiteral("%1:%2")
+                .arg(source.section(':', 0, 1), versionId);
             settings.remove(prefix + QFileInfo(oldPath).fileName());
-            settings.setValue(prefix + QFileInfo(result.destinationPath).fileName(), source);
+            settings.setValue(prefix + QFileInfo(result.destinationPath).fileName(), updatedSource);
             const QString metadataPrefix = QString("ServerContentMetadata/%1/%2/")
                 .arg(serverId, QFileInfo(result.destinationPath).fileName());
             settings.setValue(metadataPrefix + "versionId", versionId);
@@ -2878,11 +3156,18 @@ void ServerListPage::onServerSelectionChanged()
                 connect(m_currentConnectedServer.get(), &ServerInstance::serverCrashed, this,
                         [this](const QString &message, const QString &details) {
                     if (m_selectedServerId.isEmpty()) return;
+                    const auto failedServer = m_currentConnectedServer;
+                    const QString failedServerId = m_selectedServerId;
                     QSettings settings;
                     const QString prefix = QString("ServerDiagnostics/%1/").arg(m_selectedServerId);
                     settings.setValue(prefix + "lastCrash", crashSummary(message, details));
                     settings.setValue(prefix + "details", structuredCrashDetails(m_currentConnectedServer, message, details));
                     refreshDiagnostics();
+                    QTimer::singleShot(0, this,
+                                       [this, failedServer, failedServerId, message, details]() {
+                        if (!failedServer || m_selectedServerId != failedServerId) return;
+                        showServerFailureDialog(this, failedServer, message, details);
+                    });
                 });
                 connect(m_currentConnectedServer.get(), &ServerInstance::playerActivity, this,
                         [this](const QString &player, bool joined) {
@@ -2909,7 +3194,7 @@ void ServerListPage::onServerSelectionChanged()
         m_contentUpdatesTree->clear();
         m_updatesInfoLabel->setText(m_selectedServerId.isEmpty()
             ? tr("Select a server to check for updates.")
-            : tr("Check installed Modrinth content for compatible updates. Files downloaded before update tracking can still be managed from the Mods or Plugins tab."));
+            : tr("Check tracked Modrinth and CurseForge content for compatible updates. New modpack servers import mod tracking automatically."));
     }
 
     for (int i = 0; i < ui->serverList->count(); ++i) {
@@ -3047,6 +3332,9 @@ void ServerListPage::updateUI()
         }
         m_restoreLatestUpdateBackupButton->setEnabled(hasRollbackBackup && canEditFiles);
         m_checkContentUpdatesButton->setEnabled(hasSelection && canEditFiles && supportsContentBrowser);
+        m_setupCurseForgeButton->setVisible(
+            !(APPLICATION->capabilities() & Application::SupportsFlame));
+        m_setupCurseForgeButton->setEnabled(hasSelection && canEditFiles && supportsContentBrowser);
         const bool hasContentUpdate = m_contentUpdatesTree->currentItem()
             && !m_contentUpdatesTree->currentItem()->data(0, Qt::UserRole).toString().isEmpty();
         if (m_activeContentUpdater) {

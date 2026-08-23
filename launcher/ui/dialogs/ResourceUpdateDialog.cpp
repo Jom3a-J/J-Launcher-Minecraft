@@ -407,7 +407,14 @@ void ResourceUpdateDialog::onMetadataEnsured(Resource* resource)
             m_modrinthToUpdate.push_back(resource);
             break;
         case ModPlatform::ResourceProvider::FLAME:
-            m_flameToUpdate.push_back(resource);
+            if (APPLICATION->capabilities() & Application::SupportsFlame) {
+                m_flameToUpdate.push_back(resource);
+            } else {
+                m_failedMetadata.append({
+                    resource,
+                    tr("CurseForge updates need an API key. Add one in Settings → Services, then try again.")
+                });
+            }
             break;
     }
 }
