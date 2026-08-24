@@ -1,8 +1,9 @@
-name: Prepare Windows stable release draft
+name: Prepare audited Windows release draft
 
-# This workflow can run only when a maintainer starts it manually. It builds an
-# existing annotated tag and can create a GitHub draft, but it cannot publish a
-# release and never runs because a branch or tag was pushed.
+# The stable path can run only when a maintainer starts it manually. The beta
+# entry workflow calls this same audited implementation with release_stage=beta.
+# Both paths require an existing annotated tag, can create only a GitHub draft,
+# cannot publish a release, and never run because a branch or tag was pushed.
 on:
   workflow_dispatch:
     inputs:
@@ -15,11 +16,25 @@ on:
         required: true
         default: false
         type: boolean
+  workflow_call:
+    inputs:
+      tag:
+        description: Existing annotated release tag
+        required: true
+        type: string
+      create_draft:
+        description: Create a GitHub draft release after the build passes
+        required: true
+        type: boolean
+      release_stage:
+        description: Audited release stage selected by the calling workflow
+        required: true
+        type: string
 
 permissions: {}
 
 concurrency:
-  group: stable-release-draft-${{ inputs.tag }}
+  group: ${{ inputs.release_stage || 'stable' }}-release-draft-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
@@ -31,6 +46,7 @@ jobs:
       contents: read
     env:
       RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_STAGE: ${{ inputs.release_stage || 'stable' }}
       QT_VERSION: 6.10.2
       QT_ARCH: win64_msvc2022_64
       QT_ROOT: C:\Qt
@@ -51,12 +67,28 @@ jobs:
         shell: pwsh
         run: |
           if ($env:GITHUB_REPOSITORY -ne 'Jom3a-J/J-Launcher-Minecraft') {
-              throw "Stable drafts may run only in the canonical repository."
+              throw "Release drafts may run only in the canonical repository."
           }
-          if ($env:RELEASE_TAG -notmatch '^jlauncher-(\d+\.\d+\.\d+)$') {
-              throw "Release tag must use the jlauncher-X.Y.Z format."
+          if ($env:RELEASE_STAGE -notin @('beta', 'stable')) {
+              throw "Unsupported release stage: $env:RELEASE_STAGE"
           }
-          $releaseVersion = $Matches[1]
+          $tagPattern = if ($env:RELEASE_STAGE -eq 'beta') {
+              '^jlauncher-(\d+\.\d+\.\d+)-beta\.(\d+)$'
+          }
+          else {
+              '^jlauncher-(\d+\.\d+\.\d+)$'
+          }
+          if ($env:RELEASE_TAG -notmatch $tagPattern) {
+              throw "Release tag $env:RELEASE_TAG does not match stage $env:RELEASE_STAGE."
+          }
+          $productVersion = $Matches[1]
+          $versionChannel = if ($env:RELEASE_STAGE -eq 'beta') {
+              "beta.$($Matches[2])"
+          }
+          else {
+              'stable'
+          }
+          $releaseVersion = $env:RELEASE_TAG -replace '^jlauncher-', ''
 
           $tagReference = "refs/tags/$env:RELEASE_TAG"
           $tagType = (& git cat-file -t $tagReference).Trim()
@@ -75,7 +107,7 @@ jobs:
           $minor = [Regex]::Match($cmake, 'set\(Launcher_VERSION_MINOR\s+(\d+)\)').Groups[1].Value
           $patch = [Regex]::Match($cmake, 'set\(Launcher_VERSION_PATCH\s+(\d+)\)').Groups[1].Value
           $configuredVersion = "$major.$minor.$patch"
-          if ($configuredVersion -ne $releaseVersion) {
+          if ($configuredVersion -ne $productVersion) {
               throw "Configured version $configuredVersion does not match tag $env:RELEASE_TAG."
           }
 
@@ -100,7 +132,9 @@ jobs:
           }
 
           "commit=$head" >> $env:GITHUB_OUTPUT
-          "version=$configuredVersion" >> $env:GITHUB_OUTPUT
+          "version=$releaseVersion" >> $env:GITHUB_OUTPUT
+          "product_version=$configuredVersion" >> $env:GITHUB_OUTPUT
+          "version_channel=$versionChannel" >> $env:GITHUB_OUTPUT
 
       - name: Set up Java 17
         uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
@@ -171,6 +205,7 @@ jobs:
               -CMakeToolchainFile .\cmake\vcpkg\scripts\buildsystems\vcpkg.cmake `
               -Generator 'Ninja Multi-Config' `
               -ExpectedTag $env:RELEASE_TAG `
+              -ReleaseStage $env:RELEASE_STAGE `
               -ParallelJobs 2
 
       - name: Check out release tooling from the workflow revision
@@ -261,12 +296,16 @@ jobs:
           $report = Get-Content -LiteralPath $preflightReport -Raw | ConvertFrom-Json
           if ($report.sourceDirty -or -not $report.exactTagVerified -or
               $report.expectedTag -ne $env:RELEASE_TAG -or
+              $report.releaseStage -ne $env:RELEASE_STAGE -or
+              $report.releaseVersion -ne '${{ steps.source.outputs.version }}' -or
+              $report.versionChannel -ne '${{ steps.source.outputs.version_channel }}' -or
               -not $report.hostedBuild -or -not $report.hostedProvenanceUrl -or
               -not $report.buildExecuted -or -not $report.testsExecuted -or
               -not $report.installerPayloadAudited -or
               -not $report.signatureStateMatchesPolicy -or
               $report.launcherSignatureStatus -ne 'NotSigned' -or
               $report.installerSignatureStatus -ne 'NotSigned' -or
+              $report.msvcRedistributableSignatureStatus -ne 'Valid' -or
               -not $report.readyForExternalGates -or $report.publicationReady) {
               throw 'Phase 9 preflight report does not satisfy hosted candidate policy.'
           }
@@ -307,11 +346,13 @@ jobs:
         shell: pwsh
         run: |
           @"
-          ## Windows x64 release candidate
+          ## Windows x64 $env:RELEASE_STAGE release candidate
 
           - Tag: ``$env:RELEASE_TAG``
           - Commit: ``${{ steps.source.outputs.commit }}``
-          - Version: ``${{ steps.source.outputs.version }}``
+          - Release version: ``${{ steps.source.outputs.version }}``
+          - Product version: ``${{ steps.source.outputs.product_version }}``
+          - Version channel: ``${{ steps.source.outputs.version_channel }}``
           - Signing: intentionally unsigned; expected Authenticode status is ``NotSigned``
           - Publication: not performed by this job
           "@ >> $env:GITHUB_STEP_SUMMARY
@@ -327,6 +368,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_STAGE: ${{ inputs.release_stage || 'stable' }}
 
     steps:
       - name: Check out release documentation at the exact tag
@@ -445,10 +487,17 @@ jobs:
               0,
               $sourceArchive[0].Name.Length - $archiveSuffix.Length
           )
-          if ($env:RELEASE_TAG -notmatch '^jlauncher-(\d+\.\d+\.\d+)$') {
-              throw 'Release tag does not use the required product-scoped format.'
+          $tagPattern = if ($env:RELEASE_STAGE -eq 'beta') {
+              '^jlauncher-\d+\.\d+\.\d+-beta\.\d+$'
           }
-          $expectedSourceRootName = "JLauncher-$($Matches[1])-Source"
+          else {
+              '^jlauncher-\d+\.\d+\.\d+$'
+          }
+          if ($env:RELEASE_TAG -notmatch $tagPattern) {
+              throw 'Release tag does not match the selected release stage.'
+          }
+          $releaseVersion = $env:RELEASE_TAG -replace '^jlauncher-', ''
+          $expectedSourceRootName = "JLauncher-$releaseVersion-Source"
           if ($sourceRootName -ne $expectedSourceRootName) {
               throw "Exact-source archive has an invalid root name: $sourceRootName"
           }
@@ -583,13 +632,28 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $tagType -ne 'tag' -or -not $commit) {
               throw 'Unable to revalidate the annotated release tag.'
           }
-          if ($env:RELEASE_TAG -notmatch '^jlauncher-(\d+\.\d+\.\d+)$') {
-              throw 'Release tag does not use the required product-scoped format.'
+          $tagPattern = if ($env:RELEASE_STAGE -eq 'beta') {
+              '^jlauncher-\d+\.\d+\.\d+-beta\.\d+$'
           }
-          $releaseVersion = $Matches[1]
+          else {
+              '^jlauncher-\d+\.\d+\.\d+$'
+          }
+          if ($env:RELEASE_TAG -notmatch $tagPattern) {
+              throw 'Release tag does not match the selected release stage.'
+          }
+          $releaseVersion = $env:RELEASE_TAG -replace '^jlauncher-', ''
 
           $provenanceUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
-          $body = Get-Content -LiteralPath RELEASE_BODY.md -Raw
+          $releaseBodyFile = if ($env:RELEASE_STAGE -eq 'beta') {
+              'BETA_RELEASE_BODY.md'
+          }
+          else {
+              'RELEASE_BODY.md'
+          }
+          if (-not (Test-Path -LiteralPath $releaseBodyFile -PathType Leaf)) {
+              throw "Release body template is missing: $releaseBodyFile"
+          }
+          $body = Get-Content -LiteralPath $releaseBodyFile -Raw
           $body = $body.Replace('{{VERSION}}', $releaseVersion)
           $body = $body.Replace('{{TAG}}', $env:RELEASE_TAG)
           $body = $body.Replace('{{COMMIT}}', $commit)
@@ -623,6 +687,9 @@ jobs:
               '--title', "J Launcher ${{ steps.release.outputs.version }}",
               '--notes-file', 'release-body.generated.md'
           )
+          if ($env:RELEASE_STAGE -eq 'beta') {
+              $arguments += '--prerelease'
+          }
           $arguments += $assets
           & gh @arguments
           if ($LASTEXITCODE -ne 0) {
@@ -630,8 +697,10 @@ jobs:
           }
 
           $release = & gh release view $env:RELEASE_TAG --repo $env:GITHUB_REPOSITORY `
-              --json isDraft,tagName,url | ConvertFrom-Json
+              --json isDraft,isPrerelease,tagName,url | ConvertFrom-Json
+          $expectedPrerelease = $env:RELEASE_STAGE -eq 'beta'
           if ($LASTEXITCODE -ne 0 -or -not $release.isDraft -or
+              $release.isPrerelease -ne $expectedPrerelease -or
               $release.tagName -ne $env:RELEASE_TAG) {
               throw 'Created release did not verify as the expected draft.'
           }
@@ -642,5 +711,7 @@ jobs:
           - Draft URL: $($release.url)
           - Tag: ``$($release.tagName)``
           - Commit: ``${{ steps.release.outputs.commit }}``
+          - Stage: ``$env:RELEASE_STAGE``
+          - Prerelease: ``$($release.isPrerelease)``
           - The workflow did **not** publish the release.
           "@ >> $env:GITHUB_STEP_SUMMARY

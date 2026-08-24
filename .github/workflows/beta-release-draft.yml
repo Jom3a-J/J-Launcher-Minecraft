@@ -1,0 +1,31 @@
+name: Prepare Windows beta release draft
+
+# This workflow is manual and draft-only. It requires an existing annotated
+# jlauncher-X.Y.Z-beta.N tag, builds that exact source, and delegates all shared
+# Windows packaging, provenance, checksum, and release safeguards to the audited
+# release workflow. A push can never trigger it and it cannot publish a release.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing annotated beta tag, for example jlauncher-0.1.1-beta.1
+        required: true
+        type: string
+      create_draft:
+        description: Create a GitHub draft prerelease after the build passes
+        required: true
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  beta-release:
+    name: Build and prepare audited beta
+    permissions:
+      contents: write
+    uses: ./.github/workflows/stable-release-draft.yml
+    with:
+      tag: ${{ inputs.tag }}
+      create_draft: ${{ inputs.create_draft }}
+      release_stage: beta

@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-Builds, tests, stages, and audits a local Windows x64 stable preflight package.
+Builds, tests, stages, and audits a local Windows x64 release preflight package.
 
 .DESCRIPTION
 This script creates local qualification evidence only. It deliberately does
-not tag, sign, publish, upload, or claim that an artifact is stable. A stable
-release still requires a clean tagged source tree, hosted provenance,
+not tag, sign, publish, upload, or claim that an artifact is ready. A release
+still requires a clean tagged source tree, hosted provenance,
 post-reboot cold-start evidence, fresh-machine testing, accurate disclosure of
 its unsigned status, and explicit maintainer approval.
 #>
@@ -23,8 +23,11 @@ param(
     [ValidateSet('Ninja Multi-Config', 'Visual Studio 17 2022')]
     [string] $Generator = 'Ninja Multi-Config',
 
-    [ValidatePattern('^jlauncher-\d+\.\d+\.\d+$')]
+    [ValidatePattern('^jlauncher-\d+\.\d+\.\d+(?:-beta\.\d+)?$')]
     [string] $ExpectedTag,
+
+    [ValidateSet('beta', 'stable')]
+    [string] $ReleaseStage = 'stable',
 
     [ValidateRange(1, 16)]
     [int] $ParallelJobs = 2,
@@ -223,7 +226,25 @@ if ($tagsAtHead.Count -gt 0) {
 }
 
 $exactTagVerified = $false
+$expectedProductVersion = $null
+$expectedVersionChannel = $ReleaseStage
+$tagReleaseVersion = $null
 if ($ExpectedTag) {
+    $expectedTagPattern = if ($ReleaseStage -eq 'beta') {
+        '^jlauncher-(\d+\.\d+\.\d+)-beta\.(\d+)$'
+    }
+    else {
+        '^jlauncher-(\d+\.\d+\.\d+)$'
+    }
+    if ($ExpectedTag -notmatch $expectedTagPattern) {
+        throw "Expected tag $ExpectedTag does not match release stage $ReleaseStage."
+    }
+    $expectedProductVersion = $Matches[1]
+    if ($ReleaseStage -eq 'beta') {
+        $expectedVersionChannel = "beta.$($Matches[2])"
+    }
+    $tagReleaseVersion = $ExpectedTag -replace '^jlauncher-', ''
+
     & git -C $repository show-ref --verify --quiet "refs/tags/$ExpectedTag"
     if ($LASTEXITCODE -ne 0) {
         throw "Expected tag does not exist: $ExpectedTag"
@@ -254,7 +275,8 @@ if (-not $SkipBuild) {
         '-B', $build,
         '-G', $Generator,
         '-DBUILD_TESTING=ON',
-        '-DLauncher_RELEASE_STAGE=stable',
+        "-DLauncher_RELEASE_STAGE=$ReleaseStage",
+        "-DLauncher_VERSION_CHANNEL=$expectedVersionChannel",
         '-DLauncher_BUILD_PLATFORM=official',
         '-DLauncher_BUILD_ARTIFACT=Windows-MSVC-x64',
         '-DLauncher_ENABLE_JAVA_DOWNLOADER=ON',
@@ -285,10 +307,14 @@ if (-not (Test-Path -LiteralPath $cachePath -PathType Leaf)) {
 }
 
 $releaseStage = Get-CMakeCacheValue -CachePath $cachePath -Name 'Launcher_RELEASE_STAGE'
+$versionChannel = Get-CMakeCacheValue -CachePath $cachePath -Name 'Launcher_VERSION_CHANNEL'
 $buildPlatform = Get-CMakeCacheValue -CachePath $cachePath -Name 'Launcher_BUILD_PLATFORM'
 $ltoEnabled = Get-CMakeCacheValue -CachePath $cachePath -Name 'ENABLE_LTO'
-if ($releaseStage -ne 'stable') {
-    throw "The build cache is not configured for the stable channel: $releaseStage"
+if ($releaseStage -ne $ReleaseStage) {
+    throw "The build cache release stage is $releaseStage; expected $ReleaseStage."
+}
+if ($versionChannel -ne $expectedVersionChannel) {
+    throw "The build cache version channel is $versionChannel; expected $expectedVersionChannel."
 }
 if ($buildPlatform -ne 'official') {
     throw "The build cache is not configured for the official platform: $buildPlatform"
@@ -349,6 +375,13 @@ $missingFiles = @($requiredFiles | Where-Object {
 if ($missingFiles.Count -gt 0) {
     throw "Portable package is missing required files: $($missingFiles -join ', ')"
 }
+$redistributablePath = Join-Path $portable 'vc_redist.x64.exe'
+$redistributableSignature = [string](
+    Get-AuthenticodeSignature -LiteralPath $redistributablePath
+).Status
+if ($redistributableSignature -ne 'Valid') {
+    throw "Microsoft Visual C++ redistributable signature is not valid: $redistributableSignature"
+}
 
 $forbiddenNames = @(
     'accounts.json',
@@ -398,12 +431,12 @@ if (-not $version) {
     throw 'Launcher product version is empty.'
 }
 if ($ExpectedTag) {
-    $expectedVersion = $ExpectedTag -replace '^jlauncher-', ''
-    if ($version -ne $expectedVersion) {
+    if ($version -ne $expectedProductVersion) {
         throw "Launcher product version $version does not match expected tag $ExpectedTag."
     }
 }
-$portableZipName = "JLauncher-Windows-x64-Portable-$version.zip"
+$releaseVersion = if ($tagReleaseVersion) { $tagReleaseVersion } else { $version }
+$portableZipName = "JLauncher-Windows-x64-Portable-$releaseVersion.zip"
 $portableZip = Join-Path $output $portableZipName
 Compress-Archive -Path (Join-Path $portable '*') -DestinationPath $portableZip -CompressionLevel Optimal
 
@@ -444,7 +477,7 @@ if ($makensisPath) {
     if (-not (Test-Path -LiteralPath $generatedInstaller -PathType Leaf)) {
         throw 'NSIS completed but did not produce JLauncher-Setup.exe.'
     }
-    $installerName = "JLauncher-Windows-x64-Setup-$version.exe"
+    $installerName = "JLauncher-Windows-x64-Setup-$releaseVersion.exe"
     $installerPath = Join-Path $output $installerName
     Move-Item -LiteralPath $generatedInstaller -Destination $installerPath
     $installerHash = (Get-FileHash -LiteralPath $installerPath -Algorithm SHA256).Hash
@@ -497,7 +530,8 @@ if ($makensisPath) {
         'jars\JavaCheck.jar',
         'jars\NewLaunch.jar',
         'jars\NewLaunchLegacy.jar',
-        'uninstall.exe'
+        'uninstall.exe',
+        'vc_redist.x64.exe'
     )
     $missingInstallerFiles = @($requiredInstallerFiles | Where-Object {
         $installerPaths -notcontains $_
@@ -566,12 +600,14 @@ $report = [ordered]@{
     runnerImageVersion = $env:ImageVersion
     buildDirectory = $build
     releaseStage = $releaseStage
+    versionChannel = $versionChannel
     buildPlatform = $buildPlatform
     ltoEnabled = $ltoEnabled
     parallelJobs = $ParallelJobs
     buildExecuted = (-not $SkipBuild)
     testsExecuted = (-not $SkipTests)
     productVersion = $version
+    releaseVersion = $releaseVersion
     peMachine = $machine
     portableFileCount = $manifest.Count + 1
     portableZip = $portableZipName
@@ -580,8 +616,10 @@ $report = [ordered]@{
     installerSha256 = $installerHash
     launcherSignatureStatus = $launcherSignature
     installerSignatureStatus = $installerSignature
+    msvcRedistributableSignatureStatus = $redistributableSignature
     expectedReleaseSignatureStatus = 'NotSigned'
-    unsignedStableReleaseAccepted = $true
+    unsignedStableReleaseAccepted = ($ReleaseStage -eq 'stable')
+    unsignedBetaReleaseAccepted = ($ReleaseStage -eq 'beta')
     signatureStateMatchesPolicy = $signatureStateMatchesPolicy
     installerPayloadAudited = $installerPayloadAudited
     profileStateAbsent = $true
@@ -595,4 +633,4 @@ $reportPath = Join-Path $output 'phase9-preflight-report.json'
 $report | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $reportPath -Encoding utf8
 $report | ConvertTo-Json -Depth 5
 
-Write-Warning 'Local preflight passed, but the external Phase 9 gates remain open. This output is not a stable release.'
+Write-Warning "Local $ReleaseStage preflight passed, but the external Phase 9 gates remain open. This output is not a published release."

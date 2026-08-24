@@ -233,7 +233,7 @@ set(Launcher_SUBREDDIT_URL "" CACHE STRING "URL for the J Launcher subreddit. Di
 # This is deliberately separate from the Git branch/channel. It tells users
 # whether an artifact is suitable for development, beta feedback, or stable use.
 set(Launcher_RELEASE_STAGE "development" CACHE STRING "J Launcher release stage: development, beta, or stable")
-set(Launcher_VERSION_CHANNEL "${Launcher_RELEASE_STAGE}" CACHE STRING "User-facing J Launcher build channel" FORCE)
+set(Launcher_VERSION_CHANNEL "${Launcher_RELEASE_STAGE}" CACHE STRING "User-facing J Launcher build channel, including an optional prerelease serial")
 
 # Builds
 set(Launcher_QT_VERSION_MAJOR "6" CACHE STRING "Major Qt version to build against")
