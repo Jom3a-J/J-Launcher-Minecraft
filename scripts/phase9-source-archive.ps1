@@ -16,7 +16,7 @@ param(
     [string] $Repository = (Join-Path $PSScriptRoot '..'),
 
     [Parameter(Mandatory = $true)]
-    [ValidatePattern('^jlauncher-\d+\.\d+\.\d+$')]
+    [ValidatePattern('^jlauncher-\d+\.\d+\.\d+(?:-beta\.\d+)?$')]
     [string] $ExpectedTag,
 
     [Parameter(Mandatory = $true)]
