@@ -408,6 +408,146 @@ bool jarDeclaresClientOnly(const QString &path)
     return false;
 }
 
+struct FabricDependencyRequirement {
+    QString modId;
+    QString modName;
+    QString dependencyId;
+};
+
+bool collectFabricMetadata(const QString &jarPath, const QString &temporaryRoot,
+                           int depth, int *nestedJarIndex,
+                           QSet<QString> *providedIds,
+                           QList<FabricDependencyRequirement> *requirements,
+                           QString *error)
+{
+    if (depth > 8) {
+        if (error) {
+            *error = QObject::tr(
+                "The Fabric pack contains more than eight nested mod levels and cannot be validated safely.");
+        }
+        return false;
+    }
+    MMCZip::ArchiveReader archive(jarPath);
+    const auto metadataFile = archive.goToFile(QStringLiteral("fabric.mod.json"));
+    if (!metadataFile) return true;
+
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(
+        metadataFile->readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        return true;
+    }
+    const QJsonObject metadata = document.object();
+    const QString modId = metadata.value(QStringLiteral("id"))
+                              .toString().trimmed().toLower();
+    if (modId.isEmpty()) return true;
+
+    providedIds->insert(modId);
+    for (const QJsonValue &provided :
+         metadata.value(QStringLiteral("provides")).toArray()) {
+        const QString providedId = provided.toString().trimmed().toLower();
+        if (!providedId.isEmpty()) providedIds->insert(providedId);
+    }
+
+    const QString modName = metadata.value(QStringLiteral("name"))
+                                .toString(modId).trimmed();
+    const QJsonObject dependencies =
+        metadata.value(QStringLiteral("depends")).toObject();
+    for (auto it = dependencies.constBegin(); it != dependencies.constEnd(); ++it) {
+        const QString dependencyId = it.key().trimmed().toLower();
+        if (dependencyId.isEmpty() || dependencyId == QStringLiteral("fabricloader")
+            || dependencyId == QStringLiteral("minecraft")
+            || dependencyId == QStringLiteral("java")) {
+            continue;
+        }
+        requirements->append({ modId, modName, dependencyId });
+    }
+
+    for (const QJsonValue &nestedValue :
+         metadata.value(QStringLiteral("jars")).toArray()) {
+        const QString nestedPath = nestedValue.toObject()
+                                       .value(QStringLiteral("file"))
+                                       .toString().trimmed();
+        if (!isSafeRelativePath(nestedPath)) continue;
+        MMCZip::ArchiveReader nestedSource(jarPath);
+        const auto nestedFile = nestedSource.goToFile(nestedPath);
+        if (!nestedFile) {
+            if (error) {
+                *error = QObject::tr(
+                             "Fabric mod \"%1\" declares a bundled dependency that is missing: %2")
+                             .arg(modName, nestedPath);
+            }
+            return false;
+        }
+        const QString extractedPath = QDir(temporaryRoot).filePath(
+            QStringLiteral("nested-%1.jar").arg((*nestedJarIndex)++));
+        QFile extracted(extractedPath);
+        const QByteArray contents = nestedFile->readAll();
+        if (!extracted.open(QIODevice::WriteOnly)
+            || extracted.write(contents) != contents.size()) {
+            if (error) {
+                *error = QObject::tr(
+                    "Could not inspect a bundled Fabric dependency safely.");
+            }
+            return false;
+        }
+        extracted.close();
+        if (!collectFabricMetadata(extractedPath, temporaryRoot, depth + 1,
+                                   nestedJarIndex, providedIds, requirements,
+                                   error)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool validateFabricDependencyClosure(const QString &serverRoot, QString *error)
+{
+    QSet<QString> providedIds{
+        QStringLiteral("fabricloader"), QStringLiteral("minecraft"),
+        QStringLiteral("java")
+    };
+    QList<FabricDependencyRequirement> requirements;
+    QTemporaryDir nestedJars;
+    if (!nestedJars.isValid()) {
+        if (error) {
+            *error = QObject::tr(
+                "Could not create temporary storage for Fabric dependency validation.");
+        }
+        return false;
+    }
+    int nestedJarIndex = 0;
+    const QDir modsDirectory(QDir(serverRoot).filePath(QStringLiteral("mods")));
+    for (const QFileInfo &jar : modsDirectory.entryInfoList(
+             QStringList() << QStringLiteral("*.jar"), QDir::Files)) {
+        if (!collectFabricMetadata(jar.absoluteFilePath(), nestedJars.path(), 0,
+                                   &nestedJarIndex, &providedIds, &requirements,
+                                   error)) {
+            return false;
+        }
+    }
+
+    std::sort(requirements.begin(), requirements.end(),
+              [](const auto &left, const auto &right) {
+                  if (left.modId != right.modId) return left.modId < right.modId;
+                  return left.dependencyId < right.dependencyId;
+              });
+    for (const auto &requirement : requirements) {
+        if (providedIds.contains(requirement.dependencyId)) {
+            continue;
+        }
+        if (error) {
+            *error = QObject::tr(
+                         "The pack does not contain a complete Fabric server. "
+                         "Mod \"%1\" (%2) requires \"%3\", but that dependency is missing.")
+                         .arg(requirement.modName, requirement.modId,
+                              requirement.dependencyId);
+        }
+        return false;
+    }
+    return true;
+}
+
 void excludeClientOnlyMod(const QString &filename, QSet<QString> *excludedPaths,
                           QStringList *skippedClientFiles)
 {
@@ -842,6 +982,8 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
     const auto compatibility = evaluateServerPack(
         instanceRoot, profile.minecraftVersion, profile.loaderType,
         profile.loaderVersion);
+    result.provider = compatibility.provider;
+    result.hasDedicatedServerPack = compatibility.hasDedicatedServerPack;
     if (compatibility.isIncompatible()) {
         result.error = serverPackCompatibilityDescription(compatibility);
         return result;
@@ -875,6 +1017,16 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
                            staging.path(), &result.skippedClientFiles, &result.error)) {
         if (result.error.isEmpty()) {
             result.error = QObject::tr("Could not prepare the modpack for the server.");
+        }
+        return result;
+    }
+    if (profile.loaderType == QStringLiteral("fabric")
+        && !validateFabricDependencyClosure(staging.path(), &result.error)) {
+        if (!hasPublishedServerPack) {
+            result.error = QObject::tr(
+                               "No dedicated server version was supplied by %1, and the "
+                               "derived server copy is incomplete.\n\n%2")
+                               .arg(compatibility.provider, result.error);
         }
         return result;
     }

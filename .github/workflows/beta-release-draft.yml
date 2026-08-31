@@ -29,3 +29,5 @@ jobs:
       tag: ${{ inputs.tag }}
       create_draft: ${{ inputs.create_draft }}
       release_stage: beta
+    secrets:
+      CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}

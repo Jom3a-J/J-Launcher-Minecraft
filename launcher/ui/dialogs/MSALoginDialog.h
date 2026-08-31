@@ -16,6 +16,7 @@
 #pragma once
 
 #include <QTimer>
+#include <QUrl>
 #include <QtWidgets/QDialog>
 
 #include "minecraft/auth/AuthFlow.h"
@@ -24,6 +25,15 @@
 namespace Ui {
 class MSALoginDialog;
 }
+
+/**
+ * Return the device-verification URL exactly as Microsoft supplied it.
+ *
+ * The one-time code is intentionally not appended as an `otc` query. That
+ * undocumented shortcut can be rejected with AADSTS65002; the user enters the
+ * separately displayed code on Microsoft's verification page instead.
+ */
+QUrl deviceLoginQrUrl(const QUrl& verificationUrl);
 
 class MSALoginDialog : public QDialog {
     Q_OBJECT

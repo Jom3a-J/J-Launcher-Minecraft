@@ -54,6 +54,11 @@
 
 #include "qrencode.h"
 
+QUrl deviceLoginQrUrl(const QUrl& verificationUrl)
+{
+    return verificationUrl;
+}
+
 MSALoginDialog::MSALoginDialog(QWidget* parent) : QDialog(parent), ui(new Ui::MSALoginDialog)
 {
     ui->setupUi(this);
@@ -187,10 +192,8 @@ void MSALoginDialog::authorizeWithBrowserWithExtra(QString url, QString code, [[
     ui->stackedWidget->updateGeometry();
     this->adjustSize();
 
+    const QUrl verificationUrl(url);
     const auto linkString = QString("<a href=\"%1\">%2</a>").arg(url, url);
-    if (url == "https://www.microsoft.com/link" && !code.isEmpty()) {
-        url += QString("?otc=%1").arg(code);
-    }
     ui->code->setText(code);
 
     auto size = QSize(150, 150);
@@ -198,12 +201,12 @@ void MSALoginDialog::authorizeWithBrowserWithExtra(QString url, QString code, [[
     pixmap.fill(Qt::white);
 
     QPainter painter(&pixmap);
-    paintQR(painter, size, url, Qt::black);
+    paintQR(painter, size, deviceLoginQrUrl(verificationUrl).toString(), Qt::black);
 
     // Set the generated pixmap to the label
     ui->qr->setPixmap(pixmap);
 
-    ui->qrMessage->setText(tr("Open %1 or scan the QR and enter the above code if needed.").arg(linkString));
+    ui->qrMessage->setText(tr("Open %1 or scan the QR, then enter the code shown above.").arg(linkString));
 }
 
 void MSALoginDialog::onDeviceFlowStatus(QString status)

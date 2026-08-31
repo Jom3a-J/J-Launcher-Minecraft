@@ -40,18 +40,37 @@ bool writeSyntheticJar(const QString& path)
 }
 
 bool writeFabricModJar(const QString& path, const QString& id,
-                       const QString& environment)
+                       const QString& environment,
+                       const QJsonObject& dependencies = {},
+                       const QByteArray& nestedJar = {})
 {
-    MMCZip::ArchiveWriter archive(path);
-    const QByteArray metadata = QJsonDocument(QJsonObject{
+    if (!QDir().mkpath(QFileInfo(path).dir().absolutePath())) {
+        return false;
+    }
+    QJsonObject metadataObject{
         { "schemaVersion", 1 },
         { "id", id },
         { "version", "1.0.0" },
         { "environment", environment },
-    }).toJson(QJsonDocument::Compact);
-    return archive.open()
-        && archive.addFile("fabric.mod.json", metadata)
-        && archive.close();
+    };
+    if (!dependencies.isEmpty()) {
+        metadataObject.insert("depends", dependencies);
+    }
+    if (!nestedJar.isEmpty()) {
+        metadataObject.insert(
+            "jars", QJsonArray{ QJsonObject{{ "file", "META-INF/jars/nested.jar" }} });
+    }
+    MMCZip::ArchiveWriter archive(path);
+    const QByteArray metadata =
+        QJsonDocument(metadataObject).toJson(QJsonDocument::Compact);
+    if (!archive.open() || !archive.addFile("fabric.mod.json", metadata)) {
+        return false;
+    }
+    if (!nestedJar.isEmpty()
+        && !archive.addFile("META-INF/jars/nested.jar", nestedJar)) {
+        return false;
+    }
+    return archive.close();
 }
 
 bool trashIsUnavailable(const QString& temporaryRoot)
@@ -472,6 +491,42 @@ class ServerManagerTest : public QObject {
         QCoreApplication::setOrganizationName(previousOrganization);
         QCoreApplication::setApplicationName(previousApplication);
         QVERIFY(!QFileInfo::exists(server->serverJarPath()));
+    }
+
+    void rejectsDerivedFabricServerWithMissingDependency()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(writeFabricModJar(
+            QDir(gameRoot).filePath("mods/connected-glass.jar"),
+            "connectedglass", "*", QJsonObject{{ "fusion", ">=1.2.9" }}));
+
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.20.1", "0.15.11", {}, {}, {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Incomplete Fabric Pack");
+        QVERIFY(!result.isValid());
+        QVERIFY(result.error.contains("no dedicated server version",
+                                      Qt::CaseInsensitive));
+        QVERIFY(result.error.contains("connectedglass"));
+        QVERIFY(result.error.contains("fusion"));
+        QCOMPARE(manager.serverCount(), 0);
+
+        const QString nestedFusionPath = root.filePath("nested-fusion.jar");
+        QVERIFY(writeFabricModJar(nestedFusionPath, "fusion", "*"));
+        QFile nestedFusion(nestedFusionPath);
+        QVERIFY(nestedFusion.open(QIODevice::ReadOnly));
+        QVERIFY(writeFabricModJar(
+            QDir(gameRoot).filePath("mods/dependency-bundle.jar"),
+            "dependency_bundle", "*", {}, nestedFusion.readAll()));
+        const auto completeResult = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Complete Fabric Pack");
+        QVERIFY2(completeResult.isValid(), qPrintable(completeResult.error));
+        QCOMPARE(manager.serverCount(), 1);
     }
 
     void persistsAndDeletesManagedServer()

@@ -30,6 +30,10 @@ on:
         description: Audited release stage selected by the calling workflow
         required: true
         type: string
+    secrets:
+      CURSEFORGE_API_KEY:
+        description: J Launcher-owned CurseForge API key embedded in release builds
+        required: true
 
 permissions: {}
 
@@ -52,6 +56,7 @@ jobs:
       QT_ROOT: C:\Qt
       BUILD_DIRECTORY: ${{ github.workspace }}\build-release
       PREFLIGHT_DIRECTORY: ${{ github.workspace }}\build-release\phase9-hosted-preflight
+      CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
 
     steps:
       - name: Check out the exact tag and submodules
@@ -206,6 +211,7 @@ jobs:
               -Generator 'Ninja Multi-Config' `
               -ExpectedTag $env:RELEASE_TAG `
               -ReleaseStage $env:RELEASE_STAGE `
+              -CurseForgeApiKey $env:CURSEFORGE_API_KEY `
               -ParallelJobs 2
 
       - name: Check out release tooling from the workflow revision
