@@ -29,6 +29,8 @@ param(
     [ValidateSet('beta', 'stable')]
     [string] $ReleaseStage = 'stable',
 
+    [string] $CurseForgeApiKey = $env:CURSEFORGE_API_KEY,
+
     [ValidateRange(1, 16)]
     [int] $ParallelJobs = 2,
 
@@ -270,6 +272,9 @@ if ($ExpectedTag) {
 Enable-MsvcEnvironment
 
 if (-not $SkipBuild) {
+    if ([string]::IsNullOrWhiteSpace($CurseForgeApiKey)) {
+        throw 'A J Launcher-owned CurseForge API key is required for release builds. Set CURSEFORGE_API_KEY or pass -CurseForgeApiKey.'
+    }
     $configureArguments = @(
         '-S', $repository,
         '-B', $build,
@@ -280,7 +285,7 @@ if (-not $SkipBuild) {
         '-DLauncher_BUILD_PLATFORM=official',
         '-DLauncher_BUILD_ARTIFACT=Windows-MSVC-x64',
         '-DLauncher_ENABLE_JAVA_DOWNLOADER=ON',
-        '-DLauncher_CURSEFORGE_API_KEY=',
+        "-DLauncher_CURSEFORGE_API_KEY=$CurseForgeApiKey",
         '-DLauncher_UPDATER_GITHUB_REPO=',
         '-DENABLE_LTO=ON'
     )
@@ -310,6 +315,7 @@ $releaseStage = Get-CMakeCacheValue -CachePath $cachePath -Name 'Launcher_RELEAS
 $versionChannel = Get-CMakeCacheValue -CachePath $cachePath -Name 'Launcher_VERSION_CHANNEL'
 $buildPlatform = Get-CMakeCacheValue -CachePath $cachePath -Name 'Launcher_BUILD_PLATFORM'
 $ltoEnabled = Get-CMakeCacheValue -CachePath $cachePath -Name 'ENABLE_LTO'
+$configuredCurseForgeApiKey = Get-CMakeCacheValue -CachePath $cachePath -Name 'Launcher_CURSEFORGE_API_KEY'
 if ($releaseStage -ne $ReleaseStage) {
     throw "The build cache release stage is $releaseStage; expected $ReleaseStage."
 }
@@ -321,6 +327,9 @@ if ($buildPlatform -ne 'official') {
 }
 if ($ltoEnabled -ne 'ON') {
     throw "The build cache does not have Release LTO enabled: $ltoEnabled"
+}
+if ([string]::IsNullOrWhiteSpace($configuredCurseForgeApiKey)) {
+    throw 'The release build cache does not contain the required CurseForge API key.'
 }
 
 $qtRoot = Get-CMakeCacheValue -CachePath $cachePath -Name 'CMAKE_PREFIX_PATH'

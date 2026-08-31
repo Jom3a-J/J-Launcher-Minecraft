@@ -1313,7 +1313,7 @@ target_link_libraries(Launcher_logic
 )
 
 if(WIN32)
-    target_link_libraries(Launcher_logic Advapi32)
+    target_link_libraries(Launcher_logic Advapi32 Wintrust)
 endif()
 
 # Authenticated encryption for account tokens. vcpkg exports a CMake config;

@@ -18,9 +18,11 @@ struct ServerModpackProfile {
 
 struct ServerModpackInstallResult {
     QString serverId;
+    QString provider;
     QStringList skippedClientFiles;
     QStringList warnings;
     QString error;
+    bool hasDedicatedServerPack = false;
 
     bool isValid() const { return !serverId.isEmpty() && error.isEmpty(); }
 };

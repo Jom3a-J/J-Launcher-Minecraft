@@ -26,6 +26,7 @@
 
 #include "BuildConfig.h"
 #include "minecraft/auth/steps/MSAStep.h"
+#include "ui/dialogs/MSALoginDialog.h"
 
 /**
  * The sign-in completion page is presentation only. These tests hold that line:
@@ -36,6 +37,17 @@ class LoginCallbackTest : public QObject {
     Q_OBJECT
 
    private slots:
+    void deviceCodeQrUsesMicrosoftVerificationUrlVerbatim()
+    {
+        const QUrl verificationUrl(QStringLiteral("https://www.microsoft.com/link"));
+        const QUrl qrUrl = deviceLoginQrUrl(verificationUrl);
+
+        QCOMPARE(qrUrl, verificationUrl);
+        QVERIFY2(!qrUrl.hasQuery(), "The QR must not construct an unsupported otc query.");
+        QVERIFY2(!qrUrl.toString().contains(QStringLiteral("otc="), Qt::CaseInsensitive),
+                 "The QR leaked the separately displayed one-time code into its URL.");
+    }
+
     void usesJLauncherOwnPageAndNotAnotherProjects()
     {
         const QString configured = BuildConfig.LOGIN_CALLBACK_URL;

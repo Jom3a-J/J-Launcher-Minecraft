@@ -46,8 +46,12 @@
 #include "ui/dialogs/BlockedModsDialog.h"
 
 #include <QWidget>
+#include <QPointer>
 #include <QSet>
 #include <memory>
+
+class QNetworkReply;
+class QProcess;
 
 namespace FTB {
 
@@ -56,7 +60,7 @@ class PackInstallTask final : public InstanceTask {
 
    public:
     explicit PackInstallTask(Modpack pack, QString version, QWidget* parent = nullptr);
-    ~PackInstallTask() override = default;
+    ~PackInstallTask() override;
 
     bool abort() override;
 
@@ -78,11 +82,16 @@ class PackInstallTask final : public InstanceTask {
     void resolveMods();
     void createInstance();
     void downloadPack();
+    void probeDedicatedServerPack();
+    void installDedicatedServerPack();
+    bool finalizeServerCompatibilityManifest(QString *error);
     void copyBlockedMods();
 
    private:
     NetJob::Ptr m_net_job = nullptr;
     shared_qobject_ptr<Flame::FileResolvingTask> m_modIdResolverTask = nullptr;
+    QPointer<QNetworkReply> m_serverPackProbe;
+    std::unique_ptr<QProcess> m_serverInstallerProcess;
 
     QList<int> m_fileIds;
 
@@ -93,6 +102,8 @@ class PackInstallTask final : public InstanceTask {
     QMap<QString, QString> m_filesToCopy;
     QList<BlockedMod> m_blockedMods;
     QSet<QString> m_serverOnlyBlockedFiles;
+    bool m_hasDedicatedServerPack = false;
+    QString m_serverInstallerPath;
 
     std::unique_ptr<MinecraftInstance> m_instance;
 

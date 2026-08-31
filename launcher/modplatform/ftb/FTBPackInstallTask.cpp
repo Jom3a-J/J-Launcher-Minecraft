@@ -55,12 +55,77 @@
 #include "ui/dialogs/BlockedModsDialog.h"
 
 #include <QFile>
+#include <QDirIterator>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QProcess>
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <softpub.h>
+#include <wintrust.h>
+#endif
 
 namespace FTB {
 
+namespace {
+QString dedicatedServerInstallerUrl(int packId, int versionId)
+{
+    return QString(BuildConfig.FTB_API_BASE_URL
+                   + "/modpack/%1/%2/server/windows")
+        .arg(packId)
+        .arg(versionId);
+}
+
+bool verifyTrustedWindowsExecutable(const QString& path, QString* error)
+{
+#ifdef Q_OS_WIN
+    WINTRUST_FILE_INFO fileInfo{};
+    fileInfo.cbStruct = sizeof(fileInfo);
+    const std::wstring nativePath =
+        QDir::toNativeSeparators(path).toStdWString();
+    fileInfo.pcwszFilePath = nativePath.c_str();
+
+    WINTRUST_DATA trustData{};
+    trustData.cbStruct = sizeof(trustData);
+    trustData.dwUIChoice = WTD_UI_NONE;
+    trustData.fdwRevocationChecks = WTD_REVOKE_NONE;
+    trustData.dwUnionChoice = WTD_CHOICE_FILE;
+    trustData.pFile = &fileInfo;
+    trustData.dwStateAction = WTD_STATEACTION_VERIFY;
+
+    GUID policy = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    const LONG status = WinVerifyTrust(nullptr, &policy, &trustData);
+    trustData.dwStateAction = WTD_STATEACTION_CLOSE;
+    WinVerifyTrust(nullptr, &policy, &trustData);
+    if (status == ERROR_SUCCESS) {
+        return true;
+    }
+    if (error) {
+        *error = QObject::tr(
+            "The official FTB server installer did not pass Windows signature "
+            "verification (error 0x%1), so it was not run.")
+                     .arg(static_cast<qulonglong>(
+                              static_cast<unsigned long>(status)),
+                          8, 16, QLatin1Char('0'));
+    }
+    return false;
+#else
+    Q_UNUSED(path)
+    if (error) {
+        *error = QObject::tr(
+            "Automatic FTB server-package installation is currently supported "
+            "on Windows only.");
+    }
+    return false;
+#endif
+}
+}
 PackInstallTask::PackInstallTask(Modpack pack, QString version, QWidget* parent)
     : m_pack(std::move(pack)), m_versionName(std::move(version)), m_parent(parent)
 {}
+
+PackInstallTask::~PackInstallTask() = default;
 
 bool PackInstallTask::abort()
 {
@@ -75,6 +140,17 @@ bool PackInstallTask::abort()
     }
     if (m_modIdResolverTask) {
         aborted &= m_modIdResolverTask->abort();
+    }
+    if (m_serverPackProbe) {
+        disconnect(m_serverPackProbe, nullptr, this, nullptr);
+        m_serverPackProbe->abort();
+        m_serverPackProbe->deleteLater();
+        m_serverPackProbe = nullptr;
+    }
+    if (m_serverInstallerProcess
+        && m_serverInstallerProcess->state() != QProcess::NotRunning) {
+        disconnect(m_serverInstallerProcess.get(), nullptr, this, nullptr);
+        m_serverInstallerProcess->kill();
     }
 
     return aborted ? InstanceTask::abort() : false;
@@ -140,7 +216,55 @@ void PackInstallTask::onManifestDownloadSucceeded(QByteArray* responsePtr)
 
     m_version = version;
 
+    if (shouldCreateServerPair()) {
+        probeDedicatedServerPack();
+    } else {
+        resolveMods();
+    }
+}
+
+void PackInstallTask::probeDedicatedServerPack()
+{
+#ifdef Q_OS_WIN
+    setStatus(tr("Checking for an official FTB server package..."));
+    setAbortable(true);
+    QNetworkRequest request(
+        QUrl(dedicatedServerInstallerUrl(m_pack.id, m_version.id)));
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::NoLessSafeRedirectPolicy);
+    m_serverPackProbe = APPLICATION->network()->head(request);
+    connect(m_serverPackProbe, &QNetworkReply::finished, this, [this]() {
+        if (!m_serverPackProbe) {
+            return;
+        }
+        const int status = m_serverPackProbe
+                               ->attribute(QNetworkRequest::HttpStatusCodeAttribute)
+                               .toInt();
+        const auto networkError = m_serverPackProbe->error();
+        m_serverPackProbe->deleteLater();
+        m_serverPackProbe = nullptr;
+        if (status == 200) {
+            m_hasDedicatedServerPack = true;
+        } else if (status == 404) {
+            m_hasDedicatedServerPack = false;
+        } else if (networkError != QNetworkReply::NoError) {
+            emitFailed(tr(
+                "J Launcher could not determine whether this FTB pack has an official "
+                "server version. Check the connection and try again."));
+            return;
+        } else {
+            emitFailed(tr(
+                "The FTB service returned an unexpected response (%1) while checking "
+                "for a server version.")
+                           .arg(status));
+            return;
+        }
+        resolveMods();
+    });
+#else
+    m_hasDedicatedServerPack = false;
     resolveMods();
+#endif
 }
 
 void PackInstallTask::resolveMods()
@@ -334,6 +458,13 @@ void PackInstallTask::downloadPack()
             return;
         }
     }
+    if (m_hasDedicatedServerPack) {
+        m_serverInstallerPath = FS::PathCombine(
+            m_stagingPath, "server-pack", "ftb-server-installer.exe");
+        jobPtr->addNetAction(Net::Download::makeFile(
+            QUrl(dedicatedServerInstallerUrl(m_pack.id, m_version.id)),
+            m_serverInstallerPath));
+    }
     for (const auto& file : m_version.files) {
         const QString relativePath = FS::PathCombine(file.path, file.name);
         if (shouldCreateServerPair() && file.clientOnly) {
@@ -399,7 +530,136 @@ void PackInstallTask::onModDownloadSucceeded()
     if (!m_blockedMods.isEmpty()) {
         copyBlockedMods();
     }
+    if (m_hasDedicatedServerPack) {
+        installDedicatedServerPack();
+        return;
+    }
+    QString manifestError;
+    if (shouldCreateServerPair()
+        && !finalizeServerCompatibilityManifest(&manifestError)) {
+        emitFailed(manifestError);
+        return;
+    }
     downloadFiles(m_instance.get());
+}
+
+bool PackInstallTask::finalizeServerCompatibilityManifest(QString* error)
+{
+    QFile includeFile(FS::PathCombine(
+        m_stagingPath, "server-pack", "include.txt"));
+    if (!includeFile.open(QIODevice::WriteOnly | QIODevice::Text
+                          | QIODevice::Truncate)) {
+        if (error) {
+            *error = tr("Could not finalize the FTB server compatibility manifest.");
+        }
+        return false;
+    }
+    for (const auto& file : m_version.files) {
+        if (file.clientOnly) {
+            continue;
+        }
+        const QString relativePath = FS::PathCombine(file.path, file.name);
+        const QString downloadedPath = file.serverOnly
+            ? FS::PathCombine(m_stagingPath, "server-pack", "server-files",
+                              relativePath)
+            : FS::PathCombine(m_stagingPath, ".minecraft", relativePath);
+        if (!QFileInfo(downloadedPath).isFile()) {
+            if (file.optional) {
+                continue;
+            }
+            if (error) {
+                *error = tr(
+                    "The FTB pack download is incomplete. A required server file "
+                    "was not downloaded: %1")
+                             .arg(QDir::fromNativeSeparators(relativePath));
+            }
+            return false;
+        }
+        includeFile.write(QDir::fromNativeSeparators(relativePath).toUtf8());
+        includeFile.write("\n");
+    }
+    return true;
+}
+
+void PackInstallTask::installDedicatedServerPack()
+{
+    QString verificationError;
+    if (!verifyTrustedWindowsExecutable(m_serverInstallerPath,
+                                        &verificationError)) {
+        emitFailed(verificationError);
+        return;
+    }
+
+    const QString serverRoot = FS::PathCombine(
+        m_stagingPath, "server-pack", "server-files");
+    if (!QDir().mkpath(serverRoot)) {
+        emitFailed(tr("Could not create the official FTB server-pack folder."));
+        return;
+    }
+
+    setStatus(tr("Installing the official FTB server package..."));
+    setAbortable(true);
+    m_serverInstallerProcess = std::make_unique<QProcess>(this);
+    m_serverInstallerProcess->setWorkingDirectory(serverRoot);
+    m_serverInstallerProcess->setProcessChannelMode(QProcess::MergedChannels);
+    connect(m_serverInstallerProcess.get(), &QProcess::readyReadStandardOutput,
+            this, [this]() {
+                const QString output = QString::fromUtf8(
+                    m_serverInstallerProcess->readAllStandardOutput()).trimmed();
+                if (!output.isEmpty()) {
+                    qDebug() << "FTB server installer:"
+                             << Privacy::sanitizeText(output);
+                }
+            });
+    connect(m_serverInstallerProcess.get(), &QProcess::errorOccurred, this,
+            [this](QProcess::ProcessError processError) {
+                if (processError == QProcess::FailedToStart) {
+                    emitFailed(tr(
+                        "The verified FTB server installer could not be started."));
+                }
+            });
+    connect(m_serverInstallerProcess.get(),
+            QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this, serverRoot](int exitCode,
+                                    QProcess::ExitStatus status) {
+                const QByteArray output = m_serverInstallerProcess->readAll();
+                QProcess* completedProcess = m_serverInstallerProcess.release();
+                completedProcess->deleteLater();
+                if (status != QProcess::NormalExit || exitCode != 0) {
+                    qWarning() << "FTB server installer failed:"
+                               << Privacy::sanitizeText(QString::fromUtf8(output));
+                    emitFailed(tr(
+                        "The official FTB server package could not be installed "
+                        "(exit code %1).")
+                                   .arg(exitCode));
+                    return;
+                }
+                QFile marker(FS::PathCombine(
+                    m_stagingPath, "server-pack",
+                    "published-server-pack.txt"));
+                QDirIterator installedFiles(
+                    serverRoot,
+                    QDir::Files | QDir::Hidden | QDir::System,
+                    QDirIterator::Subdirectories);
+                if (!installedFiles.hasNext()
+                    || !marker.open(QIODevice::WriteOnly | QIODevice::Text)
+                    || marker.write("ftb\n") != 4) {
+                    emitFailed(tr(
+                        "The FTB installer finished without producing a usable "
+                        "server package."));
+                    return;
+                }
+                QFile::remove(m_serverInstallerPath);
+                downloadFiles(m_instance.get());
+            });
+    m_serverInstallerProcess->start(
+        m_serverInstallerPath,
+        { QStringLiteral("-pack"), QString::number(m_pack.id),
+          QStringLiteral("-version"), QString::number(m_version.id),
+          QStringLiteral("-dir"), serverRoot,
+          QStringLiteral("-auto"), QStringLiteral("-force"),
+          QStringLiteral("-just-files"), QStringLiteral("-validate"),
+          QStringLiteral("-no-colours") });
 }
 
 void PackInstallTask::onManifestDownloadFailed(QString reason)
