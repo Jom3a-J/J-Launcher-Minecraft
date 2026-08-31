@@ -73,6 +73,17 @@ bool writeFabricModJar(const QString& path, const QString& id,
     return archive.close();
 }
 
+bool writeForgeModJar(const QString& path, const QString& metadataPath,
+                      const QByteArray& metadata)
+{
+    if (!QDir().mkpath(QFileInfo(path).dir().absolutePath())) {
+        return false;
+    }
+    MMCZip::ArchiveWriter archive(path);
+    return archive.open() && archive.addFile(metadataPath, metadata)
+        && archive.close();
+}
+
 bool trashIsUnavailable(const QString& temporaryRoot)
 {
     const QString probePath = QDir(temporaryRoot).filePath("trash-capability-probe");
@@ -526,6 +537,172 @@ class ServerManagerTest : public QObject {
         const auto completeResult = ServerModpackInstaller::createMatchingServer(
             &manager, profile, instanceRoot, gameRoot, "Complete Fabric Pack");
         QVERIFY2(completeResult.isValid(), qPrintable(completeResult.error));
+        QCOMPARE(manager.serverCount(), 1);
+    }
+
+    void rejectsDerivedForgeServerWithMissingDependency()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(writeForgeModJar(
+            QDir(gameRoot).filePath("mods/example.jar"), "META-INF/mods.toml",
+            QByteArrayLiteral(
+                "modLoader=\"javafml\"\n"
+                "loaderVersion=\"[47,)\"\n"
+                "license=\"Test\"\n"
+                "[[mods]]\n"
+                "modId=\"example\"\n"
+                "version=\"1.0.0\"\n"
+                "displayName=\"Example\"\n"
+                "[[dependencies.example]]\n"
+                "modId=\"forge\"\n"
+                "mandatory=true\n"
+                "versionRange=\"[47,)\"\n"
+                "ordering=\"NONE\"\n"
+                "side=\"BOTH\"\n"
+                "[[dependencies.example]]\n"
+                "modId=\"clienthelper\"\n"
+                "mandatory=true\n"
+                "versionRange=\"[1,)\"\n"
+                "ordering=\"NONE\"\n"
+                "side=\"CLIENT\"\n"
+                "[[dependencies.example]]\n"
+                "modId=\"requiredlib\"\n"
+                "mandatory=true\n"
+                "versionRange=\"[1,)\"\n"
+                "ordering=\"NONE\"\n"
+                "side=\"SERVER\"\n")));
+
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.20.1", {}, "47.1.0", {}, {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Incomplete Forge Pack");
+        QVERIFY(!result.isValid());
+        QVERIFY(result.error.contains("Forge", Qt::CaseInsensitive));
+        QVERIFY(result.error.contains("example"));
+        QVERIFY(result.error.contains("requiredlib"));
+        QVERIFY(!result.error.contains("clienthelper"));
+        QCOMPARE(manager.serverCount(), 0);
+
+        QVERIFY(writeForgeModJar(
+            QDir(gameRoot).filePath("mods/library-bundle.jar"),
+            "META-INF/mods.toml",
+            QByteArrayLiteral(
+                "modLoader=\"javafml\"\n"
+                "loaderVersion=\"[47,)\"\n"
+                "license=\"Test\"\n"
+                "[[mods]]\n"
+                "modId=\"bundle\"\n"
+                "version=\"1.0.0\"\n"
+                "displayName=\"Bundle\"\n"
+                "[[mods]]\n"
+                "modId=\"requiredlib\"\n"
+                "version=\"1.0.0\"\n"
+                "displayName=\"Required Library\"\n")));
+        const auto completeResult = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Complete Forge Pack");
+        QVERIFY2(completeResult.isValid(), qPrintable(completeResult.error));
+        QCOMPARE(manager.serverCount(), 1);
+    }
+
+    void rejectsDerivedNeoForgeServerWithMissingDependency()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(writeForgeModJar(
+            QDir(gameRoot).filePath("mods/example.jar"),
+            "META-INF/neoforge.mods.toml",
+            QByteArrayLiteral(
+                "modLoader=\"javafml\"\n"
+                "loaderVersion=\"[4,)\"\n"
+                "license=\"Test\"\n"
+                "[[mods]]\n"
+                "modId=\"example\"\n"
+                "version=\"1.0.0\"\n"
+                "displayName=\"Example\"\n"
+                "[[dependencies.example]]\n"
+                "modId=\"neoforge\"\n"
+                "type=\"required\"\n"
+                "versionRange=\"[21.1,)\"\n"
+                "ordering=\"NONE\"\n"
+                "side=\"BOTH\"\n"
+                "[[dependencies.example]]\n"
+                "modId=\"clienthelper\"\n"
+                "type=\"required\"\n"
+                "versionRange=\"[1,)\"\n"
+                "ordering=\"NONE\"\n"
+                "side=\"CLIENT\"\n"
+                "[[dependencies.example]]\n"
+                "modId=\"optionalhelper\"\n"
+                "type=\"optional\"\n"
+                "versionRange=\"[1,)\"\n"
+                "ordering=\"NONE\"\n"
+                "side=\"SERVER\"\n"
+                "[[dependencies.example]]\n"
+                "modId=\"requiredlib\"\n"
+                "type=\"required\"\n"
+                "versionRange=\"[1,)\"\n"
+                "ordering=\"NONE\"\n"
+                "side=\"SERVER\"\n"
+                "[[dependencies.example]]\n"
+                "modId=\"badmod\"\n"
+                "type=\"incompatible\"\n"
+                "versionRange=\"[1,)\"\n"
+                "ordering=\"NONE\"\n"
+                "side=\"SERVER\"\n")));
+
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.21.1", {}, {}, "21.1.0", {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Incomplete NeoForge Pack");
+        QVERIFY(!result.isValid());
+        QVERIFY(result.error.contains("NeoForge", Qt::CaseInsensitive));
+        QVERIFY(result.error.contains("example"));
+        QVERIFY(result.error.contains("requiredlib"));
+        QVERIFY(!result.error.contains("clienthelper"));
+        QVERIFY(!result.error.contains("optionalhelper"));
+        QCOMPARE(manager.serverCount(), 0);
+
+        QVERIFY(writeForgeModJar(
+            QDir(gameRoot).filePath("mods/required-library.jar"),
+            "META-INF/neoforge.mods.toml",
+            QByteArrayLiteral(
+                "modLoader=\"javafml\"\n"
+                "loaderVersion=\"[4,)\"\n"
+                "license=\"Test\"\n"
+                "[[mods]]\n"
+                "modId=\"requiredlib\"\n"
+                "version=\"1.0.0\"\n"
+                "displayName=\"Required Library\"\n")));
+        const auto completeResult = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Complete NeoForge Pack");
+        QVERIFY2(completeResult.isValid(), qPrintable(completeResult.error));
+        QCOMPARE(manager.serverCount(), 1);
+
+        QVERIFY(writeForgeModJar(
+            QDir(gameRoot).filePath("mods/bad-mod.jar"),
+            "META-INF/neoforge.mods.toml",
+            QByteArrayLiteral(
+                "modLoader=\"javafml\"\n"
+                "loaderVersion=\"[4,)\"\n"
+                "license=\"Test\"\n"
+                "[[mods]]\n"
+                "modId=\"badmod\"\n"
+                "version=\"1.0.0\"\n"
+                "displayName=\"Bad Mod\"\n")));
+        const auto incompatibleResult = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Incompatible NeoForge Pack");
+        QVERIFY(!incompatibleResult.isValid());
+        QVERIFY(incompatibleResult.error.contains("incompatible", Qt::CaseInsensitive));
+        QVERIFY(incompatibleResult.error.contains("badmod"));
         QCOMPARE(manager.serverCount(), 1);
     }
 

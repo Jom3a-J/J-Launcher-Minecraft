@@ -24,6 +24,8 @@
 #include <QSettings>
 #include <QTemporaryDir>
 
+#include <toml++/toml.h>
+
 #include <algorithm>
 
 namespace {
@@ -548,6 +550,258 @@ bool validateFabricDependencyClosure(const QString &serverRoot, QString *error)
     return true;
 }
 
+enum class ForgeDependencyKind {
+    Required,
+    Incompatible,
+};
+
+struct ForgeDependencyRequirement {
+    QString modId;
+    QString modName;
+    QString dependencyId;
+    ForgeDependencyKind kind = ForgeDependencyKind::Required;
+};
+
+bool collectForgeMetadata(const QString &jarPath, const QString &loaderType,
+                          QSet<QString> *providedIds,
+                          QList<ForgeDependencyRequirement> *requirements,
+                          QString *error)
+{
+    const bool isNeoForge = loaderType == QStringLiteral("neoforge");
+    const QStringList metadataPaths = isNeoForge
+        ? QStringList{ QStringLiteral("META-INF/neoforge.mods.toml"),
+                       QStringLiteral("META-INF/mods.toml") }
+        : QStringList{ QStringLiteral("META-INF/mods.toml") };
+
+    QByteArray contents;
+    QString metadataPath;
+    for (const QString &candidate : metadataPaths) {
+        MMCZip::ArchiveReader archive(jarPath);
+        if (const auto metadata = archive.goToFile(candidate)) {
+            contents = metadata->readAll();
+            metadataPath = candidate;
+            break;
+        }
+    }
+    if (metadataPath.isEmpty()) {
+        return true;
+    }
+
+    toml::table document;
+#if TOML_EXCEPTIONS
+    try {
+        document = toml::parse(contents.toStdString());
+    } catch ([[maybe_unused]] const toml::parse_error &parseError) {
+        if (error) {
+            *error = QObject::tr("Could not parse %1 metadata in %2.")
+                         .arg(isNeoForge ? QObject::tr("NeoForge")
+                                        : QObject::tr("Forge"),
+                              QFileInfo(jarPath).fileName());
+        }
+        return false;
+    }
+#else
+    toml::parse_result parseResult = toml::parse(contents.toStdString());
+    if (!parseResult) {
+        if (error) {
+            *error = QObject::tr("Could not parse %1 metadata in %2.")
+                         .arg(isNeoForge ? QObject::tr("NeoForge")
+                                        : QObject::tr("Forge"),
+                              QFileInfo(jarPath).fileName());
+        }
+        return false;
+    }
+    document = std::move(parseResult).table();
+#endif
+
+    const auto mods = document["mods"].as_array();
+    if (!mods || mods->empty()) {
+        if (error) {
+            *error = QObject::tr("The %1 metadata in %2 declares no mods.")
+                         .arg(isNeoForge ? QObject::tr("NeoForge")
+                                        : QObject::tr("Forge"),
+                              QFileInfo(jarPath).fileName());
+        }
+        return false;
+    }
+
+    struct DeclaredMod {
+        std::string metadataId;
+        QString id;
+        QString name;
+    };
+    QList<DeclaredMod> declaredMods;
+    for (const auto &entry : *mods) {
+        const auto mod = entry.as_table();
+        const auto idValue = mod ? (*mod)["modId"].as_string() : nullptr;
+        if (!idValue) {
+            if (error) {
+                *error = QObject::tr("The %1 metadata in %2 contains a mod without an ID.")
+                             .arg(isNeoForge ? QObject::tr("NeoForge")
+                                            : QObject::tr("Forge"),
+                                  QFileInfo(jarPath).fileName());
+            }
+            return false;
+        }
+        const std::string metadataId = idValue->get();
+        const QString id = QString::fromStdString(metadataId).trimmed().toLower();
+        if (id.isEmpty()) {
+            if (error) {
+                *error = QObject::tr("The %1 metadata in %2 contains an empty mod ID.")
+                             .arg(isNeoForge ? QObject::tr("NeoForge")
+                                            : QObject::tr("Forge"),
+                                  QFileInfo(jarPath).fileName());
+            }
+            return false;
+        }
+        QString name = id;
+        if (const auto nameValue = (*mod)["displayName"].as_string()) {
+            name = QString::fromStdString(nameValue->get()).trimmed();
+            if (name.isEmpty()) {
+                name = id;
+            }
+        }
+        declaredMods.append({ metadataId, id, name });
+        providedIds->insert(id);
+    }
+
+    const auto dependencyGroups = document["dependencies"].as_table();
+    if (!dependencyGroups) {
+        return true;
+    }
+    for (const DeclaredMod &declared : declaredMods) {
+        const auto dependencies = (*dependencyGroups)[declared.metadataId].as_array();
+        if (!dependencies) {
+            continue;
+        }
+        for (const auto &entry : *dependencies) {
+            const auto dependency = entry.as_table();
+            const auto dependencyIdValue = dependency
+                ? (*dependency)["modId"].as_string() : nullptr;
+            if (!dependencyIdValue) {
+                if (error) {
+                    *error = QObject::tr(
+                                 "The %1 metadata for mod \"%2\" contains a dependency without an ID.")
+                                 .arg(isNeoForge ? QObject::tr("NeoForge")
+                                                : QObject::tr("Forge"),
+                                      declared.name);
+                }
+                return false;
+            }
+            const QString dependencyId = QString::fromStdString(
+                dependencyIdValue->get()).trimmed().toLower();
+            if (dependencyId.isEmpty()) {
+                continue;
+            }
+
+            QString side = QStringLiteral("BOTH");
+            if (const auto sideValue = (*dependency)["side"].as_string()) {
+                side = QString::fromStdString(sideValue->get()).trimmed().toUpper();
+            }
+            if (side == QStringLiteral("CLIENT")) {
+                continue;
+            }
+            if (side != QStringLiteral("BOTH") && side != QStringLiteral("SERVER")) {
+                if (error) {
+                    *error = QObject::tr(
+                                 "The %1 metadata for mod \"%2\" declares an unknown dependency side: %3")
+                                 .arg(isNeoForge ? QObject::tr("NeoForge")
+                                                : QObject::tr("Forge"),
+                                      declared.name, side);
+                }
+                return false;
+            }
+
+            if (isNeoForge) {
+                QString type = QStringLiteral("required");
+                if (const auto typeValue = (*dependency)["type"].as_string()) {
+                    type = QString::fromStdString(typeValue->get()).trimmed().toLower();
+                } else if (const auto legacyMandatory =
+                               (*dependency)["mandatory"].as_boolean()) {
+                    type = legacyMandatory->get() ? QStringLiteral("required")
+                                                  : QStringLiteral("optional");
+                }
+                if (type == QStringLiteral("required")) {
+                    requirements->append({ declared.id, declared.name, dependencyId,
+                                           ForgeDependencyKind::Required });
+                } else if (type == QStringLiteral("incompatible")) {
+                    requirements->append({ declared.id, declared.name, dependencyId,
+                                           ForgeDependencyKind::Incompatible });
+                } else if (type != QStringLiteral("optional")
+                           && type != QStringLiteral("discouraged")) {
+                    if (error) {
+                        *error = QObject::tr(
+                                     "The NeoForge metadata for mod \"%1\" declares an unknown dependency type: %2")
+                                     .arg(declared.name, type);
+                    }
+                    return false;
+                }
+            } else {
+                const auto mandatory = (*dependency)["mandatory"].as_boolean();
+                if (mandatory && mandatory->get()) {
+                    requirements->append({ declared.id, declared.name, dependencyId,
+                                           ForgeDependencyKind::Required });
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool validateForgeDependencyClosure(const QString &serverRoot,
+                                    const QString &loaderType, QString *error)
+{
+    const bool isNeoForge = loaderType == QStringLiteral("neoforge");
+    QSet<QString> providedIds{
+        QStringLiteral("minecraft"),
+        isNeoForge ? QStringLiteral("neoforge") : QStringLiteral("forge"),
+    };
+    QList<ForgeDependencyRequirement> requirements;
+    const QDir modsDirectory(QDir(serverRoot).filePath(QStringLiteral("mods")));
+    for (const QFileInfo &jar : modsDirectory.entryInfoList(
+             QStringList() << QStringLiteral("*.jar"), QDir::Files)) {
+        if (!collectForgeMetadata(jar.absoluteFilePath(), loaderType,
+                                  &providedIds, &requirements, error)) {
+            return false;
+        }
+    }
+
+    std::sort(requirements.begin(), requirements.end(),
+              [](const auto &left, const auto &right) {
+                  if (left.modId != right.modId) return left.modId < right.modId;
+                  if (left.dependencyId != right.dependencyId) {
+                      return left.dependencyId < right.dependencyId;
+                  }
+                  return left.kind < right.kind;
+              });
+    const QString loaderName = isNeoForge ? QObject::tr("NeoForge")
+                                          : QObject::tr("Forge");
+    for (const ForgeDependencyRequirement &requirement : requirements) {
+        const bool dependencyPresent = providedIds.contains(requirement.dependencyId);
+        if (requirement.kind == ForgeDependencyKind::Required && !dependencyPresent) {
+            if (error) {
+                *error = QObject::tr(
+                             "The pack does not contain a complete %1 server. "
+                             "Mod \"%2\" (%3) requires \"%4\", but that dependency is missing.")
+                             .arg(loaderName, requirement.modName, requirement.modId,
+                                  requirement.dependencyId);
+            }
+            return false;
+        }
+        if (requirement.kind == ForgeDependencyKind::Incompatible && dependencyPresent) {
+            if (error) {
+                *error = QObject::tr(
+                             "The pack does not contain a compatible %1 server. "
+                             "Mod \"%2\" (%3) is incompatible with installed mod \"%4\".")
+                             .arg(loaderName, requirement.modName, requirement.modId,
+                                  requirement.dependencyId);
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
 void excludeClientOnlyMod(const QString &filename, QSet<QString> *excludedPaths,
                           QStringList *skippedClientFiles)
 {
@@ -1020,8 +1274,16 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
         }
         return result;
     }
-    if (profile.loaderType == QStringLiteral("fabric")
-        && !validateFabricDependencyClosure(staging.path(), &result.error)) {
+    bool dependencyClosureValid = true;
+    if (profile.loaderType == QStringLiteral("fabric")) {
+        dependencyClosureValid = validateFabricDependencyClosure(
+            staging.path(), &result.error);
+    } else if (profile.loaderType == QStringLiteral("forge")
+               || profile.loaderType == QStringLiteral("neoforge")) {
+        dependencyClosureValid = validateForgeDependencyClosure(
+            staging.path(), profile.loaderType, &result.error);
+    }
+    if (!dependencyClosureValid) {
         if (!hasPublishedServerPack) {
             result.error = QObject::tr(
                                "No dedicated server version was supplied by %1, and the "
