@@ -313,6 +313,109 @@ private slots:
         QCOMPARE(findFile(report, "mods/server.jar")->side, ServerPackFileSide::ServerOnly);
     }
 
+    void validatesCurseForgeNeoForgeProjectionVersions()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        writeComponents(root.path(), "1.21.1", "neoforge", "21.1.100");
+        QVERIFY(writeJson(
+            QDir(root.path()).filePath("flame/manifest.json"),
+            QJsonObject{
+                {"manifestType", "minecraftModpack"},
+                {"manifestVersion", 1},
+                {"minecraft", QJsonObject{
+                    {"version", "1.21.1"},
+                    {"modLoaders", QJsonArray{QJsonObject{
+                        {"id", "neoforge-1.21.1-21.1.100"}}}},
+                }},
+            }));
+        QVERIFY(writeFile(QDir(root.path()).filePath("server-pack/include.txt"),
+                          "mods/common.jar\n"));
+        QVERIFY(writeFile(QDir(root.path()).filePath("server-pack/client-only.txt"),
+                          "mods/client.jar\n"));
+
+        const auto compatible = evaluateServerPack(
+            root.path(), "1.21.1", "neoforge", "21.1.100");
+        QCOMPARE(compatible.provider, QString("curseforge"));
+        QCOMPARE(compatible.loaderType, QString("neoforge"));
+        QCOMPARE(compatible.loaderVersion, QString("21.1.100"));
+        QCOMPARE(compatible.state, ServerPackCompatibilityState::KnownCompatible);
+        QCOMPARE(findFile(compatible, "mods/common.jar")->side,
+                 ServerPackFileSide::Universal);
+        QCOMPARE(findFile(compatible, "mods/client.jar")->side,
+                 ServerPackFileSide::ClientOnly);
+
+        const auto mismatch = evaluateServerPack(
+            root.path(), "1.21.1", "neoforge", "21.1.101");
+        QVERIFY(mismatch.isIncompatible());
+        QVERIFY(serverPackCompatibilityDescription(mismatch).contains("loader version"));
+    }
+
+    void validatesFtbAppProjectionAndRejectsUnknownLoader()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        writeComponents(root.path(), "1.20.1", "forge", "47.2.0");
+        QVERIFY(writeJson(
+            QDir(root.path()).filePath("minecraft/instance.json"),
+            QJsonObject{{"mcVersion", "1.20.1"},
+                        {"modLoader", "forge-47.2.0"}}));
+        QVERIFY(writeFile(QDir(root.path()).filePath("server-pack/include.txt"),
+                          "mods/common.jar\n"));
+        QVERIFY(writeFile(QDir(root.path()).filePath("server-pack/client-only.txt"),
+                          "mods/client.jar\n"));
+
+        const auto compatible = evaluateServerPack(
+            root.path(), "1.20.1", "forge", "47.2.0");
+        QCOMPARE(compatible.provider, QString("ftb-app"));
+        QCOMPARE(compatible.state, ServerPackCompatibilityState::KnownCompatible);
+        QCOMPARE(findFile(compatible, "mods/common.jar")->side,
+                 ServerPackFileSide::Universal);
+        QCOMPARE(findFile(compatible, "mods/client.jar")->side,
+                 ServerPackFileSide::ClientOnly);
+
+        QVERIFY(writeJson(
+            QDir(root.path()).filePath("minecraft/instance.json"),
+            QJsonObject{{"mcVersion", "1.20.1"},
+                        {"modLoader", "mystery-1.0"}}));
+        const auto unknownLoader = inspectServerPack(root.path());
+        QVERIFY(unknownLoader.isIncompatible());
+        QVERIFY(serverPackCompatibilityDescription(unknownLoader)
+                    .contains("unknown loader"));
+    }
+
+    void rejectsConflictingProviderDocuments()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        writeComponents(root.path(), "1.20.1", "fabric", "0.15.0");
+        QVERIFY(writeJson(
+            QDir(root.path()).filePath("mrpack/modrinth.index.json"),
+            QJsonObject{
+                {"formatVersion", 1},
+                {"game", "minecraft"},
+                {"dependencies", QJsonObject{{"minecraft", "1.20.1"},
+                                               {"fabric-loader", "0.15.0"}}},
+                {"files", QJsonArray{}},
+            }));
+        QVERIFY(writeJson(
+            QDir(root.path()).filePath("flame/manifest.json"),
+            QJsonObject{
+                {"manifestType", "minecraftModpack"},
+                {"manifestVersion", 1},
+                {"minecraft", QJsonObject{
+                    {"version", "1.20.1"},
+                    {"modLoaders", QJsonArray{QJsonObject{
+                        {"id", "fabric-0.15.0"}}}},
+                }},
+            }));
+
+        const auto report = inspectServerPack(root.path());
+        QVERIFY(report.isIncompatible());
+        QVERIFY(serverPackCompatibilityDescription(report)
+                    .contains("conflicting provider metadata"));
+    }
+
     void readsAtLauncherFtbTechnicAndLocalFallbackMetadata()
     {
         QTemporaryDir atlRoot;
@@ -370,6 +473,57 @@ private slots:
         QCOMPARE(local.provider, QString("local/custom"));
         QCOMPARE(local.state, ServerPackCompatibilityState::Unknown);
         QVERIFY(!local.warnings.isEmpty());
+    }
+
+    void normalizedProviderProjectionFiltersFiles_data()
+    {
+        QTest::addColumn<QString>("provider");
+
+        QTest::newRow("atlauncher") << QStringLiteral("atlauncher");
+        QTest::newRow("ftb") << QStringLiteral("ftb");
+        QTest::newRow("legacy-ftb") << QStringLiteral("ftb-legacy");
+        QTest::newRow("technic") << QStringLiteral("technic");
+        QTest::newRow("local-custom") << QStringLiteral("local/custom");
+    }
+
+    void normalizedProviderProjectionFiltersFiles()
+    {
+        QFETCH(QString, provider);
+
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        const QString gameRoot = QDir(root.path()).filePath("minecraft");
+        writeComponents(root.path(), "1.20.1", "forge", "47.2.0");
+        if (provider != QStringLiteral("local/custom")) {
+            QVERIFY(writeFile(QDir(root.path()).filePath("server-pack/provider.txt"),
+                              provider.toUtf8() + '\n'));
+        }
+        QVERIFY(writeFile(QDir(root.path()).filePath("server-pack/include.txt"),
+                          "mods/common.jar\n"));
+        QVERIFY(writeFile(QDir(root.path()).filePath("server-pack/client-only.txt"),
+                          "mods/client.jar\n"));
+        QVERIFY(writeFile(QDir(gameRoot).filePath("mods/common.jar"), "common"));
+        QVERIFY(writeFile(QDir(gameRoot).filePath("mods/client.jar"), "client"));
+
+        const auto report = inspectServerPack(root.path());
+        QCOMPARE(report.provider, provider);
+        QCOMPARE(findFile(report, "mods/common.jar")->side,
+                 ServerPackFileSide::Universal);
+        QCOMPARE(findFile(report, "mods/client.jar")->side,
+                 ServerPackFileSide::ClientOnly);
+
+        QTemporaryDir destination;
+        QVERIFY(destination.isValid());
+        QStringList skipped;
+        QString error;
+        QVERIFY2(ServerModpackInstaller::prepareContent(
+                     root.path(), gameRoot, destination.path(), &skipped, &error),
+                 qPrintable(error));
+        QVERIFY(QFileInfo::exists(
+            QDir(destination.path()).filePath("mods/common.jar")));
+        QVERIFY(!QFileInfo::exists(
+            QDir(destination.path()).filePath("mods/client.jar")));
+        QVERIFY(skipped.contains("mods/client.jar"));
     }
 
     void malformedProviderMetadataIsRejected()

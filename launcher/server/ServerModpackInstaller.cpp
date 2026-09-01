@@ -550,8 +550,218 @@ bool validateFabricDependencyClosure(const QString &serverRoot, QString *error)
     return true;
 }
 
+enum class MavenRangeResult {
+    Matches,
+    DoesNotMatch,
+    Invalid,
+    Unverifiable,
+};
+
+bool parseNumericMavenVersion(const QString &version, QStringList *parts)
+{
+    static const QRegularExpression numericVersion(
+        QStringLiteral(R"(^[0-9]+(?:[._-][0-9]+)*$)"));
+    const QString normalized = version.trimmed();
+    if (!numericVersion.match(normalized).hasMatch()) {
+        return false;
+    }
+
+    *parts = normalized.split(QRegularExpression(QStringLiteral(R"([._-])")));
+    for (QString &part : *parts) {
+        while (part.size() > 1 && part.startsWith(QLatin1Char('0'))) {
+            part.remove(0, 1);
+        }
+    }
+    while (parts->size() > 1 && parts->constLast() == QStringLiteral("0")) {
+        parts->removeLast();
+    }
+    return true;
+}
+
+int compareNumericMavenVersions(const QStringList &left, const QStringList &right)
+{
+    const qsizetype count = std::max(left.size(), right.size());
+    for (qsizetype index = 0; index < count; ++index) {
+        const QString leftPart = index < left.size() ? left.at(index)
+                                                     : QStringLiteral("0");
+        const QString rightPart = index < right.size() ? right.at(index)
+                                                       : QStringLiteral("0");
+        if (leftPart.size() != rightPart.size()) {
+            return leftPart.size() < rightPart.size() ? -1 : 1;
+        }
+        const int comparison = QString::compare(leftPart, rightPart);
+        if (comparison != 0) {
+            return comparison < 0 ? -1 : 1;
+        }
+    }
+    return 0;
+}
+
+MavenRangeResult evaluateNumericMavenRange(const QString &range,
+                                           const QString &installedVersion)
+{
+    const QString specification = range.trimmed();
+    if (specification.isEmpty()) {
+        return MavenRangeResult::Matches;
+    }
+    if (!specification.startsWith(QLatin1Char('['))
+        && !specification.startsWith(QLatin1Char('('))) {
+        // Maven treats an unbracketed version as a soft recommendation, not a
+        // hard restriction. Any installed version satisfies it.
+        return MavenRangeResult::Matches;
+    }
+
+    QStringList installedParts;
+    const bool installedIsComparable = parseNumericMavenVersion(
+        installedVersion, &installedParts);
+    bool unverifiable = false;
+    bool sawRestriction = false;
+    qsizetype position = 0;
+    while (position < specification.size()) {
+        while (position < specification.size()
+               && specification.at(position).isSpace()) {
+            ++position;
+        }
+        if (position == specification.size()) {
+            return MavenRangeResult::Invalid;
+        }
+        const QChar opening = specification.at(position);
+        if (opening != QLatin1Char('[') && opening != QLatin1Char('(')) {
+            return MavenRangeResult::Invalid;
+        }
+        qsizetype closingIndex = -1;
+        for (qsizetype index = position + 1; index < specification.size(); ++index) {
+            const QChar candidate = specification.at(index);
+            if (candidate == QLatin1Char(']') || candidate == QLatin1Char(')')) {
+                closingIndex = index;
+                break;
+            }
+        }
+        if (closingIndex < 0) {
+            return MavenRangeResult::Invalid;
+        }
+
+        const QChar closing = specification.at(closingIndex);
+        const QString body = specification.mid(
+            position + 1, closingIndex - position - 1);
+        const qsizetype separator = body.indexOf(QLatin1Char(','));
+        QString lower;
+        QString upper;
+        bool lowerInclusive = opening == QLatin1Char('[');
+        bool upperInclusive = closing == QLatin1Char(']');
+        if (separator < 0) {
+            if (!lowerInclusive || !upperInclusive || body.trimmed().isEmpty()) {
+                return MavenRangeResult::Invalid;
+            }
+            lower = body.trimmed();
+            upper = lower;
+        } else {
+            if (body.indexOf(QLatin1Char(','), separator + 1) >= 0) {
+                return MavenRangeResult::Invalid;
+            }
+            lower = body.left(separator).trimmed();
+            upper = body.mid(separator + 1).trimmed();
+            if ((lower.isEmpty() && lowerInclusive)
+                || (upper.isEmpty() && upperInclusive)
+                || (lower.isEmpty() && upper.isEmpty())) {
+                return MavenRangeResult::Invalid;
+            }
+        }
+        sawRestriction = true;
+
+        QStringList lowerParts;
+        QStringList upperParts;
+        const bool lowerComparable = lower.isEmpty()
+            || parseNumericMavenVersion(lower, &lowerParts);
+        const bool upperComparable = upper.isEmpty()
+            || parseNumericMavenVersion(upper, &upperParts);
+        if (!installedIsComparable || !lowerComparable || !upperComparable) {
+            unverifiable = true;
+        } else {
+            bool matches = true;
+            if (!lower.isEmpty()) {
+                const int comparison = compareNumericMavenVersions(
+                    installedParts, lowerParts);
+                matches = comparison > 0 || (comparison == 0 && lowerInclusive);
+            }
+            if (matches && !upper.isEmpty()) {
+                const int comparison = compareNumericMavenVersions(
+                    installedParts, upperParts);
+                matches = comparison < 0 || (comparison == 0 && upperInclusive);
+            }
+            if (matches) {
+                return MavenRangeResult::Matches;
+            }
+        }
+
+        position = closingIndex + 1;
+        if (position == specification.size()) {
+            break;
+        }
+        if (specification.at(position) != QLatin1Char(',')) {
+            return MavenRangeResult::Invalid;
+        }
+        ++position;
+        while (position < specification.size()
+               && specification.at(position).isSpace()) {
+            ++position;
+        }
+        if (position == specification.size()) {
+            return MavenRangeResult::Invalid;
+        }
+    }
+    if (!sawRestriction) {
+        return MavenRangeResult::Invalid;
+    }
+    return unverifiable ? MavenRangeResult::Unverifiable
+                        : MavenRangeResult::DoesNotMatch;
+}
+
+QString manifestImplementationVersion(const QString &jarPath)
+{
+    MMCZip::ArchiveReader archive(jarPath);
+    const auto manifest = archive.goToFile(QStringLiteral("META-INF/MANIFEST.MF"));
+    if (!manifest) {
+        return {};
+    }
+    const QStringList lines = QString::fromUtf8(manifest->readAll()).split(
+        QRegularExpression(QStringLiteral("\\r\\n|\\n|\\r")));
+    for (const QString &line : lines) {
+        static const QString prefix = QStringLiteral("Implementation-Version:");
+        if (line.startsWith(prefix, Qt::CaseInsensitive)) {
+            return line.mid(prefix.size()).trimmed();
+        }
+    }
+    return {};
+}
+
+QString resolveForgeModVersion(const QString &declaredVersion,
+                               const toml::table &document,
+                               const QString &manifestVersion)
+{
+    const QString version = declaredVersion.trimmed();
+    static const QRegularExpression propertyReference(
+        QStringLiteral(R"(^\$\{file\.([A-Za-z0-9_.-]+)\}$)"));
+    const auto match = propertyReference.match(version);
+    if (!match.hasMatch()) {
+        return version;
+    }
+    const QString property = match.captured(1);
+    if (property == QStringLiteral("jarVersion")) {
+        return manifestVersion;
+    }
+    const auto properties = document["properties"].as_table();
+    if (!properties) {
+        return {};
+    }
+    const auto propertyValue = (*properties)[property.toStdString()].as_string();
+    return propertyValue
+        ? QString::fromStdString(propertyValue->get()).trimmed() : QString();
+}
+
 enum class ForgeDependencyKind {
     Required,
+    Optional,
     Incompatible,
 };
 
@@ -559,11 +769,13 @@ struct ForgeDependencyRequirement {
     QString modId;
     QString modName;
     QString dependencyId;
+    QString versionRange;
     ForgeDependencyKind kind = ForgeDependencyKind::Required;
 };
 
 bool collectForgeMetadata(const QString &jarPath, const QString &loaderType,
                           QSet<QString> *providedIds,
+                          QHash<QString, QString> *providedVersions,
                           QList<ForgeDependencyRequirement> *requirements,
                           QString *error)
 {
@@ -630,6 +842,7 @@ bool collectForgeMetadata(const QString &jarPath, const QString &loaderType,
         QString id;
         QString name;
     };
+    const QString manifestVersion = manifestImplementationVersion(jarPath);
     QList<DeclaredMod> declaredMods;
     for (const auto &entry : *mods) {
         const auto mod = entry.as_table();
@@ -661,8 +874,14 @@ bool collectForgeMetadata(const QString &jarPath, const QString &loaderType,
                 name = id;
             }
         }
+        QString declaredVersion = isNeoForge ? QStringLiteral("1") : QString();
+        if (const auto versionValue = (*mod)["version"].as_string()) {
+            declaredVersion = QString::fromStdString(versionValue->get());
+        }
         declaredMods.append({ metadataId, id, name });
         providedIds->insert(id);
+        providedVersions->insert(
+            id, resolveForgeModVersion(declaredVersion, document, manifestVersion));
     }
 
     const auto dependencyGroups = document["dependencies"].as_table();
@@ -712,6 +931,10 @@ bool collectForgeMetadata(const QString &jarPath, const QString &loaderType,
                 return false;
             }
 
+            QString versionRange;
+            if (const auto rangeValue = (*dependency)["versionRange"].as_string()) {
+                versionRange = QString::fromStdString(rangeValue->get()).trimmed();
+            }
             if (isNeoForge) {
                 QString type = QStringLiteral("required");
                 if (const auto typeValue = (*dependency)["type"].as_string()) {
@@ -723,12 +946,14 @@ bool collectForgeMetadata(const QString &jarPath, const QString &loaderType,
                 }
                 if (type == QStringLiteral("required")) {
                     requirements->append({ declared.id, declared.name, dependencyId,
-                                           ForgeDependencyKind::Required });
+                                           versionRange, ForgeDependencyKind::Required });
+                } else if (type == QStringLiteral("optional")) {
+                    requirements->append({ declared.id, declared.name, dependencyId,
+                                           versionRange, ForgeDependencyKind::Optional });
                 } else if (type == QStringLiteral("incompatible")) {
                     requirements->append({ declared.id, declared.name, dependencyId,
-                                           ForgeDependencyKind::Incompatible });
-                } else if (type != QStringLiteral("optional")
-                           && type != QStringLiteral("discouraged")) {
+                                           versionRange, ForgeDependencyKind::Incompatible });
+                } else if (type != QStringLiteral("discouraged")) {
                     if (error) {
                         *error = QObject::tr(
                                      "The NeoForge metadata for mod \"%1\" declares an unknown dependency type: %2")
@@ -738,10 +963,10 @@ bool collectForgeMetadata(const QString &jarPath, const QString &loaderType,
                 }
             } else {
                 const auto mandatory = (*dependency)["mandatory"].as_boolean();
-                if (mandatory && mandatory->get()) {
-                    requirements->append({ declared.id, declared.name, dependencyId,
-                                           ForgeDependencyKind::Required });
-                }
+                requirements->append({
+                    declared.id, declared.name, dependencyId, versionRange,
+                    mandatory && mandatory->get() ? ForgeDependencyKind::Required
+                                                  : ForgeDependencyKind::Optional });
             }
         }
     }
@@ -749,19 +974,26 @@ bool collectForgeMetadata(const QString &jarPath, const QString &loaderType,
 }
 
 bool validateForgeDependencyClosure(const QString &serverRoot,
-                                    const QString &loaderType, QString *error)
+                                    const QString &loaderType,
+                                    const QString &minecraftVersion,
+                                    const QString &loaderVersion,
+                                    QStringList *warnings, QString *error)
 {
     const bool isNeoForge = loaderType == QStringLiteral("neoforge");
-    QSet<QString> providedIds{
-        QStringLiteral("minecraft"),
-        isNeoForge ? QStringLiteral("neoforge") : QStringLiteral("forge"),
+    const QString loaderId = isNeoForge ? QStringLiteral("neoforge")
+                                        : QStringLiteral("forge");
+    QSet<QString> providedIds{ QStringLiteral("minecraft"), loaderId };
+    QHash<QString, QString> providedVersions{
+        { QStringLiteral("minecraft"), minecraftVersion },
+        { loaderId, loaderVersion },
     };
     QList<ForgeDependencyRequirement> requirements;
     const QDir modsDirectory(QDir(serverRoot).filePath(QStringLiteral("mods")));
     for (const QFileInfo &jar : modsDirectory.entryInfoList(
              QStringList() << QStringLiteral("*.jar"), QDir::Files)) {
         if (!collectForgeMetadata(jar.absoluteFilePath(), loaderType,
-                                  &providedIds, &requirements, error)) {
+                                  &providedIds, &providedVersions,
+                                  &requirements, error)) {
             return false;
         }
     }
@@ -788,13 +1020,60 @@ bool validateForgeDependencyClosure(const QString &serverRoot,
             }
             return false;
         }
-        if (requirement.kind == ForgeDependencyKind::Incompatible && dependencyPresent) {
+        if (!dependencyPresent) {
+            continue;
+        }
+
+        const QString installedVersion = providedVersions.value(
+            requirement.dependencyId);
+        const MavenRangeResult rangeResult = evaluateNumericMavenRange(
+            requirement.versionRange, installedVersion);
+        if (rangeResult == MavenRangeResult::Invalid) {
+            if (error) {
+                *error = QObject::tr(
+                             "The %1 metadata for mod \"%2\" declares an invalid version range for \"%3\": %4")
+                             .arg(loaderName, requirement.modName,
+                                  requirement.dependencyId, requirement.versionRange);
+            }
+            return false;
+        }
+        if (rangeResult == MavenRangeResult::Unverifiable) {
+            if (warnings) {
+                const QString warning = QObject::tr(
+                    "Could not safely compare installed mod \"%1\" version \"%2\" with Maven range %3; the %4 loader will verify it at startup.")
+                    .arg(requirement.dependencyId,
+                         installedVersion.isEmpty() ? QObject::tr("unknown")
+                                                    : installedVersion,
+                         requirement.versionRange, loaderName);
+                if (!warnings->contains(warning)) {
+                    warnings->append(warning);
+                }
+            }
+            continue;
+        }
+
+        const bool versionMatches = rangeResult == MavenRangeResult::Matches;
+        if ((requirement.kind == ForgeDependencyKind::Required
+             || requirement.kind == ForgeDependencyKind::Optional)
+            && !versionMatches) {
             if (error) {
                 *error = QObject::tr(
                              "The pack does not contain a compatible %1 server. "
-                             "Mod \"%2\" (%3) is incompatible with installed mod \"%4\".")
+                             "Mod \"%2\" (%3) requires \"%4\" version %5, but installed version %6 does not match.")
                              .arg(loaderName, requirement.modName, requirement.modId,
-                                  requirement.dependencyId);
+                                  requirement.dependencyId, requirement.versionRange,
+                                  installedVersion);
+            }
+            return false;
+        }
+        if (requirement.kind == ForgeDependencyKind::Incompatible
+            && versionMatches) {
+            if (error) {
+                *error = QObject::tr(
+                             "The pack does not contain a compatible %1 server. "
+                             "Mod \"%2\" (%3) is incompatible with installed mod \"%4\" version %5.")
+                             .arg(loaderName, requirement.modName, requirement.modId,
+                                  requirement.dependencyId, installedVersion);
             }
             return false;
         }
@@ -1281,7 +1560,8 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
     } else if (profile.loaderType == QStringLiteral("forge")
                || profile.loaderType == QStringLiteral("neoforge")) {
         dependencyClosureValid = validateForgeDependencyClosure(
-            staging.path(), profile.loaderType, &result.error);
+            staging.path(), profile.loaderType, profile.minecraftVersion,
+            profile.loaderVersion, &result.warnings, &result.error);
     }
     if (!dependencyClosureValid) {
         if (!hasPublishedServerPack) {
