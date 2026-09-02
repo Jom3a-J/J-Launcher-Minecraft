@@ -911,6 +911,46 @@ class ServerManagerTest : public QObject {
         QCOMPARE(manager.serverCount(), 1);
     }
 
+    void validatesExternalNormalizedServerProjection()
+    {
+        const QString instanceRoot = qEnvironmentVariable(
+            "JLAUNCHER_LIVE_NORMALIZED_INSTANCE").trimmed();
+        if (instanceRoot.isEmpty()) {
+            QSKIP("Set JLAUNCHER_LIVE_NORMALIZED_INSTANCE to run the live normalized-projection test.");
+        }
+        QVERIFY2(QFileInfo(instanceRoot).isDir(), qPrintable(instanceRoot));
+
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            qEnvironmentVariable("JLAUNCHER_LIVE_SERVER_MINECRAFT"),
+            qEnvironmentVariable("JLAUNCHER_LIVE_SERVER_FABRIC"),
+            qEnvironmentVariable("JLAUNCHER_LIVE_SERVER_FORGE"),
+            qEnvironmentVariable("JLAUNCHER_LIVE_SERVER_NEOFORGE"), {});
+        QVERIFY2(profile.isValid(), qPrintable(profile.error));
+
+        QTemporaryDir serverData;
+        QVERIFY(serverData.isValid());
+        ServerManager manager(serverData.path());
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot,
+            QDir(instanceRoot).filePath("minecraft"),
+            "Live Normalized Projection");
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        QVERIFY(!result.hasDedicatedServerPack);
+        QCOMPARE(result.provider,
+                 qEnvironmentVariable("JLAUNCHER_LIVE_SERVER_PROVIDER"));
+        const auto server = manager.getServer(result.serverId);
+        QVERIFY(server);
+        QVERIFY(QFileInfo(server->serverDirectory()).isDir());
+        QCOMPARE(server->version(), profile.minecraftVersion);
+        QCOMPARE(server->loaderType(), profile.loaderType);
+        QCOMPARE(server->loaderVersion(), profile.loaderVersion);
+        const QDir sourceMods(QDir(instanceRoot).filePath("minecraft/mods"));
+        if (!sourceMods.entryList(QStringList() << "*.jar", QDir::Files).isEmpty()) {
+            QVERIFY(QFileInfo(server->modsDirectory()).isDir());
+        }
+        QCOMPARE(manager.serverCount(), 1);
+    }
+
     void persistsAndDeletesManagedServer()
     {
         QTemporaryDir temporaryRoot;
