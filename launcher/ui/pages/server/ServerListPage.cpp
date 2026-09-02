@@ -1685,13 +1685,18 @@ void ServerListPage::onInstallModpack()
                          "\"%2\" with the same Minecraft and loader versions.")
                           .arg(instance->name(),
                                m_serverManager->getServer(result.serverId)->name());
-    details += result.hasDedicatedServerPack
-        ? tr("\n\nDedicated server version: available and used (%1).")
-              .arg(result.provider)
-        : tr("\n\nDedicated server version: not supplied by %1. J Launcher created a "
-             "server projection from the client pack. "
-             "The server loader performs the final version and runtime checks when it starts.")
-              .arg(result.provider);
+    if (result.hasDedicatedServerPack
+        && result.provider.startsWith(QStringLiteral("ftb"), Qt::CaseInsensitive)) {
+        details += tr("\n\nServer source: prepared by the official FTB server installer.");
+    } else if (result.hasDedicatedServerPack) {
+        details += tr("\n\nServer source: dedicated server pack supplied by %1.")
+                       .arg(result.provider);
+    } else {
+        details += tr("\n\nServer source: derived from the %1 client pack because no dedicated "
+                      "server pack was supplied. The server loader performs the final version "
+                      "and runtime checks when it starts.")
+                       .arg(result.provider);
+    }
     if (!result.skippedClientFiles.isEmpty()) {
         details += tr("\n\nExcluded %1 client-only file(s) from the server.")
                        .arg(result.skippedClientFiles.size());

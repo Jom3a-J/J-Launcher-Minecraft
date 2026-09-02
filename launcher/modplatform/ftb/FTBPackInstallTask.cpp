@@ -226,7 +226,7 @@ void PackInstallTask::onManifestDownloadSucceeded(QByteArray* responsePtr)
 void PackInstallTask::probeDedicatedServerPack()
 {
 #ifdef Q_OS_WIN
-    setStatus(tr("Checking for an official FTB server package..."));
+    setStatus(tr("Checking for the official FTB server installer..."));
     setAbortable(true);
     QNetworkRequest request(
         QUrl(dedicatedServerInstallerUrl(m_pack.id, m_version.id)));
@@ -597,7 +597,7 @@ void PackInstallTask::installDedicatedServerPack()
         return;
     }
 
-    setStatus(tr("Installing the official FTB server package..."));
+    setStatus(tr("Preparing server files with the official FTB installer..."));
     setAbortable(true);
     m_serverInstallerProcess = std::make_unique<QProcess>(this);
     m_serverInstallerProcess->setWorkingDirectory(serverRoot);
@@ -629,7 +629,7 @@ void PackInstallTask::installDedicatedServerPack()
                     qWarning() << "FTB server installer failed:"
                                << Privacy::sanitizeText(QString::fromUtf8(output));
                     emitFailed(tr(
-                        "The official FTB server package could not be installed "
+                        "The official FTB server installer could not prepare the server files "
                         "(exit code %1).")
                                    .arg(exitCode));
                     return;
@@ -645,8 +645,8 @@ void PackInstallTask::installDedicatedServerPack()
                     || !marker.open(QIODevice::WriteOnly | QIODevice::Text)
                     || marker.write("ftb\n") != 4) {
                     emitFailed(tr(
-                        "The FTB installer finished without producing a usable "
-                        "server package."));
+                        "The FTB server installer finished without producing usable "
+                        "server files."));
                     return;
                 }
                 QFile::remove(m_serverInstallerPath);
