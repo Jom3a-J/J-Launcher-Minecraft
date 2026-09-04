@@ -1128,7 +1128,10 @@ void PackInstallTask::install()
     setStatus(tr("Installing modpack"));
 
     auto instanceConfigPath = FS::PathCombine(m_stagingPath, "instance.cfg");
-    MinecraftInstance instance(m_globalSettings, std::make_unique<INISettingsObject>(instanceConfigPath), m_stagingPath);
+    m_instance = std::make_unique<MinecraftInstance>(
+        m_globalSettings, std::make_unique<INISettingsObject>(instanceConfigPath),
+        m_stagingPath);
+    auto& instance = *m_instance;
     {
         SettingsObject::Lock lock(instance.settings());
         auto* components = instance.getPackProfile();
@@ -1192,7 +1195,7 @@ void PackInstallTask::install()
 
         jarmods.clear();
     }
-    downloadFiles(&instance);
+    downloadFiles(m_instance.get());
 }
 
 }  // namespace ATLauncher

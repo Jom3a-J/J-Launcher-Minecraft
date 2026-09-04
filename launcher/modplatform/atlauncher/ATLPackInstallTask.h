@@ -46,6 +46,7 @@
 #include "net/NetJob.h"
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 
 namespace ATLauncher {
@@ -137,6 +138,10 @@ class PackInstallTask : public InstanceTask {
 
     QString archivePath;
     QStringList jarmods;
+    // InstanceTask::downloadFiles starts asynchronous work that retains the
+    // MinecraftInstance pointer. Keep this instance alive until the install
+    // task itself is destroyed.
+    std::unique_ptr<MinecraftInstance> m_instance;
     Meta::Version::Ptr minecraftVersion;
     QMap<QString, Meta::Version::Ptr> componentsToInstall;
 
