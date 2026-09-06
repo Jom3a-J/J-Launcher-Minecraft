@@ -15,6 +15,8 @@
 
 #include "CreateServerDialog.h"
 #include "server/ServerDownloader.h"
+#include "server/ServerMemory.h"
+#include "HardwareInfo.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -110,18 +112,33 @@ void CreateServerDialog::setupUI()
     QGroupBox *memoryGroup = new QGroupBox(tr("Memory"), this);
     QFormLayout *memoryForm = new QFormLayout(memoryGroup);
 
+    m_autoMemoryCheck = new QCheckBox(tr("Choose memory automatically (recommended)"), this);
+    m_autoMemoryCheck->setObjectName("serverAutoMemoryCheck");
+    m_autoMemoryCheck->setChecked(true);
+    memoryForm->addRow(m_autoMemoryCheck);
+
+    m_autoMemoryLabel = new QLabel(this);
+    m_autoMemoryLabel->setObjectName("serverAutoMemoryLabel");
+    m_autoMemoryLabel->setWordWrap(true);
+    m_autoMemoryLabel->setForegroundRole(QPalette::PlaceholderText);
+    memoryForm->addRow(m_autoMemoryLabel);
+
     m_minMemorySpin = new QSpinBox(this);
+    m_minMemorySpin->setObjectName("serverMinMemoryInput");
     m_minMemorySpin->setRange(256, 32768);
     m_minMemorySpin->setSingleStep(256);
     m_minMemorySpin->setValue(1024);
     m_minMemorySpin->setSuffix(" MB");
+    m_minMemorySpin->setEnabled(false);
     memoryForm->addRow(tr("Minimum:"), m_minMemorySpin);
 
     m_maxMemorySpin = new QSpinBox(this);
+    m_maxMemorySpin->setObjectName("serverMaxMemoryInput");
     m_maxMemorySpin->setRange(256, 32768);
     m_maxMemorySpin->setSingleStep(256);
     m_maxMemorySpin->setValue(2048);
     m_maxMemorySpin->setSuffix(" MB");
+    m_maxMemorySpin->setEnabled(false);
     memoryForm->addRow(tr("Maximum:"), m_maxMemorySpin);
 
     mainLayout->addWidget(memoryGroup);
@@ -168,12 +185,18 @@ void CreateServerDialog::setupUI()
     // Connect validation
     connect(m_nameEdit, &QLineEdit::textChanged, this, &CreateServerDialog::validateInput);
     connect(m_versionCombo, &QComboBox::currentTextChanged, this, &CreateServerDialog::validateInput);
+    connect(m_versionCombo, &QComboBox::currentTextChanged, this, &CreateServerDialog::updateAutomaticMemory);
     connect(m_templateCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &CreateServerDialog::applyTemplate);
     connect(m_typeCombo, &QComboBox::currentTextChanged, this, &CreateServerDialog::refreshVersions);
+    connect(m_typeCombo, &QComboBox::currentTextChanged, this, &CreateServerDialog::updateAutomaticMemory);
+    connect(m_autoMemoryCheck, &QCheckBox::toggled, this, &CreateServerDialog::onAutoMemoryToggled);
+    connect(m_minMemorySpin, QOverload<int>::of(&QSpinBox::valueChanged), this, &CreateServerDialog::onMemorySpinEdited);
+    connect(m_maxMemorySpin, QOverload<int>::of(&QSpinBox::valueChanged), this, &CreateServerDialog::onMemorySpinEdited);
     connect(m_versionChannelCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, &CreateServerDialog::applyVersionFilter);
     for (QAbstractSpinBox *input : findChildren<QAbstractSpinBox *>()) input->installEventFilter(this);
     for (QComboBox *input : findChildren<QComboBox *>()) input->installEventFilter(this);
+    updateAutomaticMemory();
 }
 
 bool CreateServerDialog::eventFilter(QObject *watched, QEvent *event)
@@ -284,17 +307,88 @@ void CreateServerDialog::applyVersionFilter()
 void CreateServerDialog::applyTemplate(int index)
 {
     if (index == 0) return;
-    const struct Template { const char *name; const char *type; int minMemory; int maxMemory; } templates[] = {
-        { "Vanilla Survival", "Vanilla", 1024, 2048 },
-        { "Paper Performance", "Paper", 2048, 4096 },
-        { "Fabric Modded", "Fabric", 2048, 4096 },
-        { "Forge Modded", "Forge", 4096, 6144 }
+    const struct Template { const char *name; const char *type; } templates[] = {
+        { "Vanilla Survival", "Vanilla" },
+        { "Paper Performance", "Paper" },
+        { "Fabric Modded", "Fabric" },
+        { "Forge Modded", "Forge" }
     };
     const Template &selected = templates[index - 1];
     m_typeCombo->setCurrentText(selected.type);
-    m_minMemorySpin->setValue(selected.minMemory);
-    m_maxMemorySpin->setValue(selected.maxMemory);
+    // The server type change already recomputes the automatic recommendation.
+    // A manual override must never be overwritten here.
+    if (m_memoryAutomatic) {
+        updateAutomaticMemory();
+    }
     if (m_nameEdit->text().trimmed().isEmpty()) m_nameEdit->setText(tr(selected.name));
+}
+
+void CreateServerDialog::updateAutomaticMemory()
+{
+    if (!m_memoryAutomatic || !m_minMemorySpin || !m_maxMemorySpin || !m_autoMemoryLabel) {
+        return;
+    }
+    // Manual creation has no deployed mods yet, so size from the loader
+    // family and clamp to this computer's physical RAM.
+    const ServerMemoryRecommendation recommendation =
+        ServerMemory::recommend(serverType(), 0, HardwareInfo::totalRamMiB(), 0);
+    {
+        const QSignalBlocker minBlocker(m_minMemorySpin);
+        const QSignalBlocker maxBlocker(m_maxMemorySpin);
+        m_minMemorySpin->setValue(recommendation.minMemoryMiB);
+        m_maxMemorySpin->setValue(recommendation.maxMemoryMiB);
+    }
+    m_autoMemoryLabel->setText(
+        tr("Automatic memory for %1: %2 MB maximum / %3 MB minimum "
+           "(based on %4 MB total RAM). Uncheck to set memory manually.")
+            .arg(m_typeCombo ? m_typeCombo->currentText() : serverType())
+            .arg(recommendation.maxMemoryMiB)
+            .arg(recommendation.minMemoryMiB)
+            .arg(HardwareInfo::totalRamMiB()));
+}
+
+void CreateServerDialog::onAutoMemoryToggled(bool automatic)
+{
+    m_memoryAutomatic = automatic;
+    if (m_minMemorySpin) {
+        m_minMemorySpin->setEnabled(!automatic);
+    }
+    if (m_maxMemorySpin) {
+        m_maxMemorySpin->setEnabled(!automatic);
+    }
+    if (!m_autoMemoryLabel) {
+        return;
+    }
+    if (automatic) {
+        updateAutomaticMemory();
+    } else {
+        m_autoMemoryLabel->setText(
+            tr("Manual memory. Check automatic to restore the recommendation. "
+               "You can change memory later in Server Settings."));
+    }
+}
+
+void CreateServerDialog::onMemorySpinEdited()
+{
+    // Programmatic recommendation updates block signals, so reaching here
+    // means the user edited a spin box and wants a manual override.
+    if (!m_memoryAutomatic || !m_autoMemoryCheck) {
+        return;
+    }
+    const QSignalBlocker blocker(m_autoMemoryCheck);
+    m_autoMemoryCheck->setChecked(false);
+    m_memoryAutomatic = false;
+    if (m_minMemorySpin) {
+        m_minMemorySpin->setEnabled(true);
+    }
+    if (m_maxMemorySpin) {
+        m_maxMemorySpin->setEnabled(true);
+    }
+    if (m_autoMemoryLabel) {
+        m_autoMemoryLabel->setText(
+            tr("Manual memory. Check automatic to restore the recommendation. "
+               "You can change memory later in Server Settings."));
+    }
 }
 
 QString CreateServerDialog::serverName() const

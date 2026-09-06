@@ -78,6 +78,38 @@ void ProjectItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& o
     auto remaining_width = rect.width() - icon_width - 2 * icon_x_margin;
     rect.setRect(rect.x() + icon_width + 2 * icon_x_margin, rect.y(), remaining_width, rect.height());
 
+    const QString badgeText = index.data(UserDataTypes::BADGE_TEXT).toString();
+    if (!badgeText.isEmpty()) {
+        painter->save();
+        QFont badgeFont = opt.font;
+        badgeFont.setBold(true);
+        if (badgeFont.pointSize() > 7) {
+            badgeFont.setPointSize(badgeFont.pointSize() - 1);
+        }
+        painter->setFont(badgeFont);
+        const QFontMetrics badgeMetrics(badgeFont);
+        const int badgeHeight = qMax(20, badgeMetrics.height() + 4);
+        const int badgeWidth = badgeMetrics.horizontalAdvance(badgeText) + 12;
+        const QRect badgeRect(rect.right() - badgeWidth - 6, rect.top() + 6,
+                              badgeWidth, badgeHeight);
+        const bool positive = index.data(UserDataTypes::BADGE_TONE).toInt() == 1;
+        const QColor background = isSelected
+            ? opt.palette.highlightedText().color()
+            : (positive ? opt.palette.highlight().color()
+                        : opt.palette.alternateBase().color());
+        const QColor foreground = isSelected
+            ? opt.palette.highlight().color()
+            : (positive ? opt.palette.highlightedText().color()
+                        : opt.palette.text().color());
+        painter->setPen(Qt::NoPen);
+        painter->setBrush(background);
+        painter->drawRoundedRect(badgeRect, 5, 5);
+        painter->setPen(foreground);
+        painter->drawText(badgeRect, Qt::AlignCenter, badgeText);
+        painter->restore();
+        remaining_width = qMax(0, remaining_width - badgeWidth - 14);
+    }
+
     int title_height = 0;
 
     {  // Title painting
@@ -96,7 +128,10 @@ void ProjectItemDelegate::paint(QPainter* painter, const QStyleOptionViewItem& o
         font.setPointSize(font.pointSize() + 2);
         painter->setFont(font);
 
-        title_height = QFontMetrics(font).height();
+        const QFontMetrics titleMetrics(font);
+        title_height = titleMetrics.height();
+        title = titleMetrics.elidedText(title, opt.textElideMode,
+                                        remaining_width);
 
         // On the top, aligned to the left after the icon
         painter->drawText(rect.x(), rect.y() + title_height, title);

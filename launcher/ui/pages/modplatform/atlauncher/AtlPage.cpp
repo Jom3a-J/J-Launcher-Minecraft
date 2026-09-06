@@ -57,6 +57,12 @@ AtlPage::AtlPage(NewInstanceDialog* dialog, QWidget* parent) : QWidget(parent), 
     ui->packView->setModel(filterModel);
     ui->packView->setSortingEnabled(true);
 
+    const bool serverMode = dialog->isServerModpackMode();
+    ui->serverCatalogControls->setVisible(serverMode);
+    ui->serverCompatibilityLabel->setVisible(serverMode);
+    listModel->setShowServerBadges(serverMode);
+    filterModel->setServerReadyOnly(serverMode);
+
     ui->packView->header()->hide();
     ui->packView->setIndentation(0);
 
@@ -72,6 +78,19 @@ AtlPage::AtlPage(NewInstanceDialog* dialog, QWidget* parent) : QWidget(parent), 
     connect(ui->sortByBox, &QComboBox::currentTextChanged, this, &AtlPage::onSortingSelectionChanged);
     connect(ui->packView->selectionModel(), &QItemSelectionModel::currentChanged, this, &AtlPage::onSelectionChanged);
     connect(ui->versionSelectionBox, &QComboBox::currentTextChanged, this, &AtlPage::onVersionSelectionChanged);
+    connect(ui->showClientOnlyCheckBox, &QCheckBox::toggled, this,
+            [this](bool showClientOnly) {
+                filterModel->setServerReadyOnly(!showClientOnly);
+                if (!showClientOnly && !selected.createServer) {
+                    selected = {};
+                    selectedVersion.clear();
+                    ui->packView->clearSelection();
+                    ui->versionSelectionBox->clear();
+                    ui->packDescription->clear();
+                    ui->serverCompatibilityLabel->clear();
+                    this->dialog->setSuggestedPack();
+                }
+            });
 
     ui->packView->setItemDelegate(new ProjectItemDelegate(this));
 }
@@ -111,6 +130,10 @@ void AtlPage::suggestCurrent()
         dialog->setSuggestedPack();
         return;
     }
+    if (dialog->isServerModpackMode() && !selected.createServer) {
+        dialog->setSuggestedPack();
+        return;
+    }
 
     auto uiSupport = new AtlUserInteractionSupportImpl(this);
     dialog->setSuggestedPack(selected.name, selectedVersion, new ATLauncher::PackInstallTask(uiSupport, selected.name, selectedVersion));
@@ -137,6 +160,9 @@ void AtlPage::onSelectionChanged(QModelIndex first, [[maybe_unused]] QModelIndex
     ui->versionSelectionBox->clear();
 
     if (!first.isValid()) {
+        selected = {};
+        selectedVersion.clear();
+        ui->serverCompatibilityLabel->clear();
         if (isOpened) {
             dialog->setSuggestedPack();
         }
@@ -146,6 +172,15 @@ void AtlPage::onSelectionChanged(QModelIndex first, [[maybe_unused]] QModelIndex
     QVariant raw = filterModel->data(first, Qt::UserRole);
     Q_ASSERT(raw.canConvert<ATLauncher::IndexedPack>());
     selected = raw.value<ATLauncher::IndexedPack>();
+
+    if (dialog->isServerModpackMode()) {
+        ui->serverCompatibilityLabel->setText(
+            selected.createServer ? tr("Server ready") : tr("Client only"));
+        ui->serverCompatibilityLabel->setToolTip(
+            selected.createServer
+                ? tr("ATLauncher marks this pack as supporting server creation.")
+                : tr("ATLauncher does not mark this pack as supporting server creation."));
+    }
 
     ui->packDescription->setHtml(StringUtils::htmlListPatch(selected.description.replace("\n", "<br>")));
 

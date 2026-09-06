@@ -65,6 +65,7 @@ class NewInstanceDialog : public QDialog, public BasePageProvider {
                                Mode mode = Mode::NewInstance);
     ~NewInstanceDialog() override;
 
+    bool isServerModpackMode() const { return m_mode == Mode::ServerModpack; }
     void updateDialogState();
 
     void setSuggestedPack(const QString& name = QString(), InstanceTask* task = nullptr);

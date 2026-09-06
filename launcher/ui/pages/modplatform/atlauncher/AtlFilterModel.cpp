@@ -62,15 +62,28 @@ void FilterModel::setSearchTerm(const QString term)
     invalidate();
 }
 
+void FilterModel::setServerReadyOnly(bool serverReadyOnly)
+{
+    if (m_serverReadyOnly == serverReadyOnly) {
+        return;
+    }
+    m_serverReadyOnly = serverReadyOnly;
+    invalidateFilter();
+}
+
 bool FilterModel::filterAcceptsRow(int sourceRow, const QModelIndex& sourceParent) const
 {
-    if (searchTerm.isEmpty()) {
-        return true;
-    }
     QModelIndex index = sourceModel()->index(sourceRow, 0, sourceParent);
     QVariant raw = sourceModel()->data(index, Qt::UserRole);
     Q_ASSERT(raw.canConvert<ATLauncher::IndexedPack>());
     auto pack = raw.value<ATLauncher::IndexedPack>();
+
+    if (m_serverReadyOnly && !pack.createServer) {
+        return false;
+    }
+    if (searchTerm.isEmpty()) {
+        return true;
+    }
 
     if (searchTerm.startsWith("#"))
         return QString::number(pack.id) == searchTerm.mid(1);

@@ -6,7 +6,9 @@
 enum UserDataTypes {
     TITLE = 257,        // QString
     DESCRIPTION = 258,  // QString
-    INSTALLED = 259     // bool
+    INSTALLED = 259,    // bool
+    BADGE_TEXT = 260,   // QString
+    BADGE_TONE = 261    // int: 1 for positive, 0 for neutral
 };
 
 /** This is an item delegate composed of:

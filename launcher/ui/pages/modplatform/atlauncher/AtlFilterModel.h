@@ -34,6 +34,7 @@ class FilterModel : public QSortFilterProxyModel {
     void setSorting(Sorting sorting);
     Sorting getCurrentSorting();
     void setSearchTerm(QString term);
+    void setServerReadyOnly(bool serverReadyOnly);
 
    protected:
     bool filterAcceptsRow(int sourceRow, const QModelIndex& sourceParent) const override;
@@ -43,6 +44,7 @@ class FilterModel : public QSortFilterProxyModel {
     QMap<QString, Sorting> sortings;
     Sorting currentSorting;
     QString searchTerm;
+    bool m_serverReadyOnly = false;
 };
 
 }  // namespace Atl

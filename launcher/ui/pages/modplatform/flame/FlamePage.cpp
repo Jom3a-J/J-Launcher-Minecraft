@@ -56,6 +56,8 @@ FlamePage::FlamePage(NewInstanceDialog* dialog, QWidget* parent)
 {
     m_ui->setupUi(this);
     m_ui->searchEdit->installEventFilter(this);
+    m_ui->serverCompatibilityLabel->setVisible(
+        m_dialog->isServerModpackMode());
 
     m_ui->packView->setModel(m_listModel);
 
@@ -135,6 +137,7 @@ void FlamePage::triggerSearch()
     m_ui->packView->clearSelection();
     m_ui->packDescription->clear();
     m_ui->versionSelectionBox->clear();
+    m_ui->serverCompatibilityLabel->clear();
     bool filterChanged = m_filterWidget->changed();
     m_listModel->searchWithTerm(m_ui->searchEdit->text(), m_ui->sortByBox->currentIndex(), m_filterWidget->getFilter(), filterChanged);
     m_fetch_progress.watch(m_listModel->activeSearchJob().get());
@@ -230,11 +233,23 @@ void FlamePage::suggestCurrent()
     }
 
     if (m_selected_version_index == -1) {
+        m_ui->serverCompatibilityLabel->clear();
         m_dialog->setSuggestedPack();
         return;
     }
 
     auto version = m_current->versions.at(m_selected_version_index);
+
+    if (m_dialog->isServerModpackMode()) {
+        const bool hasOfficialServerPack = version.serverPackFileId.isValid();
+        m_ui->serverCompatibilityLabel->setText(
+            hasOfficialServerPack ? tr("Official server pack")
+                                  : tr("Derived server"));
+        m_ui->serverCompatibilityLabel->setToolTip(
+            hasOfficialServerPack
+                ? tr("CurseForge publishes a dedicated server package for this version.")
+                : tr("No dedicated server package is published for this version; J Launcher will derive one from provider metadata."));
+    }
 
     QMap<QString, QString> extra_info;
     extra_info.insert("pack_id", m_current->addonId.toString());
@@ -256,6 +271,7 @@ void FlamePage::onVersionSelectionChanged(int index)
 
     if (index == -1 || is_blocked) {
         m_selected_version_index = -1;
+        m_ui->serverCompatibilityLabel->clear();
         return;
     }
 

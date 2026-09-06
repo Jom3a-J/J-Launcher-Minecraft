@@ -386,3 +386,15 @@ void ATLauncher::loadVersion(PackVersion& v, QJsonObject& obj)
     auto deletes = obj["deletes"].toObject();
     loadVersionDeletes(v.deletes, deletes);
 }
+
+QMap<QString, QString> ATLauncher::serverPropertyOverridesForPack(
+    const QString& safeName)
+{
+    if (safeName.compare(QStringLiteral("SkyFactoryOne"),
+                         Qt::CaseInsensitive) == 0) {
+        return {
+            { QStringLiteral("topography-preset"), QStringLiteral("void") },
+        };
+    }
+    return {};
+}

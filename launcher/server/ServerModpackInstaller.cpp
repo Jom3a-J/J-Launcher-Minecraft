@@ -2,12 +2,16 @@
 
 #include "server/ServerInstance.h"
 #include "server/ServerManager.h"
+#include "server/ServerMemory.h"
 #include "server/ServerPackCompatibility.h"
+#include "server/ServerProperties.h"
+#include "HardwareInfo.h"
 
 #include "archive/ArchiveReader.h"
 #include "minecraft/MinecraftInstance.h"
 #include "minecraft/PackProfile.h"
 #include "minecraft/mod/MetadataHandler.h"
+#include "logs/Privacy.h"
 #include "modplatform/ModIndex.h"
 #include "modplatform/helpers/HashUtils.h"
 
@@ -27,8 +31,64 @@
 #include <toml++/toml.h>
 
 #include <algorithm>
+#include <utility>
+
+QString serverModpackFailureCategoryName(ServerModpackFailureCategory category)
+{
+    switch (category) {
+        case ServerModpackFailureCategory::None:
+            return QObject::tr("None");
+        case ServerModpackFailureCategory::InvalidProfile:
+            return QObject::tr("Invalid modpack profile");
+        case ServerModpackFailureCategory::CompatibilityMetadata:
+            return QObject::tr("Provider compatibility metadata");
+        case ServerModpackFailureCategory::ContentProjection:
+            return QObject::tr("Server content projection");
+        case ServerModpackFailureCategory::DependencyIncompatibility:
+            return QObject::tr("Mod dependency incompatibility");
+        case ServerModpackFailureCategory::LauncherInternal:
+            return QObject::tr("Launcher failure");
+    }
+    return QObject::tr("Unknown");
+}
+
+QString serverModpackFailureStageName(ServerModpackFailureStage stage)
+{
+    switch (stage) {
+        case ServerModpackFailureStage::None:
+            return QObject::tr("None");
+        case ServerModpackFailureStage::ProfileInspection:
+            return QObject::tr("Profile inspection");
+        case ServerModpackFailureStage::CompatibilityCheck:
+            return QObject::tr("Compatibility check");
+        case ServerModpackFailureStage::ContentPreparation:
+            return QObject::tr("Server content preparation");
+        case ServerModpackFailureStage::DependencyValidation:
+            return QObject::tr("Dependency validation");
+        case ServerModpackFailureStage::ServerCreation:
+            return QObject::tr("Server creation");
+        case ServerModpackFailureStage::ContentInstallation:
+            return QObject::tr("Server content installation");
+    }
+    return QObject::tr("Unknown");
+}
 
 namespace {
+void recordServerModpackFailure(ServerModpackInstallResult *result,
+                                ServerModpackFailureCategory category,
+                                ServerModpackFailureStage stage,
+                                QString error)
+{
+    result->failureCategory = category;
+    result->failureStage = stage;
+    result->error = std::move(error);
+    qWarning().noquote()
+        << "Modpack server creation failed. Category:"
+        << serverModpackFailureCategoryName(category)
+        << "Stage:" << serverModpackFailureStageName(stage)
+        << "Reason:" << Privacy::sanitizeText(result->error);
+}
+
 QString normalizedRelativePath(QString path)
 {
     path = QDir::fromNativeSeparators(QDir::cleanPath(path.trimmed()));
@@ -54,6 +114,7 @@ const QStringList &serverContentRoots()
         QStringLiteral("datapacks"),
         QStringLiteral("defaultconfigs"),
         QStringLiteral("ftbteambases"),
+        QStringLiteral("global_data_packs"),
         QStringLiteral("global_packs"),
         QStringLiteral("kubejs"),
         QStringLiteral("openloader"),
@@ -258,6 +319,55 @@ bool copyServerRootFiles(const QString &sourceRoot, const QString &destinationRo
                     destination.filePath(QStringLiteral("server-icon.png")), error);
 }
 
+bool applyServerPropertyOverrides(const QString &instanceRoot,
+                                  const std::shared_ptr<ServerInstance> &server,
+                                  QString *error)
+{
+    const QString requirements = QDir(instanceRoot).filePath(
+        QStringLiteral("server-pack/server-setup-required.txt"));
+    if (QFileInfo(requirements).exists()
+        && (QFileInfo(requirements).isSymLink()
+            || !copyFile(requirements,
+                         QDir(server->serverDirectory()).filePath("server-setup-required.txt"), error))) {
+        if (error && error->isEmpty()) {
+            *error = QObject::tr("The server setup manifest is an unsafe symbolic link.");
+        }
+        return false;
+    }
+    const QString overridePath = QDir(instanceRoot).filePath(
+        QStringLiteral("server-pack/server-properties.txt"));
+    if (!QFileInfo(overridePath).isFile()) {
+        return true;
+    }
+
+    QString loadError;
+    const QMap<QString, QString> overrides =
+        ServerProperties::load(overridePath, &loadError);
+    if (!loadError.isEmpty()) {
+        if (error) {
+            *error = loadError;
+        }
+        return false;
+    }
+    QMap<QString, QString> properties =
+        ServerProperties::load(server->serverPropertiesPath(), &loadError);
+    if (!loadError.isEmpty()) {
+        if (error) {
+            *error = loadError;
+        }
+        return false;
+    }
+    for (auto iterator = overrides.cbegin(); iterator != overrides.cend(); ++iterator) {
+        if (!properties.contains(iterator.key())) {
+            properties.insert(iterator.key(), iterator.value());
+        }
+    }
+    properties.insert(QStringLiteral("server-port"),
+                      QString::number(server->port()));
+    return ServerProperties::save(server->serverPropertiesPath(), properties,
+                                  error);
+}
+
 bool readPathList(const QString &path, QSet<QString> *paths, QString *error)
 {
     QFile file(path);
@@ -410,6 +520,12 @@ bool jarDeclaresClientOnly(const QString &path)
     return false;
 }
 
+enum class DependencyValidationFailure {
+    None,
+    Inconclusive,
+    Unsafe,
+};
+
 struct FabricDependencyRequirement {
     QString modId;
     QString modName;
@@ -420,9 +536,13 @@ bool collectFabricMetadata(const QString &jarPath, const QString &temporaryRoot,
                            int depth, int *nestedJarIndex,
                            QSet<QString> *providedIds,
                            QList<FabricDependencyRequirement> *requirements,
+                           DependencyValidationFailure *failure,
                            QString *error)
 {
     if (depth > 8) {
+        if (failure) {
+            *failure = DependencyValidationFailure::Inconclusive;
+        }
         if (error) {
             *error = QObject::tr(
                 "The Fabric pack contains more than eight nested mod levels and cannot be validated safely.");
@@ -470,7 +590,17 @@ bool collectFabricMetadata(const QString &jarPath, const QString &temporaryRoot,
         const QString nestedPath = nestedValue.toObject()
                                        .value(QStringLiteral("file"))
                                        .toString().trimmed();
-        if (!isSafeRelativePath(nestedPath)) continue;
+        if (!isSafeRelativePath(nestedPath)) {
+            if (failure) {
+                *failure = DependencyValidationFailure::Unsafe;
+            }
+            if (error) {
+                *error = QObject::tr(
+                    "Fabric mod \"%1\" declares an unsafe bundled dependency path: %2")
+                             .arg(modName, nestedPath);
+            }
+            return false;
+        }
         MMCZip::ArchiveReader nestedSource(jarPath);
         const auto nestedFile = nestedSource.goToFile(nestedPath);
         if (!nestedFile) {
@@ -496,15 +626,20 @@ bool collectFabricMetadata(const QString &jarPath, const QString &temporaryRoot,
         extracted.close();
         if (!collectFabricMetadata(extractedPath, temporaryRoot, depth + 1,
                                    nestedJarIndex, providedIds, requirements,
-                                   error)) {
+                                   failure, error)) {
             return false;
         }
     }
     return true;
 }
 
-bool validateFabricDependencyClosure(const QString &serverRoot, QString *error)
+bool validateFabricDependencyClosure(const QString &serverRoot,
+                                     DependencyValidationFailure *failure,
+                                     QString *error)
 {
+    if (failure) {
+        *failure = DependencyValidationFailure::Inconclusive;
+    }
     QSet<QString> providedIds{
         QStringLiteral("fabricloader"), QStringLiteral("minecraft"),
         QStringLiteral("java")
@@ -524,7 +659,7 @@ bool validateFabricDependencyClosure(const QString &serverRoot, QString *error)
              QStringList() << QStringLiteral("*.jar"), QDir::Files)) {
         if (!collectFabricMetadata(jar.absoluteFilePath(), nestedJars.path(), 0,
                                    &nestedJarIndex, &providedIds, &requirements,
-                                   error)) {
+                                   failure, error)) {
             return false;
         }
     }
@@ -537,6 +672,9 @@ bool validateFabricDependencyClosure(const QString &serverRoot, QString *error)
     for (const auto &requirement : requirements) {
         if (providedIds.contains(requirement.dependencyId)) {
             continue;
+        }
+        if (failure) {
+            *failure = DependencyValidationFailure::Inconclusive;
         }
         if (error) {
             *error = QObject::tr(
@@ -661,9 +799,10 @@ MavenRangeResult evaluateNumericMavenRange(const QString &range,
             }
             lower = body.left(separator).trimmed();
             upper = body.mid(separator + 1).trimmed();
-            if ((lower.isEmpty() && lowerInclusive)
-                || (upper.isEmpty() && upperInclusive)
-                || (lower.isEmpty() && upper.isEmpty())) {
+            // Maven ignores inclusivity for a missing bound, so both
+            // [1,) and [1,] mean 1 or newer (and likewise for a missing
+            // lower bound). Forge uses Maven's VersionRange parser.
+            if (lower.isEmpty() && upper.isEmpty()) {
                 return MavenRangeResult::Invalid;
             }
         }
@@ -715,6 +854,24 @@ MavenRangeResult evaluateNumericMavenRange(const QString &range,
     }
     return unverifiable ? MavenRangeResult::Unverifiable
                         : MavenRangeResult::DoesNotMatch;
+}
+
+bool isNewerPatchInSameMinecraftLine(const QString &range,
+                                     const QString &installedVersion)
+{
+    static const QRegularExpression exactPatchRange(
+        QStringLiteral(R"(^\[([0-9]+)\.([0-9]+)\.([0-9]+)\]$)"));
+    static const QRegularExpression installedPatchVersion(
+        QStringLiteral(R"(^([0-9]+)\.([0-9]+)\.([0-9]+)$)"));
+    const auto required = exactPatchRange.match(range.trimmed());
+    const auto installed = installedPatchVersion.match(installedVersion.trimmed());
+    if (!required.hasMatch() || !installed.hasMatch()
+        || required.captured(1) != installed.captured(1)
+        || required.captured(2) != installed.captured(2)) {
+        return false;
+    }
+    return installed.captured(3).toLongLong()
+        > required.captured(3).toLongLong();
 }
 
 QString manifestImplementationVersion(const QString &jarPath)
@@ -777,7 +934,7 @@ bool collectForgeMetadata(const QString &jarPath, const QString &loaderType,
                           QSet<QString> *providedIds,
                           QHash<QString, QString> *providedVersions,
                           QList<ForgeDependencyRequirement> *requirements,
-                          QString *error)
+                          QStringList *warnings, QString *error)
 {
     const bool isNeoForge = loaderType == QStringLiteral("neoforge");
     const QStringList metadataPaths = isNeoForge
@@ -804,24 +961,28 @@ bool collectForgeMetadata(const QString &jarPath, const QString &loaderType,
     try {
         document = toml::parse(contents.toStdString());
     } catch ([[maybe_unused]] const toml::parse_error &parseError) {
-        if (error) {
-            *error = QObject::tr("Could not parse %1 metadata in %2.")
-                         .arg(isNeoForge ? QObject::tr("NeoForge")
-                                        : QObject::tr("Forge"),
-                              QFileInfo(jarPath).fileName());
+        if (warnings) {
+            warnings->append(
+                QObject::tr("Could not strictly parse %1 metadata in %2; "
+                            "the loader will verify this mod at server startup.")
+                    .arg(isNeoForge ? QObject::tr("NeoForge")
+                                   : QObject::tr("Forge"),
+                         QFileInfo(jarPath).fileName()));
         }
-        return false;
+        return true;
     }
 #else
     toml::parse_result parseResult = toml::parse(contents.toStdString());
     if (!parseResult) {
-        if (error) {
-            *error = QObject::tr("Could not parse %1 metadata in %2.")
-                         .arg(isNeoForge ? QObject::tr("NeoForge")
-                                        : QObject::tr("Forge"),
-                              QFileInfo(jarPath).fileName());
+        if (warnings) {
+            warnings->append(
+                QObject::tr("Could not strictly parse %1 metadata in %2; "
+                            "the loader will verify this mod at server startup.")
+                    .arg(isNeoForge ? QObject::tr("NeoForge")
+                                   : QObject::tr("Forge"),
+                         QFileInfo(jarPath).fileName()));
         }
-        return false;
+        return true;
     }
     document = std::move(parseResult).table();
 #endif
@@ -973,13 +1134,88 @@ bool collectForgeMetadata(const QString &jarPath, const QString &loaderType,
     return true;
 }
 
+bool collectForgeBundledMetadata(const QString &jarPath, const QString &loaderType,
+                                 const QString &temporaryRoot, int depth, int *count,
+                                 QSet<QString> *providedIds,
+                                 QHash<QString, QString> *providedVersions,
+                                 QList<ForgeDependencyRequirement> *requirements,
+                                 QStringList *warnings,
+                                 DependencyValidationFailure *failure,
+                                 QString *error)
+{
+    if (depth > 8 || ++*count > 1024) {
+        if (failure) *failure = DependencyValidationFailure::Inconclusive;
+        if (error) *error = QObject::tr("Bundled mod dependencies exceed the inspection limit.");
+        return false;
+    }
+    if (!collectForgeMetadata(jarPath, loaderType, providedIds, providedVersions,
+                              requirements, warnings, error)) return false;
+
+    MMCZip::ArchiveReader archive(jarPath);
+    const auto metadata = archive.goToFile("META-INF/jarjar/metadata.json");
+    if (!metadata) return true;
+    QJsonParseError parseError;
+    const auto document = QJsonDocument::fromJson(metadata->readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()
+        || !document.object().value("jars").isArray()) {
+        if (error) *error = QObject::tr("Invalid bundled dependency metadata in %1.").arg(QFileInfo(jarPath).fileName());
+        return false;
+    }
+    for (const auto &value : document.object().value("jars").toArray()) {
+        const QString path = value.toObject().value("path").toString();
+        if (!isSafeRelativePath(path) || !path.endsWith(".jar", Qt::CaseInsensitive)) {
+            if (failure) *failure = DependencyValidationFailure::Unsafe;
+            if (error) *error = QObject::tr("Unsafe bundled dependency path in %1.").arg(QFileInfo(jarPath).fileName());
+            return false;
+        }
+        MMCZip::ArchiveReader nestedArchive(jarPath);
+        const auto entry = nestedArchive.goToFile(path);
+        if (!entry || !entry->isFile()) {
+            if (error) *error = QObject::tr("Bundled dependency %1 is missing from %2.").arg(path, QFileInfo(jarPath).fileName());
+            return false;
+        }
+        // Use a generated destination, never a path supplied by the archive.
+        const QString extracted = QDir(temporaryRoot).filePath(QString::number(*count) + ".jar");
+        const QByteArray bytes = entry->readAll();
+        QFile file(extracted);
+        if (bytes.isEmpty() || !file.open(QIODevice::WriteOnly)
+            || file.write(bytes) != bytes.size()) {
+            if (error) *error = QObject::tr("Could not inspect bundled dependency %1.").arg(path);
+            return false;
+        }
+        file.close();
+        if (!collectForgeBundledMetadata(extracted, loaderType, temporaryRoot,
+                                         depth + 1, count, providedIds, providedVersions,
+                                         requirements, warnings, failure, error)) return false;
+    }
+    return true;
+}
+
 bool validateForgeDependencyClosure(const QString &serverRoot,
                                     const QString &loaderType,
                                     const QString &minecraftVersion,
                                     const QString &loaderVersion,
-                                    QStringList *warnings, QString *error)
+                                    QStringList *warnings,
+                                    DependencyValidationFailure *failure,
+                                    QString *error)
 {
+    if (failure) {
+        *failure = DependencyValidationFailure::Inconclusive;
+    }
     const bool isNeoForge = loaderType == QStringLiteral("neoforge");
+    if (!isNeoForge) {
+        bool hasLoaderMajor = false;
+        const int loaderMajor = loaderVersion.section(QLatin1Char('.'), 0, 0)
+                                    .toInt(&hasLoaderMajor);
+        if (hasLoaderMajor && loaderMajor < 25) {
+            if (warnings) {
+                warnings->append(QObject::tr(
+                    "Legacy Forge does not use META-INF/mods.toml dependency metadata; "
+                    "the derived server dependency closure remains unverified."));
+            }
+            return true;
+        }
+    }
     const QString loaderId = isNeoForge ? QStringLiteral("neoforge")
                                         : QStringLiteral("forge");
     QSet<QString> providedIds{ QStringLiteral("minecraft"), loaderId };
@@ -988,12 +1224,19 @@ bool validateForgeDependencyClosure(const QString &serverRoot,
         { loaderId, loaderVersion },
     };
     QList<ForgeDependencyRequirement> requirements;
+    QTemporaryDir bundledFiles;
+    if (!bundledFiles.isValid()) {
+        if (error) *error = QObject::tr("Could not prepare bundled dependency inspection.");
+        return false;
+    }
+    int inspectedJars = 0;
     const QDir modsDirectory(QDir(serverRoot).filePath(QStringLiteral("mods")));
     for (const QFileInfo &jar : modsDirectory.entryInfoList(
              QStringList() << QStringLiteral("*.jar"), QDir::Files)) {
-        if (!collectForgeMetadata(jar.absoluteFilePath(), loaderType,
+        if (!collectForgeBundledMetadata(jar.absoluteFilePath(), loaderType,
+                                  bundledFiles.path(), 0, &inspectedJars,
                                   &providedIds, &providedVersions,
-                                  &requirements, error)) {
+                                  &requirements, warnings, failure, error)) {
             return false;
         }
     }
@@ -1011,6 +1254,9 @@ bool validateForgeDependencyClosure(const QString &serverRoot,
     for (const ForgeDependencyRequirement &requirement : requirements) {
         const bool dependencyPresent = providedIds.contains(requirement.dependencyId);
         if (requirement.kind == ForgeDependencyKind::Required && !dependencyPresent) {
+            if (failure) {
+                *failure = DependencyValidationFailure::Inconclusive;
+            }
             if (error) {
                 *error = QObject::tr(
                              "The pack does not contain a complete %1 server. "
@@ -1029,6 +1275,9 @@ bool validateForgeDependencyClosure(const QString &serverRoot,
         const MavenRangeResult rangeResult = evaluateNumericMavenRange(
             requirement.versionRange, installedVersion);
         if (rangeResult == MavenRangeResult::Invalid) {
+            if (failure) {
+                *failure = DependencyValidationFailure::Inconclusive;
+            }
             if (error) {
                 *error = QObject::tr(
                              "The %1 metadata for mod \"%2\" declares an invalid version range for \"%3\": %4")
@@ -1056,6 +1305,23 @@ bool validateForgeDependencyClosure(const QString &serverRoot,
         if ((requirement.kind == ForgeDependencyKind::Required
              || requirement.kind == ForgeDependencyKind::Optional)
             && !versionMatches) {
+            if (!isNeoForge
+                && requirement.dependencyId == QStringLiteral("minecraft")
+                && isNewerPatchInSameMinecraftLine(
+                    requirement.versionRange, installedVersion)) {
+                if (warnings) {
+                    warnings->append(QObject::tr(
+                        "Mod \"%1\" (%2) declares Minecraft %3, while the pack uses "
+                        "the newer patch %4 in the same release line; Forge will verify "
+                        "this provider-published combination at server startup.")
+                        .arg(requirement.modName, requirement.modId,
+                             requirement.versionRange, installedVersion));
+                }
+                continue;
+            }
+            if (failure) {
+                *failure = DependencyValidationFailure::Inconclusive;
+            }
             if (error) {
                 *error = QObject::tr(
                              "The pack does not contain a compatible %1 server. "
@@ -1068,6 +1334,9 @@ bool validateForgeDependencyClosure(const QString &serverRoot,
         }
         if (requirement.kind == ForgeDependencyKind::Incompatible
             && versionMatches) {
+            if (failure) {
+                *failure = DependencyValidationFailure::Inconclusive;
+            }
             if (error) {
                 *error = QObject::tr(
                              "The pack does not contain a compatible %1 server. "
@@ -1399,7 +1668,14 @@ bool ServerModpackInstaller::prepareContent(const QString &instanceRoot,
         return false;
     }
 
+    if (compatibility.hasDedicatedServerPack) {
+        const QString serverPackRoot = publishedServerPackRoot(instanceRoot, error);
+        return !serverPackRoot.isEmpty()
+            && copyDirectoryContents(serverPackRoot, destination, error);
+    }
+
     QSet<QString> includedPaths;
+    QSet<QString> supplementalServerPaths;
     QSet<QString> excludedPaths;
     for (const auto &file : compatibility.files) {
         if (file.side == ServerPackFileSide::ClientOnly) {
@@ -1407,8 +1683,9 @@ bool ServerModpackInstaller::prepareContent(const QString &instanceRoot,
             if (skippedClientFiles) {
                 skippedClientFiles->append(file.path);
             }
-        } else if (file.side == ServerPackFileSide::ServerOnly
-                   || file.side == ServerPackFileSide::Universal
+        } else if (file.side == ServerPackFileSide::ServerOnly) {
+            supplementalServerPaths.insert(file.path);
+        } else if (file.side == ServerPackFileSide::Universal
                    || file.side == ServerPackFileSide::Unknown) {
             includedPaths.insert(file.path);
         }
@@ -1431,18 +1708,8 @@ bool ServerModpackInstaller::prepareContent(const QString &instanceRoot,
     readServerPairClientOnlyFiles(instanceRoot, &excludedPaths,
                                   skippedClientFiles);
 
-    const bool hasPublishedServerPack = QFileInfo::exists(
-        QDir(instanceRoot).filePath(
-            QStringLiteral("server-pack/published-server-pack.txt")));
-    if (hasPublishedServerPack) {
-        const QString serverPackRoot = publishedServerPackRoot(instanceRoot, error);
-        if (serverPackRoot.isEmpty()) {
-            return false;
-        }
-        return copyDirectoryContents(serverPackRoot, destination, error);
-    }
-
     if (!includedPaths.isEmpty()) {
+        includedPaths.unite(supplementalServerPaths);
         const bool copied = copyIncludedServerFiles(
             instanceRoot, gameRoot, includedPaths, excludedPaths, destination, error);
         if (copied && skippedClientFiles) {
@@ -1479,6 +1746,12 @@ bool ServerModpackInstaller::prepareContent(const QString &instanceRoot,
             destination, error)) {
         return false;
     }
+    if (!supplementalServerPaths.isEmpty()
+        && !copyIncludedServerFiles(instanceRoot, gameRoot,
+                                    supplementalServerPaths, excludedPaths,
+                                    destination, error)) {
+        return false;
+    }
     if (skippedClientFiles) {
         skippedClientFiles->removeDuplicates();
         skippedClientFiles->sort(Qt::CaseInsensitive);
@@ -1490,25 +1763,43 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
     ServerManager *manager, const MinecraftInstance &instance,
     const QString &serverName)
 {
+    // Trust an explicit pack recommendation only when the source instance
+    // truly overrides memory or carries an exported recommendation. The
+    // global default must not count. Never parse startup scripts or command
+    // text for memory flags.
+    int providerRecommendation = 0;
+    if (auto *settings = const_cast<MinecraftInstance &>(instance).settings()) {
+        providerRecommendation = ServerMemory::resolveProviderRecommendation(
+            settings->get("OverrideMemory").toBool(),
+            settings->get("MaxMemAlloc").toInt(),
+            settings->get("ExportRecommendedRAM").toInt());
+    }
     return createMatchingServer(manager, inspect(instance), instance.instanceRoot(),
                                 instance.gameRoot(),
                                 serverName.trimmed().isEmpty()
                                     ? instance.name() + QObject::tr(" Server")
-                                    : serverName);
+                                    : serverName,
+                                providerRecommendation, 0);
 }
 
 ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
     ServerManager *manager, const ServerModpackProfile &profile,
     const QString &instanceRoot, const QString &gameRoot,
-    const QString &serverName)
+    const QString &serverName, int providerRecommendationMiB,
+    quint64 totalRamMiB)
 {
     ServerModpackInstallResult result;
     if (!manager) {
-        result.error = QObject::tr("The server manager is not available.");
+        recordServerModpackFailure(
+            &result, ServerModpackFailureCategory::LauncherInternal,
+            ServerModpackFailureStage::ServerCreation,
+            QObject::tr("The server manager is not available."));
         return result;
     }
     if (!profile.isValid()) {
-        result.error = profile.error;
+        recordServerModpackFailure(
+            &result, ServerModpackFailureCategory::InvalidProfile,
+            ServerModpackFailureStage::ProfileInspection, profile.error);
         return result;
     }
 
@@ -1518,7 +1809,10 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
     result.provider = compatibility.provider;
     result.hasDedicatedServerPack = compatibility.hasDedicatedServerPack;
     if (compatibility.isIncompatible()) {
-        result.error = serverPackCompatibilityDescription(compatibility);
+        recordServerModpackFailure(
+            &result, ServerModpackFailureCategory::CompatibilityMetadata,
+            ServerModpackFailureStage::CompatibilityCheck,
+            serverPackCompatibilityDescription(compatibility));
         return result;
     }
 
@@ -1538,55 +1832,126 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
             "Server compatibility is unknown; client-only content could not be proven safe "
             "for a dedicated server."));
     }
-    for (const QString &warning : compatibility.warnings) {
+    for (const QString &warning : compatibility.projectionWarnings) {
         if (!result.warnings.contains(warning)) {
             result.warnings.append(warning);
         }
     }
 
     QTemporaryDir staging;
+    QString preparationError;
     if (!staging.isValid()
         || !prepareContent(instanceRoot, gameRoot,
-                           staging.path(), &result.skippedClientFiles, &result.error)) {
-        if (result.error.isEmpty()) {
-            result.error = QObject::tr("Could not prepare the modpack for the server.");
+                           staging.path(), &result.skippedClientFiles,
+                           &preparationError)) {
+        if (preparationError.isEmpty()) {
+            preparationError = QObject::tr("Could not prepare the modpack for the server.");
         }
+        recordServerModpackFailure(
+            &result, ServerModpackFailureCategory::ContentProjection,
+            ServerModpackFailureStage::ContentPreparation,
+            preparationError);
         return result;
     }
     bool dependencyClosureValid = true;
+    DependencyValidationFailure dependencyFailure =
+        DependencyValidationFailure::None;
+    QString dependencyError;
     if (profile.loaderType == QStringLiteral("fabric")) {
         dependencyClosureValid = validateFabricDependencyClosure(
-            staging.path(), &result.error);
+            staging.path(), &dependencyFailure, &dependencyError);
     } else if (profile.loaderType == QStringLiteral("forge")
                || profile.loaderType == QStringLiteral("neoforge")) {
         dependencyClosureValid = validateForgeDependencyClosure(
             staging.path(), profile.loaderType, profile.minecraftVersion,
-            profile.loaderVersion, &result.warnings, &result.error);
+            profile.loaderVersion, &result.warnings, &dependencyFailure,
+            &dependencyError);
     }
+    QString dependencyWarning;
     if (!dependencyClosureValid) {
-        if (!hasPublishedServerPack) {
-            result.error = QObject::tr(
-                               "No dedicated server version was supplied by %1, and the "
-                               "derived server copy is incomplete.\n\n%2")
-                               .arg(compatibility.provider, result.error);
+        if (hasPublishedServerPack
+            && dependencyFailure == DependencyValidationFailure::Inconclusive) {
+            dependencyWarning = QObject::tr(
+                "The launcher could not confirm all dependencies in the published server pack. "
+                "The server was created; the %1 loader will check them at startup.\n\nDetails: %2")
+                                    .arg(profile.loaderType, dependencyError);
+        } else {
+            if (!hasPublishedServerPack) {
+                dependencyError = QObject::tr(
+                                      "No dedicated server version was supplied by %1, and the "
+                                      "derived server copy is incomplete.\n\n%2")
+                                      .arg(compatibility.provider, dependencyError);
+            }
+            recordServerModpackFailure(
+                &result, ServerModpackFailureCategory::DependencyIncompatibility,
+                ServerModpackFailureStage::DependencyValidation,
+                dependencyError);
+            return result;
         }
-        return result;
     }
 
     const auto server = manager->createServer(
         serverName.trimmed(),
         profile.minecraftVersion, profile.loaderType, profile.loaderVersion);
     if (!server) {
-        result.error = QObject::tr("Could not create the matching server.");
+        recordServerModpackFailure(
+            &result, ServerModpackFailureCategory::LauncherInternal,
+            ServerModpackFailureStage::ServerCreation,
+            QObject::tr("Could not create the matching server."));
         return result;
     }
 
+    QString installationError;
     if (!copyDirectoryContents(staging.path(), server->serverDirectory(),
-                               &result.error)) {
+                               &installationError)) {
         manager->deleteServer(server->id());
+        recordServerModpackFailure(
+            &result, ServerModpackFailureCategory::ContentProjection,
+            ServerModpackFailureStage::ContentInstallation,
+            installationError);
+        return result;
+    }
+    if (!applyServerPropertyOverrides(instanceRoot, server,
+                                      &installationError)) {
+        manager->deleteServer(server->id());
+        recordServerModpackFailure(
+            &result, ServerModpackFailureCategory::ContentProjection,
+            ServerModpackFailureStage::ContentInstallation,
+            installationError);
         return result;
     }
     importContentTracking(gameRoot, server);
+    // Size memory only now that the prepared server content is known, and
+    // only for this newly created server. Existing servers are never
+    // touched. Persist through the manager so save/reload keeps the values.
+    {
+        const quint64 hostRamMiB =
+            totalRamMiB > 0 ? totalRamMiB : HardwareInfo::totalRamMiB();
+        const int deployedJars =
+            ServerMemory::countDeployedServerJars(server->serverDirectory(),
+                                                  profile.loaderType);
+        const ServerMemoryRecommendation memory = ServerMemory::recommend(
+            profile.loaderType, deployedJars, hostRamMiB,
+            providerRecommendationMiB);
+        server->setMinMemory(memory.minMemoryMiB);
+        server->setMaxMemory(memory.maxMemoryMiB);
+        if (!manager->save()) {
+            const QString saveError =
+                QObject::tr("Could not save the new server's memory settings.");
+            manager->deleteServer(server->id());
+            recordServerModpackFailure(
+                &result, ServerModpackFailureCategory::LauncherInternal,
+                ServerModpackFailureStage::ServerCreation, saveError);
+            return result;
+        }
+    }
+    const QString setupIssue = ServerProperties::worldSetupIssue(server->serverDirectory());
+    if (!setupIssue.isEmpty()) {
+        result.warnings.append(setupIssue);
+    }
+    if (!dependencyWarning.isEmpty()) {
+        result.warnings.append(dependencyWarning);
+    }
     result.serverId = server->id();
     return result;
 }

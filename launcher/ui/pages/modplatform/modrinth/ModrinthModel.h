@@ -72,6 +72,8 @@ class ModpackListModel : public QAbstractListModel {
     void fetchMore(const QModelIndex& parent) override;
     void refresh();
     void searchWithTerm(const QString& term, int sort, std::shared_ptr<ModFilterWidget::Filter> filter, bool filterChanged);
+    void setServerReadyOnly(bool serverReadyOnly);
+    void setShowServerBadges(bool show);
 
     bool hasActiveSearchJob() const { return m_jobPtr && m_jobPtr->isRunning(); }
     Task::Ptr activeSearchJob() { return hasActiveSearchJob() ? m_jobPtr : nullptr; }
@@ -117,6 +119,8 @@ class ModpackListModel : public QAbstractListModel {
     enum SearchState { None, CanPossiblyFetchMore, ResetRequested, Finished } m_searchState = None;
 
     Task::Ptr m_jobPtr;
+    bool m_serverReadyOnly = false;
+    bool m_showServerBadges = false;
 
     std::shared_ptr<QByteArray> m_allResponse = std::make_shared<QByteArray>();
     QByteArray m_specific_response;

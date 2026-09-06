@@ -5,6 +5,8 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QObject>
 #include <QRegularExpression>
 #include <QSaveFile>
@@ -81,6 +83,60 @@ QMap<QString, QString> ServerProperties::load(const QString &path, QString *erro
         }
     }
     return values;
+}
+
+QString ServerProperties::worldSetupIssue(const QString &serverRoot)
+{
+    const QDir root(serverRoot);
+    QString error;
+    const auto properties = load(root.filePath("server.properties"), &error);
+    if (!error.isEmpty()) {
+        return error;
+    }
+    // Existing worlds own their generation settings. Never regenerate them.
+    const QString world = properties.value("level-name", "world");
+    if (QFileInfo(root.filePath(world + "/level.dat")).isFile()) {
+        return {};
+    }
+    // Provider adapters can declare arbitrary required properties without
+    // teaching the launcher about each individual modpack or generator.
+    QFile requirements(root.filePath("server-setup-required.txt"));
+    if (requirements.exists()) {
+        if (!requirements.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            return QObject::tr("Setup required: could not read the pack's required server settings.");
+        }
+        QStringList missing;
+        while (!requirements.atEnd()) {
+            const QString key = QString::fromUtf8(requirements.readLine()).trimmed();
+            if (key.isEmpty() || key.startsWith('#')) {
+                continue;
+            }
+            if (properties.value(key).trimmed().isEmpty()) {
+                missing.append(key);
+            }
+        }
+        if (!missing.isEmpty()) {
+            missing.removeDuplicates();
+            return QObject::tr("Setup required: set %1 in Server Settings using the pack's "
+                               "instructions before generating a world.").arg(missing.join(", "));
+        }
+    }
+    if (QFileInfo(root.filePath("config/topography/Topography.js")).isFile()
+        && properties.value("topography-preset").trimmed().isEmpty()) {
+        return QObject::tr("Setup required: this pack uses Topography. Choose the pack's world preset "
+                           "and add topography-preset in Server Settings before the first start. "
+                           "Consult the pack's server instructions; no world has been generated.");
+    }
+    if (QFileInfo(root.filePath("config/topography/Topography.txt")).isFile()) {
+        const auto generator = QJsonDocument::fromJson(
+            properties.value("generator-settings").toUtf8()).object();
+        if (generator.value("Topography-Preset").toString().trimmed().isEmpty()) {
+            return QObject::tr("Setup required: this pack uses legacy Topography. Set the "
+                               "Topography-Preset in generator-settings using the pack's server "
+                               "instructions before the first start. No world has been generated.");
+        }
+    }
+    return {};
 }
 
 bool ServerProperties::validate(const QMap<QString, QString> &values, QString *error)

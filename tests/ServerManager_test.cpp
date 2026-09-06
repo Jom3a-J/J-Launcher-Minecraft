@@ -14,13 +14,16 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <algorithm>
+#include <utility>
 
 #include <archive/ArchiveWriter.h>
 #include <server/ServerInstance.h>
 #include <server/ServerManager.h>
 #include <server/ServerModpackInstaller.h>
 #include <server/ServerPlayerAccess.h>
+#include <server/ServerProperties.h>
 #include <FileSystem.h>
+#include <modplatform/helpers/OverrideUtils.h>
 
 namespace {
 bool writeFile(const QString& path, const QByteArray& contents)
@@ -177,6 +180,44 @@ class ServerManagerTest : public QObject {
         QCOMPARE(profile.loaderVersion, QString("21.1.233"));
     }
 
+    void preservesOverrideWordsInFilePaths()
+    {
+        QTemporaryDir temporary;
+        QVERIFY(temporary.isValid());
+        const QString source = temporary.filePath("overrides");
+        const QString metadata = temporary.filePath("mrpack");
+        const QString relative = "config/resource_overrides.json";
+        QVERIFY(writeFile(QDir(source).filePath(relative), "{}"));
+        Override::createOverrides("overrides", metadata, source);
+        const auto paths = Override::readOverrides("overrides", metadata);
+        QVERIFY(paths.contains(relative));
+        QVERIFY(!paths.contains("json"));
+    }
+
+    void checksRequiredSettingsBeforeWorldGeneration()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        QVERIFY(writeFile(root.filePath("server-setup-required.txt"),
+                          "# Pack requirements\ncustom-generator\n"));
+        QVERIFY(ServerProperties::worldSetupIssue(root.path()).contains("custom-generator"));
+        QVERIFY(writeFile(root.filePath("server.properties"), "custom-generator=sky\n"));
+        QVERIFY(ServerProperties::worldSetupIssue(root.path()).isEmpty());
+        QVERIFY(writeFile(root.filePath("server.properties"), "level-name=existing\n"));
+        QVERIFY(writeFile(root.filePath("existing/level.dat"), "world"));
+        QVERIFY(ServerProperties::worldSetupIssue(root.path()).isEmpty());
+    }
+
+    void checksTopographyAcrossProviders()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        QVERIFY(writeFile(root.filePath("config/topography/Topography.js"), "// presets"));
+        QVERIFY(!ServerProperties::worldSetupIssue(root.path()).isEmpty());
+        QVERIFY(writeFile(root.filePath("server.properties"), "topography-preset=void\n"));
+        QVERIFY(ServerProperties::worldSetupIssue(root.path()).isEmpty());
+    }
+
     void preparesServerContentAndFiltersClientOnlyFiles()
     {
         QTemporaryDir temporaryRoot;
@@ -200,6 +241,9 @@ class ServerManagerTest : public QObject {
         QVERIFY(writeFile(
             QDir(gameRoot).filePath("ftbteambases/structures/base.nbt"),
             "structure"));
+        QVERIFY(writeFile(
+            QDir(gameRoot).filePath("global_data_packs/skyfactory/pack.mcmeta"),
+            "{}"));
         QVERIFY(writeFile(QDir(gameRoot).filePath("default-server.properties"),
                           "allow-flight=true\nspawn-protection=512\n"));
         QVERIFY(writeFile(QDir(gameRoot).filePath("server-icon.png"), "icon"));
@@ -232,6 +276,7 @@ class ServerManagerTest : public QObject {
             "configureddefaults/config/common.snbt\n"
             "datapacks/worldgen_removals/data/example/biome_modifier/remove.json\n"
             "ftbteambases/structures/base.nbt\n"
+            "global_data_packs/skyfactory/pack.mcmeta\n"
             "future-provider-data/rules.json\n"
             "default-server.properties\n"
             "server-icon.png\n"));
@@ -249,6 +294,8 @@ class ServerManagerTest : public QObject {
             "configureddefaults/config/common.snbt")));
         QVERIFY(QFileInfo::exists(QDir(destination).filePath(
             "ftbteambases/structures/base.nbt")));
+        QVERIFY(QFileInfo::exists(QDir(destination).filePath(
+            "global_data_packs/skyfactory/pack.mcmeta")));
         QVERIFY(QFileInfo::exists(QDir(destination).filePath(
             "future-provider-data/rules.json")));
         QCOMPARE(QFile(QDir(destination).filePath("server.properties")).exists(), true);
@@ -334,6 +381,55 @@ class ServerManagerTest : public QObject {
         QVERIFY(skipped.contains("mods/jar-client.jar"));
     }
 
+    void overlaysAtLauncherServerOnlyRootFiles()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        const QString destination = root.filePath("prepared");
+
+        QVERIFY(writeFile(QDir(gameRoot).filePath("mods/universal.jar"),
+                          "universal"));
+        QVERIFY(writeFile(QDir(gameRoot).filePath("mods/client-only.jar"),
+                          "client"));
+        QVERIFY(writeFile(QDir(gameRoot).filePath("config/common.cfg"),
+                          "common"));
+        QVERIFY(writeFile(
+            QDir(gameRoot).filePath(
+                "global_data_packs/skyfactory/pack.mcmeta"),
+            "{}"));
+        QVERIFY(writeFile(
+            QDir(instanceRoot).filePath("server-pack/provider.txt"),
+            "atlauncher\n"));
+        QVERIFY(writeFile(
+            QDir(instanceRoot).filePath("server-pack/client-only.txt"),
+            "mods/client-only.jar\n"));
+        QVERIFY(writeFile(
+            QDir(instanceRoot).filePath(
+                "server-pack/server-files/log4j2_17-111.xml"),
+            "log4j configuration"));
+
+        QStringList skipped;
+        QString error;
+        QVERIFY2(ServerModpackInstaller::prepareContent(
+                     instanceRoot, gameRoot, destination, &skipped, &error),
+                 qPrintable(error));
+        QVERIFY(QFileInfo::exists(
+            QDir(destination).filePath("mods/universal.jar")));
+        QVERIFY(QFileInfo::exists(
+            QDir(destination).filePath("config/common.cfg")));
+        QVERIFY(QFileInfo::exists(
+            QDir(destination).filePath(
+                "global_data_packs/skyfactory/pack.mcmeta")));
+        QVERIFY(QFileInfo::exists(
+            QDir(destination).filePath("log4j2_17-111.xml")));
+        QVERIFY(!QFileInfo::exists(
+            QDir(destination).filePath("mods/client-only.jar")));
+        QVERIFY(skipped.contains("mods/client-only.jar"));
+    }
+
     void rejectsIncompleteProviderServerManifest()
     {
         QTemporaryDir temporaryRoot;
@@ -389,6 +485,10 @@ class ServerManagerTest : public QObject {
             ServerModpackInstaller::createMatchingServer(
                 &manager, profile, instanceRoot, gameRoot, "Must Roll Back");
         QVERIFY(!failedTransaction.isValid());
+        QCOMPARE(failedTransaction.failureCategory,
+                 ServerModpackFailureCategory::ContentProjection);
+        QCOMPARE(failedTransaction.failureStage,
+                 ServerModpackFailureStage::ContentPreparation);
         QCOMPARE(manager.serverCount(), 0);
 
         QVERIFY(writeFile(
@@ -446,6 +546,316 @@ class ServerManagerTest : public QObject {
             QDir(destination).filePath("mods/client-only.jar")));
     }
 
+    void publishedServerPackKeepsClientLabelledFiles()
+    {
+        for (const QString &serverRoot : { QStringLiteral("server-pack/server-files"),
+                                           QStringLiteral("server-pack/server-files/RLCraft Server") }) {
+            QTemporaryDir temporaryRoot;
+            QVERIFY(temporaryRoot.isValid());
+            const QDir root(temporaryRoot.path());
+            const QString instanceRoot = root.filePath("instance");
+            const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+            const QByteArray bqTweaker("published BQTweaker bytes");
+            const QByteArray legendaryTooltips("published LegendaryTooltips bytes");
+            QVERIFY(writeFile(QDir(gameRoot).filePath("mods/BQTweaker.jar"),
+                              "client BQTweaker bytes"));
+            QVERIFY(writeFile(QDir(gameRoot).filePath("mods/LegendaryTooltips.jar"),
+                              "client LegendaryTooltips bytes"));
+            QVERIFY(writeFile(QDir(instanceRoot).filePath(
+                                  "mrpack/modrinth.index.json"),
+                              QJsonDocument(QJsonObject{
+                                  { "formatVersion", 1 },
+                                  { "game", "minecraft" },
+                                  { "dependencies", QJsonObject{
+                                      { "minecraft", "1.20.1" },
+                                      { "fabric-loader", "0.15.11" },
+                                  } },
+                                  { "files", QJsonArray{
+                                      QJsonObject{
+                                          { "path", "mods/BQTweaker.jar" },
+                                          { "env", QJsonObject{
+                                              { "client", "required" },
+                                              { "server", "unsupported" },
+                                          } },
+                                      },
+                                      QJsonObject{
+                                          { "path", "mods/LegendaryTooltips.jar" },
+                                          { "env", QJsonObject{
+                                              { "client", "required" },
+                                              { "server", "unsupported" },
+                                          } },
+                                      },
+                                  } },
+                              }).toJson()));
+            QVERIFY(writeFile(QDir(instanceRoot).filePath(
+                                  "server-pack/published-server-pack.txt"),
+                              "curseforge\n"));
+            QVERIFY(writeFile(QDir(instanceRoot).filePath(
+                                  serverRoot + "/mods/BQTweaker.jar"), bqTweaker));
+            QVERIFY(writeFile(QDir(instanceRoot).filePath(
+                                  serverRoot + "/mods/LegendaryTooltips.jar"),
+                              legendaryTooltips));
+
+            ServerManager manager(root.filePath("server-data"));
+            const auto profile = ServerModpackInstaller::profileForVersions(
+                "1.20.1", "0.15.11", {}, {}, {});
+            const auto result = ServerModpackInstaller::createMatchingServer(
+                &manager, profile, instanceRoot, gameRoot, "RLCraft Server");
+            QVERIFY2(result.isValid(), qPrintable(result.error));
+            QVERIFY(result.hasDedicatedServerPack);
+            QVERIFY(result.skippedClientFiles.isEmpty());
+            QVERIFY(std::any_of(
+                result.warnings.cbegin(), result.warnings.cend(),
+                [](const QString &warning) {
+                    return warning.contains("marked game-only", Qt::CaseInsensitive)
+                        && warning.contains("supplied server pack", Qt::CaseInsensitive);
+                }));
+            QVERIFY(std::none_of(
+                result.warnings.cbegin(), result.warnings.cend(),
+                [](const QString &warning) {
+                    return warning.contains("hash", Qt::CaseInsensitive);
+                }));
+
+            const auto server = manager.getServer(result.serverId);
+            QVERIFY(server);
+            QCOMPARE(server->status(), ServerStatus::Stopped);
+            for (const auto &expected : {
+                     std::pair{ QStringLiteral("BQTweaker.jar"), bqTweaker },
+                     std::pair{ QStringLiteral("LegendaryTooltips.jar"), legendaryTooltips },
+                 }) {
+                QFile retained(QDir(server->modsDirectory()).filePath(expected.first));
+                QVERIFY(retained.open(QIODevice::ReadOnly));
+                QCOMPARE(retained.readAll(), expected.second);
+            }
+        }
+    }
+
+    void createsPublishedFabricServerWhenDependencyCheckIsInconclusive()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(QDir().mkpath(gameRoot));
+        const QString sourcePath = QDir(instanceRoot).filePath(
+            "server-pack/server-files/mods/connected-glass.jar");
+        QVERIFY(writeFabricModJar(
+            sourcePath, "connectedglass", "*", QJsonObject{{ "fusion", ">=1.2.9" }}));
+        QFile source(sourcePath);
+        QVERIFY(source.open(QIODevice::ReadOnly));
+        const QByteArray sourceBytes = source.readAll();
+        QVERIFY(writeFile(QDir(instanceRoot).filePath(
+                              "server-pack/published-server-pack.txt"),
+                          "curseforge\n"));
+
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.20.1", "0.15.11", {}, {}, {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot,
+            "Published Fabric Dependency Check");
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        QVERIFY(result.hasDedicatedServerPack);
+        const auto warning = std::find_if(
+            result.warnings.cbegin(), result.warnings.cend(),
+            [](const QString &candidate) {
+                return candidate.contains("could not confirm", Qt::CaseInsensitive)
+                    && candidate.contains("fusion");
+            });
+        QVERIFY(warning != result.warnings.cend());
+        QVERIFY(warning->startsWith("The launcher could not confirm"));
+        QVERIFY(warning->contains("server was created", Qt::CaseInsensitive));
+        QVERIFY(warning->contains("loader will check", Qt::CaseInsensitive));
+
+        const auto server = manager.getServer(result.serverId);
+        QVERIFY(server);
+        QCOMPARE(server->status(), ServerStatus::Stopped);
+        QFile installed(QDir(server->modsDirectory()).filePath("connected-glass.jar"));
+        QVERIFY(installed.open(QIODevice::ReadOnly));
+        QCOMPARE(installed.readAll(), sourceBytes);
+    }
+
+    void createsPublishedForgeServerWhenDeclaredVersionIsIncompatible()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(QDir().mkpath(gameRoot));
+        const QString examplePath = QDir(instanceRoot).filePath(
+            "server-pack/server-files/mods/example.jar");
+        QVERIFY(writeForgeModJar(
+            examplePath, "META-INF/mods.toml",
+            QByteArrayLiteral(
+                "modLoader=\"javafml\"\n"
+                "loaderVersion=\"[47,)\"\n"
+                "license=\"Test\"\n"
+                "[[mods]]\n"
+                "modId=\"example\"\n"
+                "version=\"1.0.0\"\n"
+                "displayName=\"Example\"\n"
+                "[[dependencies.example]]\n"
+                "modId=\"requiredlib\"\n"
+                "mandatory=true\n"
+                "versionRange=\"[2,)\"\n"
+                "side=\"SERVER\"\n")));
+        QVERIFY(writeForgeModJar(
+            QDir(instanceRoot).filePath(
+                "server-pack/server-files/mods/required-library.jar"),
+            "META-INF/mods.toml",
+            QByteArrayLiteral(
+                "modLoader=\"javafml\"\n"
+                "loaderVersion=\"[47,)\"\n"
+                "license=\"Test\"\n"
+                "[[mods]]\n"
+                "modId=\"requiredlib\"\n"
+                "version=\"1.0.0\"\n"
+                "displayName=\"Required Library\"\n")));
+        QFile source(examplePath);
+        QVERIFY(source.open(QIODevice::ReadOnly));
+        const QByteArray sourceBytes = source.readAll();
+        QVERIFY(writeFile(QDir(instanceRoot).filePath(
+                              "server-pack/published-server-pack.txt"),
+                          "curseforge\n"));
+
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.20.1", {}, "47.1.0", {}, {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot,
+            "Published Forge Dependency Check");
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        const auto warning = std::find_if(
+            result.warnings.cbegin(), result.warnings.cend(),
+            [](const QString &candidate) {
+                return candidate.contains("could not confirm", Qt::CaseInsensitive)
+                    && candidate.contains("requiredlib")
+                    && candidate.contains("installed version 1.0.0");
+            });
+        QVERIFY(warning != result.warnings.cend());
+        QVERIFY(warning->startsWith("The launcher could not confirm"));
+        QVERIFY(warning->contains("Details:"));
+
+        const auto server = manager.getServer(result.serverId);
+        QVERIFY(server);
+        QCOMPARE(server->status(), ServerStatus::Stopped);
+        QFile installed(QDir(server->modsDirectory()).filePath("example.jar"));
+        QVERIFY(installed.open(QIODevice::ReadOnly));
+        QCOMPARE(installed.readAll(), sourceBytes);
+    }
+
+    void rejectsPublishedServerPackUnsafeProviderPath()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(writeFile(QDir(instanceRoot).filePath(
+                              "server-pack/published-server-pack.txt"),
+                          "modrinth\n"));
+        QVERIFY(writeFile(QDir(instanceRoot).filePath(
+                              "mrpack/modrinth.index.json"),
+                          QJsonDocument(QJsonObject{
+                              { "formatVersion", 1 },
+                              { "game", "minecraft" },
+                              { "dependencies", QJsonObject{
+                                  { "minecraft", "1.20.1" },
+                                  { "fabric-loader", "0.15.11" },
+                              } },
+                              { "files", QJsonArray{
+                                  QJsonObject{{ "path", "../outside.jar" }},
+                              } },
+                          }).toJson()));
+
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.20.1", "0.15.11", {}, {}, {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot,
+            "Unsafe Published Server Pack");
+        QVERIFY(!result.isValid());
+        QCOMPARE(result.failureCategory,
+                 ServerModpackFailureCategory::CompatibilityMetadata);
+        QCOMPARE(result.failureStage,
+                 ServerModpackFailureStage::CompatibilityCheck);
+        QVERIFY(result.error.contains("unsafe server file path", Qt::CaseInsensitive));
+        QCOMPARE(manager.serverCount(), 0);
+    }
+
+    void rejectsPublishedServerPackMissingDownloadedContent()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(QDir().mkpath(gameRoot));
+        QVERIFY(writeFile(QDir(instanceRoot).filePath(
+                              "server-pack/published-server-pack.txt"),
+                          "curseforge\n"));
+
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.20.1", "0.15.11", {}, {}, {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot,
+            "Missing Published Server Pack");
+        QVERIFY(!result.isValid());
+        QCOMPARE(result.failureCategory,
+                 ServerModpackFailureCategory::ContentProjection);
+        QCOMPARE(result.failureStage,
+                 ServerModpackFailureStage::ContentPreparation);
+        QVERIFY(result.error.contains("not extracted", Qt::CaseInsensitive));
+        QCOMPARE(manager.serverCount(), 0);
+    }
+
+    void publishedDependencyInspectionLimitsAreAdvisoryButUnsafePathsFail()
+    {
+        for (bool unsafePath : { false, true }) {
+            QTemporaryDir root;
+            QVERIFY(root.isValid());
+            const QString instanceRoot = root.filePath("instance");
+            const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+            QVERIFY(QDir().mkpath(gameRoot));
+            const QString jarPath = QDir(instanceRoot).filePath(
+                "server-pack/server-files/mods/nested.jar");
+            QVERIFY(writeFile(QDir(instanceRoot).filePath(
+                "server-pack/published-server-pack.txt"), "curseforge\n"));
+            if (unsafePath) {
+                QVERIFY(QDir().mkpath(QFileInfo(jarPath).absolutePath()));
+                MMCZip::ArchiveWriter archive(jarPath);
+                QVERIFY(archive.open());
+                QVERIFY(archive.addFile("fabric.mod.json", QByteArray(
+                    R"({"schemaVersion":1,"id":"unsafe","version":"1.0.0","jars":[{"file":"../outside.jar"}]})")));
+                QVERIFY(archive.close());
+            } else {
+                QByteArray nested;
+                for (int level = 0; level < 10; ++level) {
+                    QVERIFY(writeFabricModJar(jarPath, QString("nested%1").arg(level), "*", {}, nested));
+                    QFile jar(jarPath);
+                    QVERIFY(jar.open(QIODevice::ReadOnly));
+                    nested = jar.readAll();
+                }
+            }
+            ServerManager manager(root.filePath("servers"));
+            const auto profile = ServerModpackInstaller::profileForVersions(
+                "1.20.1", "0.15.11", {}, {}, {});
+            const auto result = ServerModpackInstaller::createMatchingServer(
+                &manager, profile, instanceRoot, gameRoot, "Nested metadata");
+            QCOMPARE(result.isValid(), !unsafePath);
+            if (unsafePath) {
+                QVERIFY(result.error.contains("unsafe bundled dependency path"));
+                QCOMPARE(manager.serverCount(), 0);
+            } else {
+                QVERIFY(result.warnings.join('\n').contains("eight nested"));
+                QCOMPARE(manager.getServer(result.serverId)->status(), ServerStatus::Stopped);
+            }
+        }
+    }
+
     void createsMatchingStoppedServerFromInstance()
     {
         const QString previousOrganization = QCoreApplication::organizationName();
@@ -485,6 +895,10 @@ class ServerManagerTest : public QObject {
                     gameRoot, QDir(gameRoot).filePath("mods/changed.jar")).isEmpty());
         QVERIFY(writeFile(QDir(gameRoot).filePath("config/common.toml"),
                           "config"));
+        QVERIFY(writeFile(
+            QDir(instanceRoot).filePath(
+                "server-pack/server-properties.txt"),
+            "topography-preset=void\n"));
 
         ServerManager manager(root.filePath("server-data"));
         const auto profile = ServerModpackInstaller::profileForVersions(
@@ -504,6 +918,13 @@ class ServerManagerTest : public QObject {
             QDir(server->serverDirectory()).filePath("mods/common.jar")));
         QVERIFY(QFileInfo::exists(
             QDir(server->serverDirectory()).filePath("config/common.toml")));
+        QString propertiesError;
+        const auto properties = ServerProperties::load(
+            server->serverPropertiesPath(), &propertiesError);
+        QVERIFY2(propertiesError.isEmpty(), qPrintable(propertiesError));
+        QCOMPARE(properties.value("topography-preset"), QString("void"));
+        QCOMPARE(properties.value("server-port"),
+                 QString::number(server->port()));
         const QString trackingPrefix =
             QString("ServerContentSources/%1/").arg(server->id());
         QCOMPARE(QSettings().value(trackingPrefix + "common.jar").toString(),
@@ -535,6 +956,10 @@ class ServerManagerTest : public QObject {
                                       Qt::CaseInsensitive));
         QVERIFY(result.error.contains("connectedglass"));
         QVERIFY(result.error.contains("fusion"));
+        QCOMPARE(result.failureCategory,
+                 ServerModpackFailureCategory::DependencyIncompatibility);
+        QCOMPARE(result.failureStage,
+                 ServerModpackFailureStage::DependencyValidation);
         QCOMPARE(manager.serverCount(), 0);
 
         const QString nestedFusionPath = root.filePath("nested-fusion.jar");
@@ -639,6 +1064,46 @@ class ServerManagerTest : public QObject {
         const auto completeResult = ServerModpackInstaller::createMatchingServer(
             &manager, profile, instanceRoot, gameRoot, "Complete Forge Pack");
         QVERIFY2(completeResult.isValid(), qPrintable(completeResult.error));
+        QCOMPARE(manager.serverCount(), 1);
+    }
+
+    void ignoresModernForgeMetadataForLegacyForge()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(writeForgeModJar(
+            QDir(gameRoot).filePath(
+                "mods/SpellboundSpireTowers-2.0.0_for_1.12.2.jar"),
+            "META-INF/mods.toml",
+            QByteArrayLiteral(
+                "modLoader=\"javafml\"\n"
+                "loaderVersion=\"[28,)\"\n"
+                "[[mods]]\n"
+                "modId=\"spellboundspiretowers\"\n"
+                "version=\"1.0.0\"\n"
+                "displayName=\"Spellbound Spire Towers\"\n"
+                "[[dependencies.spellboundspiretowers]]\n"
+                "modId=\"minecraft\"\n"
+                "mandatory=true\n"
+                "versionRange=\"[1.14.4]\"\n"
+                "ordering=\"NONE\"\n"
+                "side=\"BOTH\"\n")));
+
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.12.2", {}, "14.23.5.2860", {}, {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot,
+            "Legacy Forge Pack");
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        QVERIFY(std::any_of(
+            result.warnings.cbegin(), result.warnings.cend(),
+            [](const QString& warning) {
+                return warning.contains("Legacy Forge", Qt::CaseInsensitive);
+            }));
         QCOMPARE(manager.serverCount(), 1);
     }
 
@@ -838,6 +1303,127 @@ class ServerManagerTest : public QObject {
         QCOMPARE(manager.serverCount(), 0);
     }
 
+    void acceptsInclusiveUnboundedForgeVersionRange()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(writeForgeModJar(
+            QDir(gameRoot).filePath("mods/structure-gel.jar"),
+            "META-INF/mods.toml",
+            QByteArrayLiteral(
+                "modLoader=\"javafml\"\n"
+                "loaderVersion=\"[47,)\"\n"
+                "[[mods]]\n"
+                "modId=\"structure_gel\"\n"
+                "version=\"2.16.2\"\n"
+                "displayName=\"Structure Gel API\"\n")));
+        QVERIFY(writeForgeModJar(
+            QDir(gameRoot).filePath("mods/the-conjurer.jar"),
+            "META-INF/mods.toml",
+            QByteArrayLiteral(
+                "modLoader=\"javafml\"\n"
+                "loaderVersion=\"[47,)\"\n"
+                "[[mods]]\n"
+                "modId=\"conjurer_illager\"\n"
+                "version=\"1.1.6\"\n"
+                "displayName=\"The Conjurer\"\n"
+                "[[dependencies.conjurer_illager]]\n"
+                "modId=\"structure_gel\"\n"
+                "mandatory=true\n"
+                "versionRange=\"[2.13.1,]\"\n"
+                "ordering=\"NONE\"\n"
+                "side=\"BOTH\"\n")));
+
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.20.1", {}, "47.4.20", {}, {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot,
+            "Inclusive Unbounded Range Pack");
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        QCOMPARE(manager.serverCount(), 1);
+    }
+
+    void allowsForgeMetadataWithLenientMultilineText()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(writeForgeModJar(
+            QDir(gameRoot).filePath(
+                "mods/walljump-forge-1.16.4-1.3.7.jar"),
+            "META-INF/mods.toml",
+            QByteArrayLiteral(
+                "modLoader=\"javafml\"\n"
+                "loaderVersion=\"[35,)\"\n"
+                "[[mods]]\n"
+                "modId=\"walljump\"\n"
+                "version=\"1.16.4-1.3.7\"\n"
+                "displayName=\"Wall-Jump!\"\n"
+                "description=\"Jump from wall to wall!\n"
+                "Jump towards a wall and hold the wall jump key.\"\n")));
+
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.16.5", {}, "36.2.28", {}, {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot,
+            "Lenient Forge Metadata Pack");
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        QVERIFY(std::any_of(
+            result.warnings.cbegin(), result.warnings.cend(),
+            [](const QString& warning) {
+                return warning.contains("walljump-forge-1.16.4-1.3.7.jar")
+                    && warning.contains("strictly parse", Qt::CaseInsensitive);
+            }));
+        QCOMPARE(manager.serverCount(), 1);
+    }
+
+    void defersForgeExactMinecraftPatchMismatch()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(writeForgeModJar(
+            QDir(gameRoot).filePath("mods/Checklist-1.16.5-1.2.2.jar"),
+            "META-INF/mods.toml",
+            QByteArrayLiteral(
+                "modLoader=\"javafml\"\n"
+                "loaderVersion=\"[31,)\"\n"
+                "[[mods]]\n"
+                "modId=\"checklist\"\n"
+                "version=\"1.2.2\"\n"
+                "displayName=\"Checklist\"\n"
+                "[[dependencies.checklist]]\n"
+                "modId=\"minecraft\"\n"
+                "mandatory=true\n"
+                "versionRange=\"[1.16.4]\"\n"
+                "ordering=\"NONE\"\n"
+                "side=\"BOTH\"\n")));
+
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.16.5", {}, "36.2.28", {}, {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot,
+            "Forge Patch Compatibility Pack");
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        QVERIFY(std::any_of(
+            result.warnings.cbegin(), result.warnings.cend(),
+            [](const QString& warning) {
+                return warning.contains("Checklist")
+                    && warning.contains("newer patch", Qt::CaseInsensitive);
+            }));
+        QCOMPARE(manager.serverCount(), 1);
+    }
+
     void validatesExternalModrinthServerProjection()
     {
         const QString instanceRoot = qEnvironmentVariable(
@@ -878,6 +1464,42 @@ class ServerManagerTest : public QObject {
         QVERIFY(!result.hasDedicatedServerPack);
         QCOMPARE(result.provider, QString("modrinth"));
         QCOMPARE(manager.serverCount(), 1);
+    }
+
+    void recognizesForgeBundledDependencies()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        const auto nested = root.filePath("ponder.jar");
+        QVERIFY(writeForgeModJar(nested, "META-INF/mods.toml",
+            "modLoader=\"javafml\"\n[[mods]]\nmodId=\"ponder\"\nversion=\"1.0.91\"\n"));
+        QFile file(nested);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const auto bytes = file.readAll();
+        const auto instance = root.filePath("instance");
+        const auto game = QDir(instance).filePath("minecraft");
+        QVERIFY(QDir().mkpath(QDir(game).filePath("mods")));
+        const auto parent = QDir(game).filePath("mods/create.jar");
+        const auto makeParent = [&](bool includeNested) {
+            MMCZip::ArchiveWriter writer(parent);
+            return writer.open()
+                && writer.addFile("META-INF/mods.toml", QByteArray(
+                    "modLoader=\"javafml\"\n[[mods]]\nmodId=\"create\"\nversion=\"6.0.8\"\n"
+                    "[[dependencies.create]]\nmodId=\"ponder\"\nmandatory=true\nversionRange=\"[1.0.91,)\"\nside=\"BOTH\"\n"))
+                && writer.addFile("META-INF/jarjar/metadata.json", QByteArray(
+                    "{\"jars\":[{\"path\":\"META-INF/jarjar/ponder.jar\"}]}"))
+                && (!includeNested || writer.addFile("META-INF/jarjar/ponder.jar", bytes))
+                && writer.close();
+        };
+        ServerManager manager(root.filePath("servers"));
+        const auto profile = ServerModpackInstaller::profileForVersions("1.20.1", {}, "47.4.20", {}, {});
+        QVERIFY(makeParent(true));
+        const auto result = ServerModpackInstaller::createMatchingServer(&manager, profile, instance, game, "Bundled");
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        QVERIFY(makeParent(false));
+        const auto missing = ServerModpackInstaller::createMatchingServer(&manager, profile, instance, game, "Missing");
+        QVERIFY(!missing.isValid());
+        QVERIFY(missing.error.contains("ponder.jar"));
     }
 
     void validatesExternalPublishedServerPack()

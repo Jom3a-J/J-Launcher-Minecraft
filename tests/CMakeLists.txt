@@ -70,6 +70,10 @@ ecm_add_test(ServerManager_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION
     TEST_NAME ServerManager)
 add_dependencies(ServerManager FakeMinecraftServer)
 
+ecm_add_test(ServerMemory_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME ServerMemory)
+set_tests_properties(ServerMemory PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 ecm_add_test(ServerPackCompatibility_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME ServerPackCompatibility)
 

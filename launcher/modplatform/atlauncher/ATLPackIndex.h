@@ -36,6 +36,7 @@ struct IndexedPack {
     PackType type;
     QList<IndexedVersion> versions;
     bool system;
+    bool createServer = false;
     QString description;
 
     QString safeName;

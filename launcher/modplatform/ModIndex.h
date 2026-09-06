@@ -84,7 +84,8 @@ enum class SideTypeValue : std::uint8_t {
     NoSide = 0,
     ClientSide = 1U << 0U,
     ServerSide = 1U << 1U,
-    UniversalSide = ClientSide | ServerSide
+    UniversalSide = ClientSide | ServerSide,
+    ServerCompatibleSide = 1U << 2U
 };
 
 struct SideType : EnumWrapper<SideType, SideTypeValue> {
@@ -93,7 +94,7 @@ struct SideType : EnumWrapper<SideType, SideTypeValue> {
     static constexpr auto mapping()
     {
         return std::array{ std::pair{ ClientSide, "client" }, std::pair{ ServerSide, "server" }, std::pair{ UniversalSide, "both" },
-                           std::pair{ NoSide, "" } };
+                           std::pair{ ServerCompatibleSide, "server-compatible" }, std::pair{ NoSide, "" } };
     };
 
     using enum SideTypeValue;

@@ -1661,19 +1661,32 @@ void ServerListPage::onInstallModpack()
         ServerModpackInstaller::createMatchingServer(
             m_serverManager, *instance, instance->name() + tr(" Server"));
     if (!result.isValid()) {
+        const QString reason = Privacy::sanitizeText(result.error);
+        const QString recovery =
+            result.failureCategory == ServerModpackFailureCategory::CompatibilityMetadata
+            ? tr("Try another pack version or report this problem to the pack author.")
+            : tr("Review the reason, then try again.");
         const bool wasNewInstance = !existingInstanceIds.contains(installedInstanceId);
         if (wasNewInstance) {
             APPLICATION->instances()->trashInstance(installedInstanceId);
         }
-        QMessageBox::critical(
-            this, tr("Create from Modpack"),
-            wasNewInstance
-                ? tr("A compatible server could not be created, so the new client "
-                     "instance was rolled back.\n\n%1")
-                      .arg(result.error)
-                : tr("A compatible server could not be created. The existing instance "
-                     "was kept because it was updated rather than newly created.\n\n%1")
-                      .arg(result.error));
+
+        QMessageBox failureDialog(this);
+        failureDialog.setWindowTitle(tr("Create from Modpack"));
+        failureDialog.setIcon(QMessageBox::Critical);
+        failureDialog.setTextFormat(Qt::PlainText);
+        failureDialog.setText(tr("Could not create server."));
+        failureDialog.setInformativeText(
+            tr("Reason:\n%1\n\n%2\n\n%3")
+                .arg(reason, recovery,
+                     wasNewInstance
+                         ? tr("The newly downloaded instance was moved to the trash.")
+                         : tr("The existing instance was kept.")));
+        failureDialog.setDetailedText(
+            tr("Category: %1\nStage: %2")
+                .arg(serverModpackFailureCategoryName(result.failureCategory),
+                     serverModpackFailureStageName(result.failureStage)));
+        failureDialog.exec();
         return;
     }
 
@@ -1700,6 +1713,12 @@ void ServerListPage::onInstallModpack()
     if (!result.skippedClientFiles.isEmpty()) {
         details += tr("\n\nExcluded %1 client-only file(s) from the server.")
                        .arg(result.skippedClientFiles.size());
+    }
+    if (const auto createdServer = m_serverManager->getServer(result.serverId)) {
+        details += tr("\n\nServer memory: %1 MB minimum / %2 MB maximum (automatic). "
+                       "You can change this later in Server Settings.")
+                       .arg(createdServer->minMemory())
+                       .arg(createdServer->maxMemory());
     }
     if (!result.warnings.isEmpty()) {
         details += tr("\n\nCompatibility note:\n%1")

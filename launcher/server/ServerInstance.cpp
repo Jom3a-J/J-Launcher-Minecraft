@@ -198,6 +198,14 @@ bool ServerInstance::start()
         return false;
     }
 
+    const QString setupIssue = ServerProperties::worldSetupIssue(m_serverDirectory);
+    if (!setupIssue.isEmpty()) {
+        appendLog("[ERROR] " + setupIssue);
+        setStatus(ServerStatus::Error);
+        emit serverError(setupIssue);
+        return false;
+    }
+
     if (!m_eulaAccepted) {
         const QString message = tr("Accept the Minecraft EULA before starting this server.");
         appendLog("[ERROR] " + message);

@@ -132,7 +132,12 @@ static LoadResult loadComponent(ComponentPtr component, Task::Ptr& loadTask, Net
             result = LoadResult::LoadedLocal;
         } else {
             loadTask = APPLICATION->metadataIndex()->loadVersion(component->m_uid, component->m_version, netmode);
-            loadTask->start();
+            // The metadata index may return a task that another instance is
+            // already using. Attach to that shared task instead of starting
+            // it twice, which is a fatal assertion in debug builds.
+            if (!loadTask->isRunning()) {
+                loadTask->start();
+            }
             if (netmode == Net::Mode::Online)
                 result = LoadResult::RequiresRemote;
             else if (metaVersion->isLoaded())

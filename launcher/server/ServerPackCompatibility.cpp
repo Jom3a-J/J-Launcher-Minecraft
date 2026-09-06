@@ -114,6 +114,28 @@ void addWarning(ServerPackCompatibilityReport &report, const QString &warning)
     report.warnings.append(warning);
 }
 
+void addProjectionWarning(ServerPackCompatibilityReport &report, const QString &warning)
+{
+    if (!report.projectionWarnings.contains(warning)) {
+        report.projectionWarnings.append(warning);
+    }
+}
+
+int serverSideRank(ServerPackFileSide side)
+{
+    switch (side) {
+        case ServerPackFileSide::ServerOnly:
+            return 3;
+        case ServerPackFileSide::Universal:
+            return 2;
+        case ServerPackFileSide::ClientOnly:
+            return 1;
+        case ServerPackFileSide::Unknown:
+            return 0;
+    }
+    return 0;
+}
+
 bool readJsonObject(const QString &path, const QString &description,
                     ServerPackCompatibilityReport &report, QJsonObject *object)
 {
@@ -195,6 +217,10 @@ void addFile(ServerPackCompatibilityReport &report, const QString &path,
         return;
     }
 
+    if (side == ServerPackFileSide::ClientOnly) {
+        report.hasClientOnlyFileMetadata = true;
+    }
+
     auto iterator = std::find_if(report.files.begin(), report.files.end(),
                                  [&normalized](const ServerPackFileDecision &file) {
                                      return file.path.compare(normalized, Qt::CaseInsensitive) == 0;
@@ -214,21 +240,18 @@ void addFile(ServerPackCompatibilityReport &report, const QString &path,
         } else if (side != ServerPackFileSide::Unknown
                    && iterator->side != ServerPackFileSide::Unknown
                    && iterator->side != side) {
-            // A generic include list and the extracted server-files tree can
-            // both describe the same server path. Keep the narrower, server-
-            // only result deterministically; client-only conflicts remain
-            // incompatible below.
-            const bool universalServerOnly =
-                (iterator->side == ServerPackFileSide::Universal
-                 && side == ServerPackFileSide::ServerOnly)
-                || (iterator->side == ServerPackFileSide::ServerOnly
-                    && side == ServerPackFileSide::Universal);
-            if (universalServerOnly) {
-                iterator->side = ServerPackFileSide::ServerOnly;
-            } else {
-                addReason(report, QObject::tr(
-                    "Conflicting server compatibility metadata was supplied for %1.")
-                                      .arg(normalized));
+            // Side labels are advisory; retain the most server-capable label
+            // regardless of metadata order. Actual path/hash/provider checks
+            // remain compatibility failures.
+            const bool clientOnlyConflict = side == ServerPackFileSide::ClientOnly
+                || iterator->side == ServerPackFileSide::ClientOnly;
+            if (serverSideRank(side) > serverSideRank(iterator->side)) {
+                iterator->side = side;
+            }
+            if (clientOnlyConflict) {
+                addProjectionWarning(report, QObject::tr(
+                    "%1 is marked both game-only and for servers. This does not block server creation.")
+                                              .arg(normalized));
             }
         }
         if (hashes && iterator->integrity == ServerPackIntegrityState::Unverified) {
@@ -700,6 +723,10 @@ void finalizeReport(ServerPackCompatibilityReport &report)
         if (file.integrity == ServerPackIntegrityState::Unverified) {
             ++unverifiedFiles;
         }
+    }
+    if (report.hasDedicatedServerPack && report.hasClientOnlyFileMetadata) {
+        addProjectionWarning(report, QObject::tr(
+            "Some files are marked game-only. The supplied server pack is used as-is."));
     }
     constexpr qsizetype unknownSideSampleLimit = 5;
     for (qsizetype i = 0; i < std::min(unknownSideSampleLimit, unknownSidePaths.size()); ++i) {
