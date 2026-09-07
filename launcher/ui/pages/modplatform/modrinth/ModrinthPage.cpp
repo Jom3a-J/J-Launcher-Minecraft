@@ -67,6 +67,12 @@ ModrinthPage::ModrinthPage(NewInstanceDialog* dialog, QWidget* parent)
 
     m_ui->packView->setModel(m_model);
 
+    const bool serverMode = m_dialog->isServerModpackMode();
+    m_ui->serverCatalogControls->setVisible(serverMode);
+    m_ui->serverCompatibilityLabel->setVisible(serverMode);
+    m_model->setShowServerBadges(serverMode);
+    m_model->setServerReadyOnly(serverMode);
+
     m_ui->versionSelectionBox->view()->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     m_ui->versionSelectionBox->view()->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
 
@@ -90,6 +96,11 @@ ModrinthPage::ModrinthPage(NewInstanceDialog* dialog, QWidget* parent)
     connect(m_ui->sortByBox, &QComboBox::currentIndexChanged, this, &ModrinthPage::triggerSearch);
     connect(m_ui->packView->selectionModel(), &QItemSelectionModel::currentChanged, this, &ModrinthPage::onSelectionChanged);
     connect(m_ui->versionSelectionBox, &QComboBox::currentIndexChanged, this, &ModrinthPage::onVersionSelectionChanged);
+    connect(m_ui->showUnverifiedCheckBox, &QCheckBox::toggled, this,
+            [this](bool showUnverified) {
+                m_model->setServerReadyOnly(!showUnverified);
+                triggerSearch();
+            });
 
     m_ui->packView->setItemDelegate(new ProjectItemDelegate(this));
     m_ui->packDescription->setMetaEntry(metaEntryBase());
@@ -135,6 +146,7 @@ void ModrinthPage::onSelectionChanged(QModelIndex curr, [[maybe_unused]] QModelI
     m_ui->versionSelectionBox->clear();
 
     if (!curr.isValid()) {
+        m_ui->serverCompatibilityLabel->clear();
         if (isOpened) {
             m_dialog->setSuggestedPack();
         }
@@ -143,6 +155,23 @@ void ModrinthPage::onSelectionChanged(QModelIndex curr, [[maybe_unused]] QModelI
 
     m_current = m_model->data(curr, Qt::UserRole).value<ModPlatform::IndexedPack::Ptr>();
     auto name = m_current->name;
+
+    if (m_dialog->isServerModpackMode()) {
+        if (m_current->side == ModPlatform::SideType::ClientSide) {
+            m_ui->serverCompatibilityLabel->setText(tr("Client only"));
+            m_ui->serverCompatibilityLabel->setToolTip(
+                tr("Modrinth marks this project as unsupported on servers."));
+        } else if (m_current->side == ModPlatform::SideType::ServerSide
+                   || m_current->side == ModPlatform::SideType::UniversalSide) {
+            m_ui->serverCompatibilityLabel->setText(tr("Server ready"));
+            m_ui->serverCompatibilityLabel->setToolTip(
+                tr("Modrinth marks this project as supported on servers."));
+        } else {
+            m_ui->serverCompatibilityLabel->setText(tr("Unverified"));
+            m_ui->serverCompatibilityLabel->setToolTip(
+                tr("Modrinth does not provide conclusive server-side metadata for this project."));
+        }
+    }
 
     if (!m_current->extraDataLoaded) {
         qDebug() << "Loading modrinth modpack information";
@@ -319,6 +348,11 @@ void ModrinthPage::suggestCurrent()
         m_dialog->setSuggestedPack();
         return;
     }
+    if (m_dialog->isServerModpackMode()
+        && m_current->side == ModPlatform::SideType::ClientSide) {
+        m_dialog->setSuggestedPack();
+        return;
+    }
 
     for (auto& ver : m_current->versions) {
         if (ver.fileId == m_selectedVersion) {
@@ -352,6 +386,7 @@ void ModrinthPage::onVersionSelectionChanged(int index)
 {
     if (index == -1) {
         m_selectedVersion = "";
+        m_ui->serverCompatibilityLabel->clear();
         return;
     }
     m_selectedVersion = m_ui->versionSelectionBox->itemData(index).toString();

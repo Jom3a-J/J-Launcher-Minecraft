@@ -827,6 +827,8 @@ SET(LAUNCHER_SOURCES
     server/ServerPackCompatibility.cpp
     server/ServerInstance.h
     server/ServerInstance.cpp
+    server/ServerMemory.h
+    server/ServerMemory.cpp
     server/ServerPackImportTransaction.h
     server/ServerPackImportTransaction.cpp
     server/ServerDiagnostics.h

@@ -87,7 +87,12 @@
     </widget>
    </item>
    <item>
-    <layout class="QHBoxLayout">
+   <layout class="QHBoxLayout">
+     <item>
+      <widget class="QLabel" name="serverCompatibilityLabel">
+       <property name="text"><string/></property>
+      </widget>
+     </item>
      <item>
       <widget class="QComboBox" name="sortByBox"/>
      </item>

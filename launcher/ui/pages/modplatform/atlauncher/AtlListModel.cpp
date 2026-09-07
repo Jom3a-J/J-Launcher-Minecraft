@@ -85,11 +85,39 @@ QVariant ListModel::data(const QModelIndex& index, int role) const
             return pack.description;
         case UserDataTypes::INSTALLED:
             return false;
+        case UserDataTypes::BADGE_TEXT:
+            return m_showServerBadges
+                ? (pack.createServer ? tr("Server ready") : tr("Client only"))
+                : QString();
+        case UserDataTypes::BADGE_TONE:
+            return pack.createServer ? 1 : 0;
+        case Qt::AccessibleTextRole:
+            return m_showServerBadges
+                ? tr("%1. %2.")
+                      .arg(pack.name,
+                           pack.createServer ? tr("Server ready")
+                                             : tr("Client only"))
+                : pack.name;
+        case Qt::AccessibleDescriptionRole:
+            return pack.description;
         default:
             break;
     }
 
     return {};
+}
+
+void ListModel::setShowServerBadges(bool show)
+{
+    if (m_showServerBadges == show) {
+        return;
+    }
+    m_showServerBadges = show;
+    if (!modpacks.isEmpty()) {
+        emit dataChanged(index(0, 0), index(modpacks.size() - 1, 0),
+                         { UserDataTypes::BADGE_TEXT,
+                           UserDataTypes::BADGE_TONE });
+    }
 }
 
 void ListModel::request()

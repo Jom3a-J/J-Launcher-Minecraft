@@ -41,11 +41,15 @@ struct ServerPackCompatibilityReport {
     bool minecraftVersionMetadataPresent = false;
     bool loaderMetadataPresent = false;
     bool sideMetadataPresent = false;
+    bool hasClientOnlyFileMetadata = false;
     bool hasDedicatedServerPack = false;
     ServerPackCompatibilityState state = ServerPackCompatibilityState::Unknown;
     QList<ServerPackFileDecision> files;
     QStringList reasons;
     QStringList warnings;
+    // Sparse, user-facing projection notices. Keep diagnostic compatibility
+    // warnings separate because provider indexes can contain one per file.
+    QStringList projectionWarnings;
 
     bool isCompatible() const
     {

@@ -198,5 +198,6 @@ struct PackVersion {
 };
 
 void loadVersion(PackVersion& v, QJsonObject& obj);
+QMap<QString, QString> serverPropertyOverridesForPack(const QString& safeName);
 
 }  // namespace ATLauncher

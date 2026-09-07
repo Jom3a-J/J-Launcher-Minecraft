@@ -111,6 +111,37 @@ auto ModpackListModel::data(const QModelIndex& index, int role) const -> QVarian
             return pack->description;
         case UserDataTypes::INSTALLED:
             return false;
+        case UserDataTypes::BADGE_TEXT:
+            if (!m_showServerBadges) {
+                return QString();
+            }
+            if (pack->side == ModPlatform::SideType::ClientSide) {
+                return tr("Client only");
+            }
+            if (pack->side == ModPlatform::SideType::ServerSide
+                || pack->side == ModPlatform::SideType::UniversalSide) {
+                return tr("Server ready");
+            }
+            return tr("Unverified");
+        case UserDataTypes::BADGE_TONE:
+            return pack->side == ModPlatform::SideType::ServerSide
+                    || pack->side == ModPlatform::SideType::UniversalSide
+                ? 1 : 0;
+        case Qt::AccessibleTextRole: {
+            QString availability;
+            if (m_showServerBadges) {
+                availability = pack->side == ModPlatform::SideType::ClientSide
+                    ? tr("Client only")
+                    : (pack->side == ModPlatform::SideType::ServerSide
+                           || pack->side == ModPlatform::SideType::UniversalSide
+                       ? tr("Server ready") : tr("Unverified"));
+            }
+            return availability.isEmpty()
+                ? pack->name
+                : tr("%1. %2.").arg(pack->name, availability);
+        }
+        case Qt::AccessibleDescriptionRole:
+            return pack->description;
         default:
             break;
     }
@@ -125,8 +156,33 @@ bool ModpackListModel::setData(const QModelIndex& index, const QVariant& value, 
         return false;
 
     m_modpacks[pos] = value.value<ModPlatform::IndexedPack::Ptr>();
+    emit dataChanged(index, index,
+                     { Qt::UserRole, UserDataTypes::BADGE_TEXT,
+                       UserDataTypes::BADGE_TONE });
 
     return true;
+}
+
+void ModpackListModel::setServerReadyOnly(bool serverReadyOnly)
+{
+    if (m_serverReadyOnly == serverReadyOnly) {
+        return;
+    }
+    m_serverReadyOnly = serverReadyOnly;
+    m_currentSort.clear();
+}
+
+void ModpackListModel::setShowServerBadges(bool show)
+{
+    if (m_showServerBadges == show) {
+        return;
+    }
+    m_showServerBadges = show;
+    if (!m_modpacks.isEmpty()) {
+        emit dataChanged(index(0, 0), index(m_modpacks.size() - 1, 0),
+                         { UserDataTypes::BADGE_TEXT,
+                           UserDataTypes::BADGE_TONE });
+    }
 }
 
 void ModpackListModel::performPaginatedSearch()
@@ -172,8 +228,10 @@ void ModpackListModel::performPaginatedSearch()
         searchRequestFailed("Aborted", 0);
     };
 
+    const auto side = m_serverReadyOnly ? ModPlatform::SideType::ServerCompatibleSide
+                                        : ModPlatform::SideType::NoSide;
     auto netJob = ModrinthAPI::get().searchProjects({ .type=ModPlatform::ResourceType::Modpack, .offset=m_nextSearchOffset, .search=m_currentSearchTerm, .sorting=sort, .loaders=m_filter->loaders,
-                                       .versions=m_filter->versions, .side=ModPlatform::SideType::NoSide, .categoryIds=m_filter->categoryIds, .openSource=m_filter->openSource },
+                                       .versions=m_filter->versions, .side=side, .categoryIds=m_filter->categoryIds, .openSource=m_filter->openSource },
                                      std::move(callbacks));
 
     m_jobPtr = netJob;

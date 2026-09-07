@@ -59,6 +59,8 @@ TechnicPage::TechnicPage(NewInstanceDialog* dialog, QWidget* parent)
     : QWidget(parent), ui(new Ui::TechnicPage), dialog(dialog), m_fetch_progress(this, false)
 {
     ui->setupUi(this);
+    ui->serverCompatibilityLabel->setVisible(
+        dialog->isServerModpackMode());
     ui->searchEdit->installEventFilter(this);
     model = new Technic::ListModel(this);
     ui->packView->setModel(model);
@@ -132,6 +134,7 @@ void TechnicPage::onSelectionChanged(QModelIndex first, [[maybe_unused]] QModelI
     ui->versionSelectionBox->clear();
 
     if (!first.isValid()) {
+        ui->serverCompatibilityLabel->clear();
         if (isOpened) {
             dialog->setSuggestedPack();
         }
@@ -288,8 +291,23 @@ void TechnicPage::selectVersion()
         return;
     }
     if (current.broken) {
+        ui->serverCompatibilityLabel->clear();
         dialog->setSuggestedPack();
         return;
+    }
+
+    if (dialog->isServerModpackMode()) {
+        const bool hasOfficialServerPack =
+            selectedVersion == current.currentVersion
+            && QUrl(current.serverPackUrl).isValid()
+            && !current.serverPackUrl.isEmpty();
+        ui->serverCompatibilityLabel->setText(
+            hasOfficialServerPack ? tr("Official server pack")
+                                  : tr("Derived server"));
+        ui->serverCompatibilityLabel->setToolTip(
+            hasOfficialServerPack
+                ? tr("Technic publishes a dedicated server package for this version.")
+                : tr("No dedicated server package is published for this selection; J Launcher will attempt a derived server."));
     }
 
     if (!current.isSolder) {
@@ -352,6 +370,7 @@ void TechnicPage::onVersionSelectionChanged(QString version)
 {
     if (version.isNull() || version.isEmpty()) {
         selectedVersion = "";
+        ui->serverCompatibilityLabel->clear();
         return;
     }
 

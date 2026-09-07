@@ -48,6 +48,8 @@
 FtbPage::FtbPage(NewInstanceDialog* dialog, QWidget* parent) : QWidget(parent), m_ui(new Ui::FtbPage), m_dialog(dialog)
 {
     m_ui->setupUi(this);
+    m_ui->serverCompatibilityLabel->setVisible(
+        m_dialog->isServerModpackMode());
 
     m_filterModel = new Ftb::FilterModel(this);
     m_listModel = new Ftb::ListModel(this);
@@ -126,8 +128,15 @@ void FtbPage::suggestCurrent()
     }
 
     if (m_selectedVersion.isEmpty()) {
+        m_ui->serverCompatibilityLabel->clear();
         m_dialog->setSuggestedPack();
         return;
+    }
+
+    if (m_dialog->isServerModpackMode()) {
+        m_ui->serverCompatibilityLabel->setText(tr("Server compatible"));
+        m_ui->serverCompatibilityLabel->setToolTip(
+            tr("FTB supplies client/server file metadata. J Launcher checks for an official server installer during creation and otherwise derives the server."));
     }
 
     m_dialog->setSuggestedPack(m_selected.name, m_selectedVersion, new FTB::PackInstallTask(m_selected, m_selectedVersion, this));
@@ -156,6 +165,7 @@ void FtbPage::onSelectionChanged(QModelIndex first, QModelIndex /*second*/)
     m_ui->versionSelectionBox->clear();
 
     if (!first.isValid()) {
+        m_ui->serverCompatibilityLabel->clear();
         if (isOpened) {
             m_dialog->setSuggestedPack();
         }
@@ -179,6 +189,7 @@ void FtbPage::onVersionSelectionChanged(QString selected)
 {
     if (selected.isNull() || selected.isEmpty()) {
         m_selectedVersion = "";
+        m_ui->serverCompatibilityLabel->clear();
         return;
     }
 

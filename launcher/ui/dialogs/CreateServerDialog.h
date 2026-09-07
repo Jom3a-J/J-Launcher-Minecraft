@@ -40,6 +40,7 @@ public:
     int minMemory() const;
     int maxMemory() const;
     bool eulaAccepted() const;
+    bool isMemoryAutomatic() const { return m_memoryAutomatic; }
 
 private slots:
     void onVersionsReady(const QStringList &versions);
@@ -49,6 +50,9 @@ private slots:
     void applyTemplate(int index);
     void refreshVersions();
     void applyVersionFilter();
+    void updateAutomaticMemory();
+    void onAutoMemoryToggled(bool automatic);
+    void onMemorySpinEdited();
 
 private:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -62,6 +66,9 @@ private:
     QSpinBox *m_portSpin = nullptr;
     QSpinBox *m_minMemorySpin = nullptr;
     QSpinBox *m_maxMemorySpin = nullptr;
+    QCheckBox *m_autoMemoryCheck = nullptr;
+    QLabel *m_autoMemoryLabel = nullptr;
+    bool m_memoryAutomatic = true;
     QPushButton *m_createButton = nullptr;
     QPushButton *m_cancelButton = nullptr;
     QPushButton *m_retryVersionsButton = nullptr;

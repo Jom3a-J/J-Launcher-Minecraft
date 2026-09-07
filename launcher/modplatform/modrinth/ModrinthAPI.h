@@ -83,6 +83,8 @@ class ModrinthAPI final : public ResourceAPI {
                 return { R"("client_side:required","client_side:optional"],["server_side:optional","server_side:unsupported")" };
             case ModPlatform::SideTypeValue::ServerSide:
                 return { R"("server_side:required","server_side:optional"],["client_side:optional","client_side:unsupported")" };
+            case ModPlatform::SideTypeValue::ServerCompatibleSide:
+                return { R"("server_side:required","server_side:optional")" };
             case ModPlatform::SideTypeValue::UniversalSide:
                 return { R"("client_side:required"],["server_side:required")" };
             case ModPlatform::SideTypeValue::NoSide:

@@ -54,6 +54,7 @@
 #include "minecraft/PackProfile.h"
 #include "modplatform/atlauncher/ATLPackManifest.h"
 #include "net/ChecksumValidator.h"
+#include "server/ServerProperties.h"
 #include "settings/INISettingsObject.h"
 
 #include "net/ApiDownload.h"
@@ -776,6 +777,19 @@ void PackInstallTask::downloadMods()
             emitFailed(tr("Could not prepare the ATLauncher server compatibility manifest."));
             return;
         }
+        const auto propertyOverrides =
+            serverPropertyOverridesForPack(m_pack_safe_name);
+        if (!propertyOverrides.isEmpty()) {
+            QString propertyError;
+            if (!ServerProperties::save(
+                    FS::PathCombine(m_stagingPath, "server-pack",
+                                    "server-properties.txt"),
+                    propertyOverrides, &propertyError)) {
+                emitFailed(tr("Could not prepare the ATLauncher server properties: %1")
+                               .arg(propertyError));
+                return;
+            }
+        }
     }
 
     QList<VersionMod> blockedMods;
@@ -827,12 +841,6 @@ void PackInstallTask::downloadMods()
             + "." + fileName.suffix();
 
         if (mod.type == ModType::Extract || mod.type == ModType::TexturePackExtract || mod.type == ModType::ResourcePackExtract) {
-            if (serverOnly) {
-                emitFailed(tr("The ATLauncher pack requires a server-only extracted file "
-                              "that cannot be projected safely: %1")
-                               .arg(mod.file));
-                return;
-            }
             auto entry = APPLICATION->metacache()->resolveEntry("ATLauncherPacks", cacheName);
             entry->setStale(true);
             modsToExtract.insert(entry->getFullPath(), mod);
@@ -843,12 +851,6 @@ void PackInstallTask::downloadMods()
             }
             jobPtr->addNetAction(dl);
         } else if (mod.type == ModType::Decomp) {
-            if (serverOnly) {
-                emitFailed(tr("The ATLauncher pack requires a server-only decompressed file "
-                              "that cannot be projected safely: %1")
-                               .arg(mod.file));
-                return;
-            }
             auto entry = APPLICATION->metacache()->resolveEntry("ATLauncherPacks", cacheName);
             entry->setStale(true);
             modsToDecomp.insert(entry->getFullPath(), mod);
@@ -944,20 +946,8 @@ void PackInstallTask::downloadMods()
                 const auto& mod = *modIter;
                 const bool serverOnly = mod.server && !mod.client;
                 if (mod.type == ModType::Extract || mod.type == ModType::TexturePackExtract || mod.type == ModType::ResourcePackExtract) {
-                    if (serverOnly) {
-                        emitFailed(tr("The ATLauncher pack requires a blocked server-only "
-                                      "extracted file that cannot be projected safely: %1")
-                                       .arg(mod.file));
-                        return;
-                    }
                     modsToExtract.insert(blocked.localPath, mod);
                 } else if (mod.type == ModType::Decomp) {
-                    if (serverOnly) {
-                        emitFailed(tr("The ATLauncher pack requires a blocked server-only "
-                                      "decompressed file that cannot be projected safely: %1")
-                                       .arg(mod.file));
-                        return;
-                    }
                     modsToDecomp.insert(blocked.localPath, mod);
                 } else {
                     auto relpath = getDirForModType(mod.type, mod.type_raw);
@@ -1058,15 +1048,19 @@ bool PackInstallTask::extractMods(const QMap<QString, VersionMod>& toExtract,
             extractToDir = FS::PathCombine("resourcepacks", "extracted");
         }
 
-        QDir extractDir(m_stagingPath);
-        auto extractToPath = FS::PathCombine(extractDir.absolutePath(), "minecraft", extractToDir);
+        const bool serverOnly = mod.server && !mod.client;
+        const QString contentRoot = serverOnly
+            ? FS::PathCombine(m_stagingPath, "server-pack", "server-files")
+            : FS::PathCombine(m_stagingPath, "minecraft");
+        auto extractToPath = FS::PathCombine(contentRoot, extractToDir);
 
         QString folderToExtract = "";
         if (mod.type == ModType::Extract) {
             folderToExtract = mod.extractFolder;
             static const QRegularExpression s_regex("^/");
             folderToExtract.remove(s_regex);
-            if (isPathTraversal(extractToPath, folderToExtract)) {
+            if (!folderToExtract.isEmpty()
+                && isPathTraversal(extractToPath, folderToExtract)) {
                 qWarning() << "Blocked path traversal in" << mod.extractFolder;
                 return false;
             }
@@ -1084,13 +1078,17 @@ bool PackInstallTask::extractMods(const QMap<QString, VersionMod>& toExtract,
         const auto& mod = iter.value();
         auto extractToDir = getDirForModType(mod.decompType, mod.decompType_raw);
 
-        QDir extractDir(m_stagingPath);
-        auto extractToPath = FS::PathCombine(extractDir.absolutePath(), "minecraft", extractToDir, mod.decompFile);
+        const bool serverOnly = mod.server && !mod.client;
+        const QString contentRoot = serverOnly
+            ? FS::PathCombine(m_stagingPath, "server-pack", "server-files")
+            : FS::PathCombine(m_stagingPath, "minecraft");
+        const auto extractToDirectory = FS::PathCombine(contentRoot, extractToDir);
 
-        if (isPathTraversal(extractToPath, mod.decompFile)) {
+        if (isPathTraversal(extractToDirectory, mod.decompFile)) {
             qWarning() << "Blocked path traversal in decompFile" << mod.decompFile;
             return false;
         }
+        const auto extractToPath = FS::PathCombine(extractToDirectory, mod.decompFile);
 
         qDebug() << "Extracting " + mod.decompFile + " to " + extractToDir;
         if (!MMCZip::extractFile(modPath, mod.decompFile, extractToPath)) {

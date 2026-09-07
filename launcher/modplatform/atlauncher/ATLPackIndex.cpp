@@ -41,6 +41,7 @@ void ATLauncher::loadIndexedPack(ATLauncher::IndexedPack& m, QJsonObject& obj)
         m.versions.append(version);
     }
     m.system = obj["system"].toBool();
+    m.createServer = obj["createServer"].toBool();
     m.description = obj["description"].toString("");
 
     static const QRegularExpression s_regex("[^A-Za-z0-9]");

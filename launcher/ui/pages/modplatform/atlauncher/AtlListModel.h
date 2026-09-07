@@ -39,6 +39,7 @@ class ListModel : public QAbstractListModel {
     QVariant data(const QModelIndex& index, int role) const override;
 
     void request();
+    void setShowServerBadges(bool show);
 
     void getLogo(const QString& logo, const QString& logoUrl, LogoCallback callback);
 
@@ -54,6 +55,7 @@ class ListModel : public QAbstractListModel {
 
    private:
     QList<ATLauncher::IndexedPack> modpacks;
+    bool m_showServerBadges = false;
 
     QStringList m_failedLogos;
     QStringList m_loadingLogos;

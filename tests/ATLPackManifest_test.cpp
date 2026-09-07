@@ -1,7 +1,10 @@
 #include <QJsonObject>
+#include <QStandardItemModel>
 #include <QtTest>
 
+#include "modplatform/atlauncher/ATLPackIndex.h"
 #include "modplatform/atlauncher/ATLPackManifest.h"
+#include "ui/pages/modplatform/atlauncher/AtlFilterModel.h"
 
 class ATLPackManifestTest : public QObject
 {
@@ -117,6 +120,55 @@ private slots:
         QCOMPARE(server.md5, QString("server-md5"));
         QCOMPARE(server.download, ATLauncher::DownloadType::Direct);
         QCOMPARE(server.type, ATLauncher::ModType::Plugins);
+    }
+
+    void suppliesSkyFactoryOneServerWorldPreset()
+    {
+        const auto properties =
+            ATLauncher::serverPropertyOverridesForPack("SkyFactoryOne");
+        QCOMPARE(properties.value("topography-preset"), QString("void"));
+        QVERIFY(ATLauncher::serverPropertyOverridesForPack("OtherPack").isEmpty());
+    }
+
+    void filtersAtLauncherClientOnlyPacksInServerMode()
+    {
+        QJsonObject serverPackObject{
+            { "id", 1 },
+            { "position", 1 },
+            { "name", "Server Pack" },
+            { "type", "public" },
+            { "versions", QJsonArray{ QJsonObject{
+                { "version", "1.0" }, { "minecraft", "1.20.1" } } } },
+            { "createServer", true },
+        };
+        QJsonObject clientPackObject = serverPackObject;
+        clientPackObject["id"] = 2;
+        clientPackObject["name"] = "Client Pack";
+        clientPackObject["createServer"] = false;
+
+        ATLauncher::IndexedPack serverPack;
+        ATLauncher::IndexedPack clientPack;
+        ATLauncher::loadIndexedPack(serverPack, serverPackObject);
+        ATLauncher::loadIndexedPack(clientPack, clientPackObject);
+        QVERIFY(serverPack.createServer);
+        QVERIFY(!clientPack.createServer);
+
+        QStandardItemModel source;
+        source.setRowCount(2);
+        source.setColumnCount(1);
+        source.setData(source.index(0, 0), QVariant::fromValue(serverPack),
+                       Qt::UserRole);
+        source.setData(source.index(1, 0), QVariant::fromValue(clientPack),
+                       Qt::UserRole);
+        Atl::FilterModel filter;
+        filter.setSourceModel(&source);
+        filter.setServerReadyOnly(true);
+        QCOMPARE(filter.rowCount(), 1);
+        QCOMPARE(filter.data(filter.index(0, 0), Qt::UserRole)
+                     .value<ATLauncher::IndexedPack>().name,
+                 QString("Server Pack"));
+        filter.setServerReadyOnly(false);
+        QCOMPARE(filter.rowCount(), 2);
     }
 };
 

@@ -204,10 +204,31 @@ private slots:
         createFixture(clientFirst, false);
         const auto first = inspectServerPack(universalFirst.path());
         const auto second = inspectServerPack(clientFirst.path());
-        QVERIFY(first.isIncompatible());
-        QVERIFY(second.isIncompatible());
-        QVERIFY(serverPackCompatibilityDescription(first).contains("Conflicting"));
-        QVERIFY(serverPackCompatibilityDescription(second).contains("Conflicting"));
+        QVERIFY(!first.isIncompatible());
+        QVERIFY(!second.isIncompatible());
+        QCOMPARE(findFile(first, "mods/shared.jar")->side,
+                 ServerPackFileSide::Universal);
+        QCOMPARE(findFile(second, "mods/shared.jar")->side,
+                 ServerPackFileSide::Universal);
+        QVERIFY(first.projectionWarnings.join('\n').contains("mods/shared.jar"));
+        QVERIFY(second.projectionWarnings.join('\n').contains("mods/shared.jar"));
+        QVERIFY(!first.projectionWarnings.join('\n').contains(
+            "published server pack", Qt::CaseInsensitive));
+        QVERIFY(!second.projectionWarnings.join('\n').contains(
+            "published server pack", Qt::CaseInsensitive));
+
+        QVERIFY(writeFile(QDir(universalFirst.path()).filePath(
+                              "server-pack/server-only.txt"),
+                          "mods/shared.jar\n"));
+        QVERIFY(writeFile(QDir(clientFirst.path()).filePath(
+                              "server-pack/server-only.txt"),
+                          "mods/shared.jar\n"));
+        const auto serverFirst = inspectServerPack(universalFirst.path());
+        const auto serverSecond = inspectServerPack(clientFirst.path());
+        QCOMPARE(findFile(serverFirst, "mods/shared.jar")->side,
+                 ServerPackFileSide::ServerOnly);
+        QCOMPARE(findFile(serverSecond, "mods/shared.jar")->side,
+                 ServerPackFileSide::ServerOnly);
     }
 
     void malformedModrinthEnvironmentMetadataIsRejected()
@@ -524,6 +545,29 @@ private slots:
         QVERIFY(!QFileInfo::exists(
             QDir(destination.path()).filePath("mods/client.jar")));
         QVERIFY(skipped.contains("mods/client.jar"));
+    }
+
+    void unsafePathsAndInvalidHashesAreRejected()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        QVERIFY(writeJson(
+            QDir(root.path()).filePath("mrpack/modrinth.index.json"),
+            QJsonObject{
+                {"formatVersion", 1},
+                {"game", "minecraft"},
+                {"files", QJsonArray{
+                    QJsonObject{{"path", "../outside.jar"}},
+                    QJsonObject{{"path", "mods/bad-hash.jar"},
+                                {"hashes", QJsonObject{{"sha256", "not-a-hash"}}}},
+                }},
+            }));
+
+        const auto report = inspectServerPack(root.path());
+        QVERIFY(report.isIncompatible());
+        const QString description = serverPackCompatibilityDescription(report);
+        QVERIFY(description.contains("unsafe server file path"));
+        QVERIFY(description.contains("invalid sha256 hash"));
     }
 
     void malformedProviderMetadataIsRejected()
