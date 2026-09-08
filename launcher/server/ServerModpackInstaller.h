@@ -64,7 +64,7 @@ public:
 
     static bool prepareContent(const QString &instanceRoot, const QString &gameRoot,
                                const QString &destination, QStringList *skippedClientFiles,
-                               QString *error);
+                               QString *error, QStringList *warnings = nullptr);
     static QString contentTrackingSource(const QString &gameRoot,
                                          const QString &installedFilePath);
 

@@ -253,8 +253,13 @@ private slots:
             }));
 
         const auto report = inspectServerPack(root.path());
-        QVERIFY(report.isIncompatible());
-        QVERIFY(serverPackCompatibilityDescription(report).contains("environment"));
+        QVERIFY(!report.isIncompatible());
+        QVERIFY(report.hasAdvisory(ServerPackIssueKind::InvalidFileEntry));
+        QVERIFY(report.warnings.join('\n').contains("side", Qt::CaseInsensitive));
+        // Invalid env entries fall back to Unknown side (conservative include).
+        QVERIFY(findFile(report, "mods/string-invalid.jar"));
+        QCOMPARE(findFile(report, "mods/string-invalid.jar")->side,
+                 ServerPackFileSide::Unknown);
     }
 
     void unknownSideWarningsAreBounded()
@@ -298,10 +303,11 @@ private slots:
             }));
 
         const auto report = evaluateServerPack(root.path(), "1.20.2", "forge", "47.1.0");
-        QVERIFY(report.isIncompatible());
-        const QString description = serverPackCompatibilityDescription(report);
-        QVERIFY(description.contains("Minecraft"));
-        QVERIFY(description.contains("loader"));
+        QVERIFY(!report.isIncompatible());
+        QVERIFY(report.hasAdvisory(ServerPackIssueKind::VersionMismatch));
+        QVERIFY(report.warnings.join('\n').contains("Minecraft"));
+        QVERIFY(report.warnings.join('\n').contains("loader", Qt::CaseInsensitive));
+        QVERIFY(report.warnings.join('\n').contains("installed", Qt::CaseInsensitive));
     }
 
     void readsCurseForgeDedicatedPackAndServerProjection()
@@ -368,8 +374,10 @@ private slots:
 
         const auto mismatch = evaluateServerPack(
             root.path(), "1.21.1", "neoforge", "21.1.101");
-        QVERIFY(mismatch.isIncompatible());
-        QVERIFY(serverPackCompatibilityDescription(mismatch).contains("loader version"));
+        QVERIFY(!mismatch.isIncompatible());
+        QVERIFY(mismatch.hasAdvisory(ServerPackIssueKind::VersionMismatch));
+        QVERIFY(mismatch.warnings.join('\n').contains("loader version", Qt::CaseInsensitive));
+        QVERIFY(mismatch.warnings.join('\n').contains("installed", Qt::CaseInsensitive));
     }
 
     void validatesFtbAppProjectionAndRejectsUnknownLoader()
@@ -400,9 +408,9 @@ private slots:
             QJsonObject{{"mcVersion", "1.20.1"},
                         {"modLoader", "mystery-1.0"}}));
         const auto unknownLoader = inspectServerPack(root.path());
-        QVERIFY(unknownLoader.isIncompatible());
-        QVERIFY(serverPackCompatibilityDescription(unknownLoader)
-                    .contains("unknown loader"));
+        QVERIFY(!unknownLoader.isIncompatible());
+        QVERIFY(unknownLoader.hasAdvisory(ServerPackIssueKind::UnknownLoader));
+        QVERIFY(unknownLoader.warnings.join('\n').contains("unknown loader", Qt::CaseInsensitive));
     }
 
     void rejectsConflictingProviderDocuments()
@@ -432,9 +440,12 @@ private slots:
             }));
 
         const auto report = inspectServerPack(root.path());
-        QVERIFY(report.isIncompatible());
-        QVERIFY(serverPackCompatibilityDescription(report)
-                    .contains("conflicting provider metadata"));
+        QVERIFY(!report.isIncompatible());
+        QVERIFY(report.hasAdvisory(ServerPackIssueKind::ConflictingProviders));
+        QVERIFY(report.warnings.join('\n').contains("conflicting provider", Qt::CaseInsensitive));
+        // Deterministic fallback: Modrinth wins over CurseForge.
+        QCOMPARE(report.provider, QString("modrinth"));
+        QCOMPARE(report.minecraftVersion, QString("1.20.1"));
     }
 
     void readsAtLauncherFtbTechnicAndLocalFallbackMetadata()
@@ -549,25 +560,48 @@ private slots:
 
     void unsafePathsAndInvalidHashesAreRejected()
     {
-        QTemporaryDir root;
-        QVERIFY(root.isValid());
+        QTemporaryDir unsafeRoot;
+        QVERIFY(unsafeRoot.isValid());
         QVERIFY(writeJson(
-            QDir(root.path()).filePath("mrpack/modrinth.index.json"),
+            QDir(unsafeRoot.path()).filePath("mrpack/modrinth.index.json"),
             QJsonObject{
                 {"formatVersion", 1},
                 {"game", "minecraft"},
                 {"files", QJsonArray{
                     QJsonObject{{"path", "../outside.jar"}},
-                    QJsonObject{{"path", "mods/bad-hash.jar"},
-                                {"hashes", QJsonObject{{"sha256", "not-a-hash"}}}},
                 }},
             }));
 
-        const auto report = inspectServerPack(root.path());
-        QVERIFY(report.isIncompatible());
-        const QString description = serverPackCompatibilityDescription(report);
-        QVERIFY(description.contains("unsafe server file path"));
-        QVERIFY(description.contains("invalid sha256 hash"));
+        const auto unsafeReport = inspectServerPack(unsafeRoot.path());
+        QVERIFY(unsafeReport.isIncompatible());
+        QVERIFY(unsafeReport.hasBlocker(ServerPackIssueKind::UnsafePath));
+        QVERIFY(serverPackCompatibilityDescription(unsafeReport).contains("unsafe server file path"));
+
+        QTemporaryDir hashRoot;
+        QVERIFY(hashRoot.isValid());
+        writeComponents(hashRoot.path(), "1.20.1", "fabric", "0.15.0");
+        QVERIFY(writeJson(
+            QDir(hashRoot.path()).filePath("mrpack/modrinth.index.json"),
+            QJsonObject{
+                {"formatVersion", 1},
+                {"game", "minecraft"},
+                {"dependencies", QJsonObject{{"minecraft", "1.20.1"},
+                                               {"fabric-loader", "0.15.0"}}},
+                {"files", QJsonArray{
+                    QJsonObject{{"path", "mods/bad-hash.jar"},
+                                {"hashes", QJsonObject{{"sha256", "not-a-hash"}}}},
+                    QJsonObject{{"path", "mods/good.jar"},
+                                {"env", QJsonObject{{"client", "required"},
+                                                      {"server", "required"}}}},
+                }},
+            }));
+        const auto hashReport = inspectServerPack(hashRoot.path());
+        QVERIFY(!hashReport.isIncompatible());
+        QVERIFY(hashReport.hasAdvisory(ServerPackIssueKind::UnverifiedIntegrity));
+        QVERIFY(hashReport.warnings.join('\n').contains("invalid sha256", Qt::CaseInsensitive));
+        const auto *badFile = findFile(hashReport, "mods/bad-hash.jar");
+        QVERIFY(badFile);
+        QCOMPARE(badFile->integrity, ServerPackIntegrityState::Unverified);
     }
 
     void malformedProviderMetadataIsRejected()
@@ -578,8 +612,11 @@ private slots:
         QVERIFY(writeFile(QDir(root.path()).filePath("mrpack/modrinth.index.json"),
                           "{ malformed"));
         const auto report = inspectServerPack(root.path());
-        QVERIFY(report.isIncompatible());
-        QVERIFY(serverPackCompatibilityDescription(report).contains("malformed"));
+        QVERIFY(!report.isIncompatible());
+        QVERIFY(report.hasAdvisory(ServerPackIssueKind::MalformedMetadata));
+        QVERIFY(report.warnings.join('\n').contains("malformed", Qt::CaseInsensitive));
+        // Malformed optional metadata falls back safely: no trusted file list.
+        QVERIFY(report.files.isEmpty());
     }
 
     void unknownLoaderMetadataIsRejected()
@@ -598,8 +635,9 @@ private slots:
             }));
 
         const auto report = inspectServerPack(root.path());
-        QVERIFY(report.isIncompatible());
-        QVERIFY(serverPackCompatibilityDescription(report).contains("unknown loader"));
+        QVERIFY(!report.isIncompatible());
+        QVERIFY(report.hasAdvisory(ServerPackIssueKind::UnknownLoader));
+        QVERIFY(report.warnings.join('\n').contains("unknown loader", Qt::CaseInsensitive));
     }
 
     void technicForgeCoordinateVersionsNormalizeNarrowly()
@@ -620,8 +658,9 @@ private slots:
         QCOMPARE(compatible.state, ServerPackCompatibilityState::KnownCompatible);
         const auto mismatch = evaluateServerPack(
             root.path(), "1.7.10", "forge", "10.13.4.1615");
-        QVERIFY(mismatch.isIncompatible());
-        QVERIFY(serverPackCompatibilityDescription(mismatch).contains("loader version"));
+        QVERIFY(!mismatch.isIncompatible());
+        QVERIFY(mismatch.hasAdvisory(ServerPackIssueKind::VersionMismatch));
+        QVERIFY(mismatch.warnings.join('\n').contains("loader version", Qt::CaseInsensitive));
     }
 
     void curseForgeHashMappingIsStrictAndAttachesValidators()
