@@ -23,7 +23,15 @@ int main(int argc, char **argv)
     }
 
     if (versionProbe) {
-        std::cerr << "openjdk version \"21.0.0\"" << std::endl;
+        // Tests override the reported major via JLAUNCHER_FAKE_JAVA_MAJOR so
+        // ServerInstance version filtering can be exercised for both Java 17
+        // (Requiem-style packs) and Java 21 without a real JDK matrix.
+        const char* overrideMajor = std::getenv("JLAUNCHER_FAKE_JAVA_MAJOR");
+        std::string major = "21";
+        if (overrideMajor != nullptr && overrideMajor[0] != '\0') {
+            major = overrideMajor;
+        }
+        std::cerr << "openjdk version \"" << major << ".0.0\"" << std::endl;
         return 0;
     }
     if (installServer) {
