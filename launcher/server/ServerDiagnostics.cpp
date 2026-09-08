@@ -65,6 +65,8 @@ ServerCrashCause ServerDiagnostics::classifyCrash(const QString& log)
     if (lower.contains("unsupportedclassversionerror")
         || lower.contains("requires the use of java")
         || lower.contains("class file version")
+        || lower.contains("unrecognized vm option")
+        || lower.contains("unrecognized option")
         || lower.contains("failed to start server. is java installed")) {
         return ServerCrashCause::JavaVersion;
     }

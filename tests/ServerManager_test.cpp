@@ -20,6 +20,7 @@
 #include <server/ServerInstance.h>
 #include <server/ServerManager.h>
 #include <server/ServerModpackInstaller.h>
+#include <server/ServerPackCompatibility.h>
 #include <server/ServerPlayerAccess.h>
 #include <server/ServerProperties.h>
 #include <FileSystem.h>
@@ -1268,6 +1269,290 @@ class ServerManagerTest : public QObject {
         QCOMPARE(manager.serverCount(), 2);
     }
 
+    void createsDerivedServerWhenProviderVersionsDisagree()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(writeFile(QDir(gameRoot).filePath("mods/common.jar"), "common"));
+        QVERIFY(writeFile(QDir(gameRoot).filePath("config/common.toml"), "common"));
+        QVERIFY(writeFile(
+            QDir(instanceRoot).filePath("mrpack/modrinth.index.json"),
+            QJsonDocument(QJsonObject{
+                { "formatVersion", 1 },
+                { "game", "minecraft" },
+                { "dependencies", QJsonObject{
+                    { "minecraft", "1.19.2" },
+                    { "fabric-loader", "0.14.0" },
+                } },
+                { "files", QJsonArray{
+                    QJsonObject{
+                        { "path", "mods/common.jar" },
+                        { "env", QJsonObject{{ "client", "required" }, { "server", "required" }} },
+                    },
+                } },
+            }).toJson()));
+        QVERIFY(writeFile(QDir(instanceRoot).filePath("mrpack/overrides.txt"),
+                          "config/common.toml\n"));
+
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.20.1", "0.15.11", {}, {}, {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Version Mismatch Pack");
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        QVERIFY(result.warnings.join('\n').contains("installed", Qt::CaseInsensitive));
+        QVERIFY(result.warnings.join('\n').contains("1.20.1"));
+        QVERIFY(result.warnings.join('\n').contains("0.15.11"));
+        const auto server = manager.getServer(result.serverId);
+        QVERIFY(server);
+        QCOMPARE(server->status(), ServerStatus::Stopped);
+        QCOMPARE(server->version(), QString("1.20.1"));
+        QCOMPARE(server->loaderType(), QString("fabric"));
+        QCOMPARE(server->loaderVersion(), QString("0.15.11"));
+        QVERIFY(QFileInfo::exists(QDir(server->serverDirectory()).filePath("mods/common.jar")));
+    }
+
+    void createsDerivedServerWithConflictingProviderDocuments()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(writeFile(QDir(gameRoot).filePath("mods/common.jar"), "common"));
+        QVERIFY(writeFile(
+            QDir(instanceRoot).filePath("mrpack/modrinth.index.json"),
+            QJsonDocument(QJsonObject{
+                { "formatVersion", 1 },
+                { "game", "minecraft" },
+                { "dependencies", QJsonObject{
+                    { "minecraft", "1.20.1" },
+                    { "fabric-loader", "0.15.11" },
+                } },
+                { "files", QJsonArray{
+                    QJsonObject{
+                        { "path", "mods/common.jar" },
+                        { "env", QJsonObject{{ "client", "required" }, { "server", "required" }} },
+                    },
+                } },
+            }).toJson()));
+        QVERIFY(writeFile(
+            QDir(instanceRoot).filePath("flame/manifest.json"),
+            QJsonDocument(QJsonObject{
+                { "manifestType", "minecraftModpack" },
+                { "manifestVersion", 1 },
+                { "minecraft", QJsonObject{
+                    { "version", "1.19.2" },
+                    { "modLoaders", QJsonArray{QJsonObject{{ "id", "forge-43.2.0" }}}},
+                } },
+            }).toJson()));
+
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.20.1", "0.15.11", {}, {}, {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Conflicting Providers");
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        QCOMPARE(result.provider, QString("modrinth"));
+        QVERIFY(result.warnings.join('\n').contains("conflicting provider", Qt::CaseInsensitive));
+        QVERIFY(result.warnings.join('\n').contains("Modrinth", Qt::CaseSensitive));
+        const auto server = manager.getServer(result.serverId);
+        QVERIFY(server);
+        QCOMPARE(server->status(), ServerStatus::Stopped);
+        QCOMPARE(server->version(), QString("1.20.1"));
+        QCOMPARE(server->loaderType(), QString("fabric"));
+    }
+
+    void createsDerivedServerWithInvalidOptionalHashMetadata()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(writeFile(QDir(gameRoot).filePath("mods/common.jar"), "common"));
+        QVERIFY(writeFile(
+            QDir(instanceRoot).filePath("mrpack/modrinth.index.json"),
+            QJsonDocument(QJsonObject{
+                { "formatVersion", 1 },
+                { "game", "minecraft" },
+                { "dependencies", QJsonObject{
+                    { "minecraft", "1.20.1" },
+                    { "fabric-loader", "0.15.11" },
+                } },
+                { "files", QJsonArray{
+                    QJsonObject{
+                        { "path", "mods/common.jar" },
+                        { "env", QJsonObject{{ "client", "required" }, { "server", "required" }} },
+                        { "hashes", QJsonObject{{ "sha512", "not-a-hash" }} },
+                    },
+                } },
+            }).toJson()));
+
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.20.1", "0.15.11", {}, {}, {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Invalid Hash Pack");
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        QVERIFY(result.warnings.join('\n').contains("unverified", Qt::CaseInsensitive));
+        QVERIFY(!result.warnings.join('\n').contains("will start", Qt::CaseInsensitive)
+                || result.warnings.join('\n').contains("may", Qt::CaseInsensitive));
+        const auto server = manager.getServer(result.serverId);
+        QVERIFY(server);
+        QCOMPARE(server->status(), ServerStatus::Stopped);
+        QFile retained(QDir(server->modsDirectory()).filePath("common.jar"));
+        QVERIFY(retained.open(QIODevice::ReadOnly));
+        QCOMPARE(retained.readAll(), QByteArray("common"));
+    }
+
+    void createsDerivedServerWithMalformedOptionalMetadataUsingSafeFallback()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(writeFile(QDir(gameRoot).filePath("mods/keep.jar"), "keep"));
+        QVERIFY(writeFile(QDir(gameRoot).filePath("config/keep.toml"), "keep"));
+        QVERIFY(writeFile(QDir(gameRoot).filePath("top-level-arbitrary.dat"), "must not copy"));
+        QVERIFY(writeFile(QDir(instanceRoot).filePath("mrpack/modrinth.index.json"),
+                          "{ malformed"));
+
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.20.1", "0.15.11", {}, {}, {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Malformed Fallback Pack");
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        QVERIFY(result.warnings.join('\n').contains("malformed", Qt::CaseInsensitive));
+        QVERIFY(result.warnings.join('\n').contains("installed", Qt::CaseInsensitive));
+        const auto server = manager.getServer(result.serverId);
+        QVERIFY(server);
+        QCOMPARE(server->status(), ServerStatus::Stopped);
+        QCOMPARE(server->version(), QString("1.20.1"));
+        QVERIFY(QFileInfo::exists(QDir(server->serverDirectory()).filePath("mods/keep.jar")));
+        QVERIFY(QFileInfo::exists(QDir(server->serverDirectory()).filePath("config/keep.toml")));
+        QVERIFY(!QFileInfo::exists(
+            QDir(server->serverDirectory()).filePath("top-level-arbitrary.dat")));
+    }
+
+    void createsDerivedServerWithConflictingSideDeclarations()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(writeFile(QDir(gameRoot).filePath("mods/shared.jar"), "shared"));
+        QVERIFY(writeFile(
+            QDir(instanceRoot).filePath("mrpack/modrinth.index.json"),
+            QJsonDocument(QJsonObject{
+                { "formatVersion", 1 },
+                { "game", "minecraft" },
+                { "dependencies", QJsonObject{
+                    { "minecraft", "1.20.1" },
+                    { "fabric-loader", "0.15.11" },
+                } },
+                { "files", QJsonArray{
+                    QJsonObject{
+                        { "path", "mods/shared.jar" },
+                        { "env", QJsonObject{{ "client", "required" }, { "server", "required" }} },
+                    },
+                    QJsonObject{
+                        { "path", "mods/shared.jar" },
+                        { "env", QJsonObject{{ "client", "required" }, { "server", "unsupported" }} },
+                    },
+                } },
+            }).toJson()));
+
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.20.1", "0.15.11", {}, {}, {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Side Conflict Pack");
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        QVERIFY(result.warnings.join('\n').contains("game-only", Qt::CaseInsensitive));
+        const auto server = manager.getServer(result.serverId);
+        QVERIFY(server);
+        QCOMPARE(server->status(), ServerStatus::Stopped);
+        QVERIFY(QFileInfo::exists(QDir(server->modsDirectory()).filePath("shared.jar")));
+    }
+
+    void rejectsAmbiguousPublishedServerRoots()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(QDir().mkpath(gameRoot));
+        QVERIFY(writeFile(QDir(instanceRoot).filePath("server-pack/published-server-pack.txt"),
+                          "curseforge\n"));
+        QVERIFY(writeFile(
+            QDir(instanceRoot).filePath("server-pack/server-files/PackA/mods/a.jar"), "a"));
+        QVERIFY(writeFile(
+            QDir(instanceRoot).filePath("server-pack/server-files/PackB/mods/b.jar"), "b"));
+
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.20.1", "0.15.11", {}, {}, {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Ambiguous Pack");
+        QVERIFY(!result.isValid());
+        QCOMPARE(result.failureCategory, ServerModpackFailureCategory::ContentProjection);
+        QCOMPARE(result.failureStage, ServerModpackFailureStage::ContentPreparation);
+        QVERIFY(result.error.contains("more than one possible", Qt::CaseInsensitive));
+        QCOMPARE(manager.serverCount(), 0);
+    }
+
+    void rejectsInvalidActualProfile()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(QDir().mkpath(gameRoot));
+        ServerManager manager(root.filePath("server-data"));
+        const auto emptyMinecraft = ServerModpackInstaller::profileForVersions(
+            {}, "0.15.11", {}, {}, {});
+        QVERIFY(!emptyMinecraft.isValid());
+        const auto emptyResult = ServerModpackInstaller::createMatchingServer(
+            &manager, emptyMinecraft, instanceRoot, gameRoot, "Empty MC");
+        QVERIFY(!emptyResult.isValid());
+        QCOMPARE(emptyResult.failureCategory, ServerModpackFailureCategory::InvalidProfile);
+        QCOMPARE(emptyResult.failureStage, ServerModpackFailureStage::ProfileInspection);
+        const auto multiLoader = ServerModpackInstaller::profileForVersions(
+            "1.20.1", "0.15.11", "47.1.0", {}, {});
+        QVERIFY(!multiLoader.isValid());
+        const auto multiResult = ServerModpackInstaller::createMatchingServer(
+            &manager, multiLoader, instanceRoot, gameRoot, "Multi Loader");
+        QVERIFY(!multiResult.isValid());
+        QCOMPARE(multiResult.failureCategory, ServerModpackFailureCategory::InvalidProfile);
+        QCOMPARE(multiResult.failureStage, ServerModpackFailureStage::ProfileInspection);
+        QCOMPARE(manager.serverCount(), 0);
+    }
+
+    void rejectsUnwritableServerContentDestination()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(QDir().mkpath(gameRoot));
+        const QString blocker = root.filePath("destination-blocker");
+        QVERIFY(writeFile(blocker, "not a directory"));
+        QString error;
+        QVERIFY(!ServerModpackInstaller::prepareContent(
+            instanceRoot, gameRoot, blocker, nullptr, &error));
+        QVERIFY(!error.isEmpty());
+    }
+
     void rejectsMalformedForgeDependencyVersionRange()
     {
         QTemporaryDir temporaryRoot;
@@ -1297,10 +1582,11 @@ class ServerManagerTest : public QObject {
             "1.20.1", {}, "47.1.0", {}, {});
         const auto result = ServerModpackInstaller::createMatchingServer(
             &manager, profile, instanceRoot, gameRoot, "Malformed Forge Pack");
-        QVERIFY(!result.isValid());
-        QVERIFY(result.error.contains("invalid version range", Qt::CaseInsensitive));
-        QVERIFY(result.error.contains("[47,"));
-        QCOMPARE(manager.serverCount(), 0);
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        QVERIFY(result.warnings.join('\n').contains("invalid version range", Qt::CaseInsensitive));
+        QVERIFY(result.warnings.join('\n').contains("[47,"));
+        QVERIFY(result.warnings.join('\n').contains("could not fully verify", Qt::CaseInsensitive));
+        QCOMPARE(manager.serverCount(), 1);
     }
 
     void acceptsInclusiveUnboundedForgeVersionRange()
@@ -1499,7 +1785,133 @@ class ServerManagerTest : public QObject {
         QVERIFY(makeParent(false));
         const auto missing = ServerModpackInstaller::createMatchingServer(&manager, profile, instance, game, "Missing");
         QVERIFY(!missing.isValid());
+        QCOMPARE(missing.failureCategory, ServerModpackFailureCategory::DependencyIncompatibility);
+        QCOMPARE(missing.failureStage, ServerModpackFailureStage::DependencyValidation);
         QVERIFY(missing.error.contains("ponder.jar"));
+        QCOMPARE(manager.serverCount(), 1);
+    }
+
+    void rejectsDerivedFabricServerWithMissingBundledJar()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        const QString jarPath = QDir(gameRoot).filePath("mods/broken-bundle.jar");
+        QVERIFY(QDir().mkpath(QFileInfo(jarPath).absolutePath()));
+        MMCZip::ArchiveWriter archive(jarPath);
+        QVERIFY(archive.open());
+        QVERIFY(archive.addFile("fabric.mod.json", QByteArray(
+            R"({"schemaVersion":1,"id":"brokenbundle","version":"1.0.0","jars":[{"file":"META-INF/jars/missing.jar"}]})")));
+        QVERIFY(archive.close());
+
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.20.1", "0.15.11", {}, {}, {});
+        const auto missing = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Missing Fabric Bundle");
+        QVERIFY(!missing.isValid());
+        QCOMPARE(missing.failureCategory, ServerModpackFailureCategory::DependencyIncompatibility);
+        QCOMPARE(missing.failureStage, ServerModpackFailureStage::DependencyValidation);
+        QVERIFY(missing.error.contains("missing.jar"));
+        QCOMPARE(manager.serverCount(), 0);
+    }
+
+    void publishedMissingBundledJarRemainsWarningOnly()
+    {
+        for (const QString &loader : { QStringLiteral("fabric"), QStringLiteral("forge") }) {
+            QTemporaryDir temporaryRoot;
+            QVERIFY(temporaryRoot.isValid());
+            const QDir root(temporaryRoot.path());
+            const QString instanceRoot = root.filePath("instance");
+            const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+            QVERIFY(QDir().mkpath(gameRoot));
+            QVERIFY(writeFile(QDir(instanceRoot).filePath("server-pack/published-server-pack.txt"),
+                              "curseforge\n"));
+            const QString modsDir = QDir(instanceRoot).filePath("server-pack/server-files/mods");
+            QVERIFY(QDir().mkpath(modsDir));
+            if (loader == QStringLiteral("fabric")) {
+                MMCZip::ArchiveWriter broken(QDir(modsDir).filePath("broken-bundle.jar"));
+                QVERIFY(broken.open());
+                QVERIFY(broken.addFile("fabric.mod.json", QByteArray(
+                    R"({"schemaVersion":1,"id":"brokenbundle","version":"1.0.0","jars":[{"file":"META-INF/jars/missing.jar"}]})")));
+                QVERIFY(broken.close());
+            } else {
+                MMCZip::ArchiveWriter broken(QDir(modsDir).filePath("create.jar"));
+                QVERIFY(broken.open());
+                QVERIFY(broken.addFile("META-INF/mods.toml", QByteArray(
+                    "modLoader=\"javafml\"\n[[mods]]\nmodId=\"create\"\nversion=\"6.0.8\"\n")));
+                QVERIFY(broken.addFile("META-INF/jarjar/metadata.json", QByteArray(
+                    "{\"jars\":[{\"path\":\"META-INF/jarjar/ponder.jar\"}]}")));
+                QVERIFY(broken.close());
+            }
+            ServerManager manager(root.filePath("server-data"));
+            ServerModpackProfile profile;
+            if (loader == QStringLiteral("fabric")) {
+                profile = ServerModpackInstaller::profileForVersions("1.20.1", "0.15.11", {}, {}, {});
+            } else {
+                profile = ServerModpackInstaller::profileForVersions("1.20.1", {}, "47.4.20", {}, {});
+            }
+            const auto result = ServerModpackInstaller::createMatchingServer(
+                &manager, profile, instanceRoot, gameRoot, "Published Missing Bundle");
+            QVERIFY2(result.isValid(), qPrintable(result.error));
+            QVERIFY(result.hasDedicatedServerPack);
+            QVERIFY(result.warnings.join('\n').contains(loader == QStringLiteral("fabric")
+                                                              ? "missing.jar"
+                                                              : "ponder.jar"));
+            QCOMPARE(manager.serverCount(), 1);
+        }
+    }
+
+    void derivedUnverifiedIntegrityWarningsAreBounded()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        constexpr int fileCount = 12;
+        QJsonArray files;
+        for (int i = 0; i < fileCount; ++i) {
+            const QString name = QString("mods/file%1.jar").arg(i);
+            QVERIFY(writeFile(QDir(gameRoot).filePath(name), "content"));
+            files.append(QJsonObject{
+                { "path", name },
+                { "env", QJsonObject{{ "client", "required" }, { "server", "required" }} },
+            });
+        }
+        QVERIFY(writeFile(
+            QDir(instanceRoot).filePath("mrpack/modrinth.index.json"),
+            QJsonDocument(QJsonObject{
+                { "formatVersion", 1 },
+                { "game", "minecraft" },
+                { "dependencies", QJsonObject{
+                    { "minecraft", "1.20.1" },
+                    { "fabric-loader", "0.15.11" },
+                } },
+                { "files", files },
+            }).toJson()));
+        const auto report = inspectServerPack(instanceRoot);
+        QVERIFY(!report.isIncompatible());
+        QCOMPARE(report.unverifiedFileCount, fileCount);
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.20.1", "0.15.11", {}, {}, {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Many Unverified");
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        const QString joined = result.warnings.join('\n');
+        QVERIFY(joined.contains(QString::number(fileCount)));
+        QVERIFY(joined.contains("unverified", Qt::CaseInsensitive));
+        int unverifiedMentions = 0;
+        for (const QString &warning : result.warnings) {
+            if (warning.contains("unverified", Qt::CaseInsensitive)) {
+                ++unverifiedMentions;
+            }
+        }
+        QCOMPARE(unverifiedMentions, 1);
+        QVERIFY(result.warnings.size() <= 12);
     }
 
     void validatesExternalPublishedServerPack()
