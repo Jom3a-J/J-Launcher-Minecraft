@@ -46,11 +46,13 @@ class ServerJvmArgs final {
     static bool isHeapSizeValue(const QString &value);
     static QString unsupportedOptionName(const QString &token, int javaMajor);
 
-    // Tokenize Java argfile content without executing it. Handles '#'
-    // comments, blank lines, single/double quotes, and backslash escapes.
-    // Returns false with an error for unclosed quotes.
+    // Parse Java argument-file quoting, escapes, comments and continuations.
+    // Reject unclosed quotes instead of guessing at malformed pack settings.
     static bool tokenizeArgfile(const QString &content, QStringList *tokens, QString *error);
     static QString quoteToken(const QString &token);
+
+    // JAVA_TOOL_OPTIONS uses quote delimiters without backslash unescaping.
+    static QString quoteEnvToken(const QString &token);
 
     static ServerJvmFilterResult filterTokens(const QStringList &tokens, int javaMajor);
     static ServerJvmFilterResult prepareContent(const QString &content, int javaMajor);

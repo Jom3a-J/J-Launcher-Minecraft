@@ -219,6 +219,22 @@ class ServerManagerTest : public QObject {
         QVERIFY(ServerProperties::worldSetupIssue(root.path()).isEmpty());
     }
 
+    void checksMissingFileRequirementsBeforeStartup()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        const QString requirements =
+            root.filePath("jlauncher_required_server_files.txt");
+        QVERIFY(writeFile(requirements, "mods/required-library.jar\n"));
+        QVERIFY(ServerProperties::worldSetupIssue(root.path())
+                    .contains("mods/required-library.jar"));
+        QVERIFY(writeFile(root.filePath("mods/required-library.jar"), "library"));
+        QVERIFY(ServerProperties::worldSetupIssue(root.path()).isEmpty());
+        QVERIFY(writeFile(requirements, "../outside.jar\n"));
+        QVERIFY(ServerProperties::worldSetupIssue(root.path())
+                    .contains("unsafe path"));
+    }
+
     void preparesServerContentAndFiltersClientOnlyFiles()
     {
         QTemporaryDir temporaryRoot;
@@ -431,7 +447,46 @@ class ServerManagerTest : public QObject {
         QVERIFY(skipped.contains("mods/client-only.jar"));
     }
 
-    void rejectsIncompleteProviderServerManifest()
+    void remembersConfirmedClientOnlyJarHashes()
+    {
+        const QString previousOrganization = QCoreApplication::organizationName();
+        const QString previousApplication = QCoreApplication::applicationName();
+        QCoreApplication::setOrganizationName(QStringLiteral("JLauncherTests"));
+        QCoreApplication::setApplicationName(QStringLiteral("KnownClientOnly"));
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        const QString jarPath = QDir(gameRoot).filePath("mods/runtime-client.jar");
+        QVERIFY(writeForgeModJar(
+            jarPath, "META-INF/mods.toml",
+            "modLoader=\"javafml\"\nloaderVersion=\"[47,)\"\n"
+            "[[mods]]\nmodId=\"runtimeclient\"\nversion=\"1\"\n"));
+        QVERIFY(writeFile(QDir(gameRoot).filePath("config/server.toml"), "server"));
+        QVERIFY(!ServerModpackInstaller::isKnownClientOnlyFile(jarPath));
+        QVERIFY(ServerModpackInstaller::markKnownClientOnlyFile(jarPath));
+        QVERIFY(ServerModpackInstaller::isKnownClientOnlyFile(jarPath));
+
+        QStringList skipped;
+        QString error;
+        QVERIFY2(ServerModpackInstaller::prepareContent(
+                     instanceRoot, gameRoot, root.filePath("prepared"),
+                     &skipped, &error), qPrintable(error));
+        QVERIFY(!QFileInfo::exists(root.filePath("prepared/mods/runtime-client.jar")));
+        QVERIFY(skipped.contains("mods/runtime-client.jar"));
+
+        QFile jar(jarPath);
+        QVERIFY(jar.open(QIODevice::ReadOnly));
+        const QString hash = QString::fromLatin1(
+            QCryptographicHash::hash(jar.readAll(), QCryptographicHash::Sha256).toHex());
+        QSettings().remove(
+            QStringLiteral("ServerCompatibility/KnownClientOnlyHashes/") + hash);
+        QCoreApplication::setOrganizationName(previousOrganization);
+        QCoreApplication::setApplicationName(previousApplication);
+    }
+
+    void recordsIncompleteProviderServerManifestForRepair()
     {
         QTemporaryDir temporaryRoot;
         QVERIFY(temporaryRoot.isValid());
@@ -443,11 +498,16 @@ class ServerManagerTest : public QObject {
             QDir(instanceRoot).filePath("server-pack/include.txt"),
             "future-provider-data/required.dat\n"));
 
+        QStringList warnings;
         QString error;
-        QVERIFY(!ServerModpackInstaller::prepareContent(
-            instanceRoot, gameRoot, root.filePath("prepared"), nullptr, &error));
-        QVERIFY(error.contains("provider-declared", Qt::CaseInsensitive));
-        QVERIFY(error.contains("future-provider-data/required.dat"));
+        QVERIFY2(ServerModpackInstaller::prepareContent(
+                     instanceRoot, gameRoot, root.filePath("prepared"), nullptr,
+                     &error, &warnings), qPrintable(error));
+        QVERIFY(warnings.join('\n').contains("future-provider-data/required.dat"));
+        QFile requirements(root.filePath(
+            "prepared/jlauncher_required_server_files.txt"));
+        QVERIFY(requirements.open(QIODevice::ReadOnly));
+        QVERIFY(requirements.readAll().contains("future-provider-data/required.dat"));
     }
 
     void rejectsMissingRequiredServerOnlyFile()
@@ -458,11 +518,16 @@ class ServerManagerTest : public QObject {
         const QString instanceRoot = root.filePath("instance");
         const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
         QVERIFY(QDir().mkpath(gameRoot));
+        QVERIFY(writeFile(QDir(gameRoot).filePath("config/usable.toml"), "usable"));
 
         const QJsonArray files{
             QJsonObject{
                 { "path", "mods/server-required.jar" },
                 { "env", QJsonObject{{ "client", "unsupported" }, { "server", "required" }} },
+            },
+            QJsonObject{
+                { "path", "config/usable.toml" },
+                { "env", QJsonObject{{ "client", "optional" }, { "server", "required" }} },
             },
         };
         QVERIFY(writeFile(
@@ -473,24 +538,28 @@ class ServerManagerTest : public QObject {
                 { "files", files },
             }).toJson()));
 
+        QStringList warnings;
         QString error;
-        QVERIFY(!ServerModpackInstaller::prepareContent(
-            instanceRoot, gameRoot, root.filePath("prepared"), nullptr, &error));
-        QVERIFY(error.contains("server-only", Qt::CaseInsensitive));
-        QVERIFY(error.contains("server-required.jar"));
+        QVERIFY2(ServerModpackInstaller::prepareContent(
+                     instanceRoot, gameRoot, root.filePath("prepared"), nullptr,
+                     &error, &warnings), qPrintable(error));
+        QVERIFY(warnings.join('\n').contains("server-required.jar"));
 
         ServerManager manager(root.filePath("server-data"));
         const auto profile = ServerModpackInstaller::profileForVersions(
             "1.21.1", "0.16.10", {}, {}, {});
-        const auto failedTransaction =
+        const auto repairable =
             ServerModpackInstaller::createMatchingServer(
-                &manager, profile, instanceRoot, gameRoot, "Must Roll Back");
-        QVERIFY(!failedTransaction.isValid());
-        QCOMPARE(failedTransaction.failureCategory,
-                 ServerModpackFailureCategory::ContentProjection);
-        QCOMPARE(failedTransaction.failureStage,
-                 ServerModpackFailureStage::ContentPreparation);
-        QCOMPARE(manager.serverCount(), 0);
+                &manager, profile, instanceRoot, gameRoot, "Repairable Server");
+        QVERIFY2(repairable.isValid(), qPrintable(repairable.error));
+        QVERIFY(repairable.warnings.join('\n').contains("server-required.jar"));
+        QCOMPARE(repairable.missingFiles,
+                 QStringList({ "mods/server-required.jar" }));
+        const auto repairableServer = manager.getServer(repairable.serverId);
+        QVERIFY(repairableServer);
+        QVERIFY(ServerProperties::worldSetupIssue(repairableServer->serverDirectory())
+                    .contains("server-required.jar"));
+        QCOMPARE(manager.serverCount(), 1);
 
         QVERIFY(writeFile(
             QDir(instanceRoot).filePath(
@@ -503,6 +572,7 @@ class ServerManagerTest : public QObject {
                  qPrintable(error));
         QVERIFY(QFileInfo::exists(
             root.filePath("prepared/mods/server-required.jar")));
+        QVERIFY(ServerProperties::worldSetupIssue(root.filePath("prepared")).isEmpty());
     }
 
     void usesPublishedServerPackAsAuthoritativeContent()
@@ -545,6 +615,36 @@ class ServerManagerTest : public QObject {
             QDir(destination).filePath("future-provider-data/rules.json")));
         QVERIFY(!QFileInfo::exists(
             QDir(destination).filePath("mods/client-only.jar")));
+    }
+
+    void acceptsPublishedBootstrapScriptWithoutServerJar()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(QDir().mkpath(gameRoot));
+        QVERIFY(writeFile(QDir(instanceRoot).filePath(
+                              "server-pack/published-server-pack.txt"),
+                          "curseforge\n"));
+        QVERIFY(writeFile(QDir(instanceRoot).filePath(
+                              "server-pack/server-files/start.bat"),
+                          "@echo off\r\n"));
+
+        QCOMPARE(ServerModpackInstaller::publishedServerRootChoices(instanceRoot),
+                 QStringList({ "." }));
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.20.1", {}, "47.4.20", {}, {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Bootstrap Pack");
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        const auto server = manager.getServer(result.serverId);
+        QVERIFY(server);
+        QVERIFY(QFileInfo::exists(
+            QDir(server->serverDirectory()).filePath("start.bat")));
+        QVERIFY(!QFileInfo::exists(server->serverJarPath()));
     }
 
     void publishedServerPackKeepsClientLabelledFiles()
@@ -936,7 +1036,58 @@ class ServerManagerTest : public QObject {
         QVERIFY(!QFileInfo::exists(server->serverJarPath()));
     }
 
-    void rejectsDerivedFabricServerWithMissingDependency()
+    void appliesKnownSettingsAndBlocksOnlyUnsafeFirstStart()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(writeFabricModJar(
+            QDir(gameRoot).filePath("mods/example.jar"), "example", "1.0.0"));
+        QVERIFY(writeFile(
+            QDir(instanceRoot).filePath("server-pack/server-setup-required.txt"),
+            "topography-preset\n"));
+        QVERIFY(writeFile(
+            QDir(gameRoot).filePath("server.properties"),
+            "topography-preset=wrong\n"));
+
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.21.1", "0.16.10", {}, {}, {});
+
+        // Missing setup does not waste a valid download or server projection.
+        // It creates a stopped server and blocks only unsafe first startup.
+        QVERIFY(writeFile(
+            QDir(instanceRoot).filePath("server-pack/server-properties.txt"),
+            "topography-preset=\n"));
+        const auto needsSetup = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Needs Settings");
+        QVERIFY2(needsSetup.isValid(), qPrintable(needsSetup.error));
+        QVERIFY(needsSetup.warnings.join('\n').contains("topography-preset"));
+        const auto incompleteServer = manager.getServer(needsSetup.serverId);
+        QVERIFY(incompleteServer);
+        QVERIFY(!incompleteServer->start());
+        QCOMPARE(incompleteServer->status(), ServerStatus::Error);
+        QVERIFY(incompleteServer->consoleLog().contains("topography-preset"));
+        QVERIFY(manager.deleteServer(incompleteServer->id()));
+        QCOMPARE(manager.serverCount(), 0);
+
+        // A known adapter value overrides the incorrect packaged default.
+        QVERIFY(writeFile(
+            QDir(instanceRoot).filePath("server-pack/server-properties.txt"),
+            "topography-preset=void\n"));
+        const auto configured = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Configured Settings");
+        QVERIFY2(configured.isValid(), qPrintable(configured.error));
+        const auto server = manager.getServer(configured.serverId);
+        QVERIFY(server);
+        const auto properties = ServerProperties::load(server->serverPropertiesPath());
+        QCOMPARE(properties.value("topography-preset"), QString("void"));
+        QCOMPARE(manager.serverCount(), 1);
+    }
+
+    void createsRepairableDerivedFabricServerWithMissingDependency()
     {
         QTemporaryDir temporaryRoot;
         QVERIFY(temporaryRoot.isValid());
@@ -952,15 +1103,16 @@ class ServerManagerTest : public QObject {
             "1.20.1", "0.15.11", {}, {}, {});
         const auto result = ServerModpackInstaller::createMatchingServer(
             &manager, profile, instanceRoot, gameRoot, "Incomplete Fabric Pack");
-        QVERIFY(!result.isValid());
-        QVERIFY(result.error.contains("no dedicated server version",
-                                      Qt::CaseInsensitive));
-        QVERIFY(result.error.contains("connectedglass"));
-        QVERIFY(result.error.contains("fusion"));
-        QCOMPARE(result.failureCategory,
-                 ServerModpackFailureCategory::DependencyIncompatibility);
-        QCOMPARE(result.failureStage,
-                 ServerModpackFailureStage::DependencyValidation);
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        QVERIFY(result.warnings.join('\n').contains("connectedglass"));
+        QVERIFY(result.warnings.join('\n').contains("fusion"));
+        QVERIFY(result.dependencyRequirements.join('\n').contains("fusion"));
+        const auto incompleteServer = manager.getServer(result.serverId);
+        QVERIFY(incompleteServer);
+        incompleteServer->setEulaAccepted(true);
+        QVERIFY(!incompleteServer->start());
+        QVERIFY(incompleteServer->consoleLog().contains("fusion"));
+        QVERIFY(manager.deleteServer(incompleteServer->id()));
         QCOMPARE(manager.serverCount(), 0);
 
         const QString nestedFusionPath = root.filePath("nested-fusion.jar");
@@ -973,10 +1125,16 @@ class ServerManagerTest : public QObject {
         const auto completeResult = ServerModpackInstaller::createMatchingServer(
             &manager, profile, instanceRoot, gameRoot, "Complete Fabric Pack");
         QVERIFY2(completeResult.isValid(), qPrintable(completeResult.error));
+        const auto completeServer = manager.getServer(completeResult.serverId);
+        QVERIFY(completeServer);
+        QCOMPARE(ServerModpackInstaller::checkServerDependencies(
+                     completeServer->serverDirectory(), completeServer->loaderType(),
+                     completeServer->version(), completeServer->loaderVersion()).state,
+                 ServerDependencyCheckState::Compatible);
         QCOMPARE(manager.serverCount(), 1);
     }
 
-    void rejectsDerivedForgeServerWithMissingDependency()
+    void createsRepairableDerivedForgeServerWithMissingDependency()
     {
         QTemporaryDir temporaryRoot;
         QVERIFY(temporaryRoot.isValid());
@@ -1016,11 +1174,17 @@ class ServerManagerTest : public QObject {
             "1.20.1", {}, "47.1.0", {}, {});
         const auto result = ServerModpackInstaller::createMatchingServer(
             &manager, profile, instanceRoot, gameRoot, "Incomplete Forge Pack");
-        QVERIFY(!result.isValid());
-        QVERIFY(result.error.contains("Forge", Qt::CaseInsensitive));
-        QVERIFY(result.error.contains("example"));
-        QVERIFY(result.error.contains("requiredlib"));
-        QVERIFY(!result.error.contains("clienthelper"));
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        QVERIFY(result.warnings.join('\n').contains("Forge", Qt::CaseInsensitive));
+        QVERIFY(result.warnings.join('\n').contains("example"));
+        QVERIFY(result.warnings.join('\n').contains("requiredlib"));
+        QVERIFY(!result.warnings.join('\n').contains("clienthelper"));
+        const auto missingServer = manager.getServer(result.serverId);
+        QVERIFY(missingServer);
+        missingServer->setEulaAccepted(true);
+        QVERIFY(!missingServer->start());
+        QVERIFY(missingServer->consoleLog().contains("requiredlib"));
+        QVERIFY(manager.deleteServer(missingServer->id()));
         QCOMPARE(manager.serverCount(), 0);
 
         QVERIFY(writeForgeModJar(
@@ -1040,10 +1204,11 @@ class ServerManagerTest : public QObject {
                 "displayName=\"Required Library\"\n")));
         const auto mismatchedResult = ServerModpackInstaller::createMatchingServer(
             &manager, profile, instanceRoot, gameRoot, "Mismatched Forge Pack");
-        QVERIFY(!mismatchedResult.isValid());
-        QVERIFY(mismatchedResult.error.contains("version", Qt::CaseInsensitive));
-        QVERIFY(mismatchedResult.error.contains("[1,)"));
-        QVERIFY(mismatchedResult.error.contains("0.5.0"));
+        QVERIFY2(mismatchedResult.isValid(), qPrintable(mismatchedResult.error));
+        QVERIFY(mismatchedResult.warnings.join('\n').contains("version", Qt::CaseInsensitive));
+        QVERIFY(mismatchedResult.warnings.join('\n').contains("[1,)"));
+        QVERIFY(mismatchedResult.warnings.join('\n').contains("0.5.0"));
+        QVERIFY(manager.deleteServer(mismatchedResult.serverId));
         QCOMPARE(manager.serverCount(), 0);
 
         QVERIFY(writeForgeModJar(
@@ -1108,7 +1273,7 @@ class ServerManagerTest : public QObject {
         QCOMPARE(manager.serverCount(), 1);
     }
 
-    void rejectsDerivedNeoForgeServerWithMissingDependency()
+    void createsRepairableDerivedNeoForgeServerWithMissingDependency()
     {
         QTemporaryDir temporaryRoot;
         QVERIFY(temporaryRoot.isValid());
@@ -1179,12 +1344,13 @@ class ServerManagerTest : public QObject {
             "1.21.1", {}, {}, "21.1.0", {});
         const auto result = ServerModpackInstaller::createMatchingServer(
             &manager, profile, instanceRoot, gameRoot, "Incomplete NeoForge Pack");
-        QVERIFY(!result.isValid());
-        QVERIFY(result.error.contains("NeoForge", Qt::CaseInsensitive));
-        QVERIFY(result.error.contains("example"));
-        QVERIFY(result.error.contains("requiredlib"));
-        QVERIFY(!result.error.contains("clienthelper"));
-        QVERIFY(!result.error.contains("optionalhelper"));
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        QVERIFY(result.warnings.join('\n').contains("NeoForge", Qt::CaseInsensitive));
+        QVERIFY(result.warnings.join('\n').contains("example"));
+        QVERIFY(result.warnings.join('\n').contains("requiredlib"));
+        QVERIFY(!result.warnings.join('\n').contains("clienthelper"));
+        QVERIFY(manager.deleteServer(result.serverId));
+        QVERIFY(!result.warnings.join('\n').contains("optionalhelper"));
         QCOMPARE(manager.serverCount(), 0);
 
         QVERIFY(writeForgeModJar(
@@ -1204,10 +1370,11 @@ class ServerManagerTest : public QObject {
                 "displayName=\"Optional Helper\"\n")));
         const auto mismatchedResult = ServerModpackInstaller::createMatchingServer(
             &manager, profile, instanceRoot, gameRoot, "Mismatched NeoForge Pack");
-        QVERIFY(!mismatchedResult.isValid());
-        QVERIFY(mismatchedResult.error.contains("version", Qt::CaseInsensitive));
-        QVERIFY(mismatchedResult.error.contains("[1,2)"));
-        QVERIFY(mismatchedResult.error.contains("2.0.0"));
+        QVERIFY2(mismatchedResult.isValid(), qPrintable(mismatchedResult.error));
+        QVERIFY(mismatchedResult.warnings.join('\n').contains("version", Qt::CaseInsensitive));
+        QVERIFY(mismatchedResult.warnings.join('\n').contains("[1,2)"));
+        QVERIFY(mismatchedResult.warnings.join('\n').contains("2.0.0"));
+        QVERIFY(manager.deleteServer(mismatchedResult.serverId));
         QCOMPARE(manager.serverCount(), 0);
 
         QVERIFY(writeForgeModJar(
@@ -1263,10 +1430,14 @@ class ServerManagerTest : public QObject {
                 "displayName=\"Bad Mod\"\n")));
         const auto incompatibleResult = ServerModpackInstaller::createMatchingServer(
             &manager, profile, instanceRoot, gameRoot, "Incompatible NeoForge Pack");
-        QVERIFY(!incompatibleResult.isValid());
-        QVERIFY(incompatibleResult.error.contains("incompatible", Qt::CaseInsensitive));
-        QVERIFY(incompatibleResult.error.contains("badmod"));
-        QCOMPARE(manager.serverCount(), 2);
+        QVERIFY2(incompatibleResult.isValid(), qPrintable(incompatibleResult.error));
+        QVERIFY(incompatibleResult.warnings.join('\n').contains("incompatible", Qt::CaseInsensitive));
+        QVERIFY(incompatibleResult.warnings.join('\n').contains("badmod"));
+        const auto incompatibleServer = manager.getServer(incompatibleResult.serverId);
+        QVERIFY(incompatibleServer);
+        incompatibleServer->setEulaAccepted(true);
+        QVERIFY(!incompatibleServer->start());
+        QCOMPARE(manager.serverCount(), 3);
     }
 
     void createsDerivedServerWhenProviderVersionsDisagree()
@@ -1482,7 +1653,7 @@ class ServerManagerTest : public QObject {
         QVERIFY(QFileInfo::exists(QDir(server->modsDirectory()).filePath("shared.jar")));
     }
 
-    void rejectsAmbiguousPublishedServerRoots()
+    void offersAmbiguousPublishedServerRootsForSelection()
     {
         QTemporaryDir temporaryRoot;
         QVERIFY(temporaryRoot.isValid());
@@ -1500,12 +1671,43 @@ class ServerManagerTest : public QObject {
         ServerManager manager(root.filePath("server-data"));
         const auto profile = ServerModpackInstaller::profileForVersions(
             "1.20.1", "0.15.11", {}, {}, {});
+        QCOMPARE(ServerModpackInstaller::publishedServerRootChoices(instanceRoot),
+                 QStringList({ "PackA", "PackB" }));
         const auto result = ServerModpackInstaller::createMatchingServer(
             &manager, profile, instanceRoot, gameRoot, "Ambiguous Pack");
         QVERIFY(!result.isValid());
         QCOMPARE(result.failureCategory, ServerModpackFailureCategory::ContentProjection);
         QCOMPARE(result.failureStage, ServerModpackFailureStage::ContentPreparation);
         QVERIFY(result.error.contains("more than one possible", Qt::CaseInsensitive));
+        QCOMPARE(manager.serverCount(), 0);
+
+        const auto selected = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Selected Pack", 0, 0,
+            "PackB");
+        QVERIFY2(selected.isValid(), qPrintable(selected.error));
+        const auto server = manager.getServer(selected.serverId);
+        QVERIFY(server);
+        QVERIFY(QFileInfo::exists(QDir(server->modsDirectory()).filePath("b.jar")));
+        QVERIFY(!QFileInfo::exists(QDir(server->modsDirectory()).filePath("a.jar")));
+    }
+
+    void rejectsEmptyModpackProjection()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(QDir().mkpath(gameRoot));
+        ServerManager manager(root.filePath("server-data"));
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.20.1", "0.15.11", {}, {}, {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Empty Projection");
+        QVERIFY(!result.isValid());
+        QVERIFY(result.error.contains("no usable server content", Qt::CaseInsensitive));
+        QCOMPARE(result.failureCategory, ServerModpackFailureCategory::ContentProjection);
+        QCOMPARE(result.failureStage, ServerModpackFailureStage::ContentPreparation);
         QCOMPARE(manager.serverCount(), 0);
     }
 
@@ -1784,14 +1986,17 @@ class ServerManagerTest : public QObject {
         QVERIFY2(result.isValid(), qPrintable(result.error));
         QVERIFY(makeParent(false));
         const auto missing = ServerModpackInstaller::createMatchingServer(&manager, profile, instance, game, "Missing");
-        QVERIFY(!missing.isValid());
-        QCOMPARE(missing.failureCategory, ServerModpackFailureCategory::DependencyIncompatibility);
-        QCOMPARE(missing.failureStage, ServerModpackFailureStage::DependencyValidation);
-        QVERIFY(missing.error.contains("ponder.jar"));
-        QCOMPARE(manager.serverCount(), 1);
+        QVERIFY2(missing.isValid(), qPrintable(missing.error));
+        QVERIFY(missing.warnings.join('\n').contains("ponder.jar"));
+        const auto missingServer = manager.getServer(missing.serverId);
+        QVERIFY(missingServer);
+        missingServer->setEulaAccepted(true);
+        QVERIFY(!missingServer->start());
+        QVERIFY(missingServer->consoleLog().contains("ponder.jar"));
+        QCOMPARE(manager.serverCount(), 2);
     }
 
-    void rejectsDerivedFabricServerWithMissingBundledJar()
+    void createsRepairableDerivedFabricServerWithMissingBundledJar()
     {
         QTemporaryDir temporaryRoot;
         QVERIFY(temporaryRoot.isValid());
@@ -1811,11 +2016,14 @@ class ServerManagerTest : public QObject {
             "1.20.1", "0.15.11", {}, {}, {});
         const auto missing = ServerModpackInstaller::createMatchingServer(
             &manager, profile, instanceRoot, gameRoot, "Missing Fabric Bundle");
-        QVERIFY(!missing.isValid());
-        QCOMPARE(missing.failureCategory, ServerModpackFailureCategory::DependencyIncompatibility);
-        QCOMPARE(missing.failureStage, ServerModpackFailureStage::DependencyValidation);
-        QVERIFY(missing.error.contains("missing.jar"));
-        QCOMPARE(manager.serverCount(), 0);
+        QVERIFY2(missing.isValid(), qPrintable(missing.error));
+        QVERIFY(missing.warnings.join('\n').contains("missing.jar"));
+        const auto server = manager.getServer(missing.serverId);
+        QVERIFY(server);
+        server->setEulaAccepted(true);
+        QVERIFY(!server->start());
+        QVERIFY(server->consoleLog().contains("missing.jar"));
+        QCOMPARE(manager.serverCount(), 1);
     }
 
     void publishedMissingBundledJarRemainsWarningOnly()

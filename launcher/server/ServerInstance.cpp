@@ -15,6 +15,7 @@
 
 #include "ServerInstance.h"
 #include "ServerJvmArgs.h"
+#include "ServerModpackInstaller.h"
 #include "ServerPackImportTransaction.h"
 #include "ServerDownloader.h"
 #include "ServerProperties.h"
@@ -205,6 +206,27 @@ bool ServerInstance::start()
         setStatus(ServerStatus::Error);
         emit serverError(setupIssue);
         return false;
+    }
+
+    if (QFileInfo(QDir(m_serverDirectory).filePath(
+                      QStringLiteral("jlauncher_derived_server.txt"))).isFile()) {
+        const ServerDependencyCheckResult dependencyCheck =
+            ServerModpackInstaller::checkServerDependencies(
+                m_serverDirectory, m_loaderType, m_version, m_loaderVersion);
+        if (dependencyCheck.state == ServerDependencyCheckState::DefiniteFailure
+            || dependencyCheck.state == ServerDependencyCheckState::Unsafe) {
+            const QString message = tr(
+                "Setup required: server dependencies are missing or incompatible. %1")
+                                        .arg(dependencyCheck.error);
+            appendLog("[ERROR] " + message);
+            setStatus(ServerStatus::Error);
+            emit serverError(message);
+            return false;
+        }
+        if (dependencyCheck.state == ServerDependencyCheckState::Inconclusive) {
+            appendLog(tr("[WARN] Dependency inspection was inconclusive; the loader will perform the final check: %1")
+                          .arg(dependencyCheck.error));
+        }
     }
 
     if (!m_eulaAccepted) {
@@ -408,7 +430,10 @@ bool ServerInstance::start()
                          "Pack -Xms/-Xmx inside the opaque wrapper still take precedence and cannot be filtered safely."));
             emit outputReceived(tr("[JVM] Opaque wrapper limit: launcher memory is a fallback; the wrapper's own memory flags win."));
 #ifdef Q_OS_WIN
-            m_process->start("cmd.exe", QStringList() << "/d" << "/c" << "run.bat" << "nogui");
+            m_process->start("cmd.exe",
+                             QStringList() << "/d" << "/c"
+                                           << QFileInfo(loaderScriptPath()).fileName()
+                                           << "nogui");
 #else
             m_process->start(QStringLiteral("/bin/sh"),
                              QStringList() << loaderScriptPath() << QStringLiteral("nogui"));
@@ -467,6 +492,50 @@ bool ServerInstance::restart()
         return false;
     }
     return true;
+}
+
+bool ServerInstance::prepareServerSoftware()
+{
+    if (m_status == ServerStatus::Downloading || m_status == ServerStatus::Running
+        || m_status == ServerStatus::Starting || m_status == ServerStatus::Stopping) {
+        return false;
+    }
+    if (hasLaunchTarget()) {
+        appendLog(tr("[DOWNLOAD] Server software is already installed."));
+        return true;
+    }
+    if (m_serverDirectory.trimmed().isEmpty()
+        || (!QDir(m_serverDirectory).exists()
+            && !QDir().mkpath(m_serverDirectory))) {
+        const QString message = tr("The server folder could not be prepared for software installation.");
+        appendLog("[DOWNLOAD ERROR] " + message);
+        setStatus(ServerStatus::Error);
+        emit serverError(message);
+        return false;
+    }
+
+    const int requiredJava = qMax(
+        requiredJavaVersion(), recommendedJavaMajor(m_version, m_loaderType));
+    int detectedJava = 0;
+    const QString javaPath = compatibleJavaPath(requiredJava, &detectedJava);
+    if (!javaPath.isEmpty()) {
+        m_javaPath = javaPath;
+        return downloadServerJar(javaPath, false);
+    }
+    if (requiredJava > 0) {
+        if (auto *application = APPLICATION_DYN;
+            application && application->settings()->get("AutomaticJavaDownload").toBool()) {
+            return installCompatibleJava(requiredJava, false, true);
+        }
+    }
+    const QString message = requiredJava > 0
+        ? tr("Server software needs Java %1 for installation. Configure Java or enable automatic Java downloads.")
+              .arg(requiredJava)
+        : tr("Server software installation needs a configured Java runtime.");
+    appendLog("[DOWNLOAD ERROR] " + message);
+    setStatus(ServerStatus::Error);
+    emit serverError(message);
+    return false;
 }
 
 bool ServerInstance::isRunning() const
@@ -620,11 +689,19 @@ bool ServerInstance::hasLaunchTarget() const
 QString ServerInstance::loaderScriptPath() const
 {
 #ifdef Q_OS_WIN
-    const QString scriptName = QStringLiteral("run.bat");
+    const QString preferredName = QStringLiteral("run.bat");
+    const QString fallbackName = QStringLiteral("start.bat");
 #else
-    const QString scriptName = QStringLiteral("run.sh");
+    const QString preferredName = QStringLiteral("run.sh");
+    const QString fallbackName = QStringLiteral("start.sh");
 #endif
-    return QDir(m_serverDirectory).filePath(scriptName);
+    const QDir serverDir(m_serverDirectory);
+    const QString preferred = serverDir.filePath(preferredName);
+    if (QFileInfo(preferred).isFile()) {
+        return preferred;
+    }
+    const QString fallback = serverDir.filePath(fallbackName);
+    return QFileInfo(fallback).isFile() ? fallback : preferred;
 }
 
 QString ServerInstance::loaderArgumentsFile() const
@@ -883,7 +960,9 @@ bool ServerInstance::isJavaMajorCompatible(int requiredVersion, int detectedVers
         && (requiredVersion == 0 || detectedVersion == requiredVersion);
 }
 
-bool ServerInstance::installCompatibleJava(int requiredVersion)
+bool ServerInstance::installCompatibleJava(int requiredVersion,
+                                           bool startAfterInstall,
+                                           bool prepareServerAfterInstall)
 {
     if (m_javaInstallTask || requiredVersion <= 0) {
         return false;
@@ -910,12 +989,17 @@ bool ServerInstance::installCompatibleJava(int requiredVersion)
                 appendLog(line);
                 emit outputReceived(line);
             });
-    connect(installTask.get(), &Task::succeeded, this, [this, installTask] {
+    connect(installTask.get(), &Task::succeeded, this,
+            [this, installTask, startAfterInstall, prepareServerAfterInstall] {
         m_javaPath = installTask->javaPath();
         appendLog(tr("[JAVA] Managed Java installed at %1").arg(m_javaPath));
         m_javaInstallTask.reset();
         setStatus(ServerStatus::Stopped);
-        QTimer::singleShot(0, this, [this] { start(); });
+        if (prepareServerAfterInstall) {
+            QTimer::singleShot(0, this, [this] { prepareServerSoftware(); });
+        } else if (startAfterInstall) {
+            QTimer::singleShot(0, this, [this] { start(); });
+        }
     });
     connect(installTask.get(), &Task::failed, this, [this](const QString &reason) {
         const QString message = tr("Automatic Java installation failed: %1").arg(reason);
@@ -936,6 +1020,34 @@ bool ServerInstance::installCompatibleJava(int requiredVersion)
 bool ServerInstance::addMods(const QStringList &paths, QString *error)
 {
     return addContentFiles(paths, error);
+}
+
+bool ServerInstance::invalidateContentCaches(QString *error) const
+{
+    if (contentType() != ServerContentType::Mod) {
+        return true;
+    }
+    const QStringList caches{
+        QDir(modsDirectory()).filePath(QStringLiteral(".connector")),
+        QDir(m_serverDirectory).filePath(QStringLiteral(".fabric/processedMods")),
+    };
+    for (const QString &path : caches) {
+        const QFileInfo info(path);
+        if (!info.exists() && !info.isSymLink()) {
+            continue;
+        }
+        const bool removed = info.isSymLink() || !info.isDir()
+            ? QFile::remove(path)
+            : QDir(path).removeRecursively();
+        if (!removed) {
+            if (error) {
+                *error = tr("Could not clear the generated mod cache '%1'.")
+                             .arg(QFileInfo(path).fileName());
+            }
+            return false;
+        }
+    }
+    return true;
 }
 
 bool ServerInstance::addContentFiles(const QStringList &paths, QString *error)
@@ -969,6 +1081,10 @@ bool ServerInstance::addContentFiles(const QStringList &paths, QString *error)
             }
             return false;
         }
+    }
+
+    if (!invalidateContentCaches(error)) {
+        return false;
     }
 
     const QString destinationDirectory = contentDirectory();
@@ -1255,6 +1371,16 @@ void ServerInstance::onProcessFinished(int exitCode, QProcess::ExitStatus exitSt
 void ServerInstance::onProcessError(QProcess::ProcessError error)
 {
     m_startupTimeoutTimer.stop();
+
+    // QProcess can report a process error while a server is already being
+    // stopped (for example when the JVM closes its pipes before the wrapper
+    // process finishes). That is part of the requested shutdown, not a server
+    // crash, and must not briefly put the server into the Error state.
+    if (m_status == ServerStatus::Stopping) {
+        appendLog(tr("[INFO] Server process reported an expected shutdown-time process event."));
+        return;
+    }
+
     setStatus(ServerStatus::Error);
 
     QString errorMsg;

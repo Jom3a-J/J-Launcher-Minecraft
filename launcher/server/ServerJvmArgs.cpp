@@ -10,6 +10,11 @@
 
 namespace {
 
+bool isArgfileWhitespace(QChar c)
+{
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
+}
+
 struct VersionGatedOption {
     const char *name;
     int minMajor;  // 0 means no minimum
@@ -139,12 +144,21 @@ QString ServerJvmArgs::wrapperEnvironmentArgs(int minMemoryMiB, int maxMemoryMiB
     // on the direct-jar or filtered-argfile paths where precise filtering
     // applies.
     parts << QStringLiteral("-XX:+IgnoreUnrecognizedVMOptions");
-    QStringList quoted;
-    quoted.reserve(parts.size());
+    QStringList encoded;
+    encoded.reserve(parts.size());
     for (const QString &part : parts) {
-        quoted << quoteToken(part);
+        encoded << quoteEnvToken(part);
     }
-    return quoted.join(' ');
+    return encoded.join(' ');
+}
+
+QString ServerJvmArgs::quoteEnvToken(const QString &token)
+{
+    // Concatenate double-quoted segments with single-quoted literal double
+    // quotes. Neither parser consumes backslashes in these environment values.
+    QString encoded = token;
+    encoded.replace(QLatin1Char('"'), QStringLiteral("\"'\"'\""));
+    return QLatin1Char('"') + encoded + QLatin1Char('"');
 }
 
 QString ServerJvmArgs::effectiveFileName()
@@ -213,63 +227,50 @@ bool ServerJvmArgs::tokenizeArgfile(const QString &content, QStringList *tokens,
     bool inDouble = false;
     bool tokenStarted = false;
     const int size = content.size();
-    auto consumeLineContinuation = [&](int &index, QChar first) -> bool {
-        // index points at '\\'; first is the char after it.
-        if (first == '\n') {
-            index += 1;
-            return true;
+    const auto handleQuotedChar = [&](QChar c, int &index, QChar quote, bool &inQuote) {
+        if (c == quote) {
+            inQuote = false;
+            return;
         }
-        if (first == '\r') {
-            index += 1;
-            if (index + 1 < size && content.at(index + 1) == '\n') {
-                index += 1;
+        if (c == '\\' && index + 1 < size) {
+            const QChar nxt = content.at(index + 1);
+            if (nxt == '\n' || nxt == '\r') {
+                // Java also discards indentation and blank lines following
+                // a quoted line continuation.
+                ++index;
+                while (index + 1 < size && isArgfileWhitespace(content.at(index + 1))) {
+                    ++index;
+                }
+                return;
             }
-            return true;
+            switch (nxt.unicode()) {
+                case 'n': current += '\n'; break;
+                case 'r': current += '\r'; break;
+                case 't': current += '\t'; break;
+                case 'f': current += '\f'; break;
+                default: current += nxt; break;
+            }
+            tokenStarted = true;
+            index += 1;
+            return;
         }
-        return false;
+        current += c;
+        tokenStarted = true;
     };
     for (int i = 0; i < size; ++i) {
         const QChar c = content.at(i);
-        if (inSingle) {
-            if (c == '\'') {
-                inSingle = false;
-            } else {
-                current += c;
-                tokenStarted = true;
+        if ((inSingle || inDouble) && (c == '\n' || c == '\r')) {
+            if (error) {
+                *error = QStringLiteral("Unclosed quote in supplied JVM arguments file.");
             }
+            return false;
+        }
+        if (inSingle) {
+            handleQuotedChar(c, i, QChar('\''), inSingle);
             continue;
         }
         if (inDouble) {
-            if (c == '"') {
-                inDouble = false;
-            } else if (c == '\\') {
-                if (i + 1 >= size) {
-                    current += '\\';
-                    tokenStarted = true;
-                } else {
-                    const QChar nxt = content.at(i + 1);
-                    if (nxt == '"') {
-                        current += '"';
-                        tokenStarted = true;
-                        ++i;
-                    } else if (nxt == '\\') {
-                        current += '\\';
-                        tokenStarted = true;
-                        ++i;
-                    } else if (nxt == '\n' || nxt == '\r') {
-                        // Line continuation inside quotes: join lines.
-                        consumeLineContinuation(i, nxt);
-                    } else {
-                        // Preserve Windows separators such as C:\mods:
-                        // backslash before ordinary characters stays literal.
-                        current += '\\';
-                        tokenStarted = true;
-                    }
-                }
-            } else {
-                current += c;
-                tokenStarted = true;
-            }
+            handleQuotedChar(c, i, QChar('"'), inDouble);
             continue;
         }
         if (c == '\'') {
@@ -278,40 +279,22 @@ bool ServerJvmArgs::tokenizeArgfile(const QString &content, QStringList *tokens,
         } else if (c == '"') {
             inDouble = true;
             tokenStarted = true;
-        } else if (c == '\\') {
-            if (i + 1 >= size) {
-                current += '\\';
-                tokenStarted = true;
-            } else {
-                const QChar nxt = content.at(i + 1);
-                if (nxt == '\n' || nxt == '\r') {
-                    consumeLineContinuation(i, nxt);
-                } else {
-                    // Java-argfile-compatible: ordinary backslashes (Windows
-                    // paths like C:\mods) are literal. Only CR/LF continuation
-                    // consumes the backslash.
-                    current += '\\';
-                    tokenStarted = true;
-                }
-            }
         } else if (c == '#') {
-            // '#' starts a comment only at a token boundary so values such
-            // as -Dfoo=bar#baz survive. Inside a token it is literal.
-            if (current.isEmpty() && !tokenStarted) {
-                while (i < size && content.at(i) != '\n') {
-                    ++i;
-                }
-                if (i < size) {
-                    // The newline itself is whitespace; the for-loop
-                    // increment moves past it.
-                } else {
-                    break;
-                }
-            } else {
-                current += c;
-                tokenStarted = true;
+            // Verified on a real JVM: an unquoted '#' abandons the
+            // in-progress token (if any) and comments out the rest of the
+            // line, while '#' inside quotes stays literal. Quoting the
+            // token on write preserves an intended literal '#'.
+            current.clear();
+            tokenStarted = false;
+            while (i < size && content.at(i) != '\n' && content.at(i) != '\r') {
+                ++i;
             }
-        } else if (c.isSpace()) {
+            if (i >= size) {
+                break;
+            }
+            // The newline itself is whitespace; the for-loop increment
+            // moves past it.
+        } else if (isArgfileWhitespace(c)) {
             if (tokenStarted) {
                 tokens->append(current);
                 current.clear();
@@ -351,6 +334,13 @@ QString ServerJvmArgs::quoteToken(const QString &token)
     }
     QString quoted = QStringLiteral("\"");
     for (const QChar c : token) {
+        switch (c.unicode()) {
+            case '\n': quoted += QStringLiteral("\\n"); continue;
+            case '\r': quoted += QStringLiteral("\\r"); continue;
+            case '\t': quoted += QStringLiteral("\\t"); continue;
+            case '\f': quoted += QStringLiteral("\\f"); continue;
+            default: break;
+        }
         if (c == '"' || c == '\\') {
             quoted += '\\';
         }
@@ -442,7 +432,9 @@ ServerJvmFilterResult ServerJvmArgs::prepareFile(const QString &sourcePath, int 
                                   .arg(maxArgfileBytes() / 1024);
         return result;
     }
-    const QString content = QString::fromUtf8(data);
+    // Java's native launcher decodes @-files with the platform encoding,
+    // including the Windows ANSI code page (also on Java 21/25).
+    const QString content = QString::fromLocal8Bit(data);
     return prepareContent(content, javaMajor);
 }
 
@@ -460,7 +452,16 @@ bool ServerJvmArgs::writeEffectiveArgfile(const QString &path, const QStringList
     QByteArray output;
     output += "# Generated by J Launcher. Do not edit; the pack file 'user_jvm_args.txt' is preserved unchanged.\n";
     for (const QString &token : tokens) {
-        output += quoteToken(token).toUtf8();
+        const QString quoted = quoteToken(token);
+        const QByteArray encoded = quoted.toLocal8Bit();
+        if (QString::fromLocal8Bit(encoded) != quoted) {
+            if (error) {
+                *error = QStringLiteral("A supplied JVM option cannot be represented in the Java launcher's platform encoding.");
+            }
+            file.cancelWriting();
+            return false;
+        }
+        output += encoded;
         output += '\n';
     }
     if (file.write(output) != output.size() || !file.commit()) {

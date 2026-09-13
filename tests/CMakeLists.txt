@@ -77,8 +77,18 @@ set_tests_properties(ServerMemory PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscr
 ecm_add_test(ServerPackCompatibility_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME ServerPackCompatibility)
 
-ecm_add_test(ServerInstance_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
-    TEST_NAME ServerInstance)
+add_executable(ServerInstance ServerInstance_test.cpp)
+target_link_libraries(ServerInstance Launcher_logic Qt${QT_VERSION_MAJOR}::Test)
+target_compile_definitions(ServerInstance PRIVATE QT_FORCE_ASSERTS
+    JLAUNCHER_TEST_JAVA_PATH="${Java_JAVA_EXECUTABLE}")
+ecm_mark_nongui_executable(ServerInstance)
+ecm_mark_as_test(ServerInstance)
+# QtTest stdout can be empty on Windows runners. Read its explicit text log
+# through CMake so CTest --output-on-failure includes the failing assertion.
+add_test(NAME ServerInstance COMMAND ${CMAKE_COMMAND}
+    "-DTEST_EXECUTABLE=$<TARGET_FILE:ServerInstance>"
+    "-DTEST_LOG=$<TARGET_FILE_DIR:ServerInstance>/ServerInstance-test-output.txt"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/RunQtTest.cmake")
 add_dependencies(ServerInstance FakeMinecraftServer)
 
 ecm_add_test(ServerSettingsPage_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test

@@ -277,6 +277,16 @@ class ServerInstanceTest : public QObject {
                  ServerCrashCause::Content);
         QCOMPARE(ServerDiagnostics::suspectedModIds(wrongSideLog),
                  QStringList({ "mr_toad_palladium" }));
+
+        const QString forgeCrashReport = QStringLiteral(
+            "-- MOD ruokmod --\n"
+            "Failure message: RuOK Mod has class loading errors\n"
+            "Attempted to load class team/teampotato/ruok/forge/RuOKModForge "
+            "for invalid dist DEDICATED_SERVER\n");
+        QCOMPARE(ServerDiagnostics::classifyCrash(forgeCrashReport),
+                 ServerCrashCause::Content);
+        QCOMPARE(ServerDiagnostics::suspectedModIds(forgeCrashReport),
+                 QStringList({ "ruokmod" }));
     }
 
     void supportedServerTypesRemainAvailable()
@@ -720,8 +730,16 @@ class ServerInstanceTest : public QObject {
         QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Stopped, 5000);
     }
 
+    void preservesCustomForgeScriptAndInjectsConfiguredJvmSettings_data()
+    {
+        QTest::addColumn<bool>("providerStartScript");
+        QTest::newRow("generated run script") << false;
+        QTest::newRow("ServerPackCreator start script") << true;
+    }
+
     void preservesCustomForgeScriptAndInjectsConfiguredJvmSettings()
     {
+        QFETCH(bool, providerStartScript);
         QTemporaryDir temporaryRoot;
         QVERIFY(temporaryRoot.isValid());
         const QString serverDirectory = temporaryRoot.filePath("server");
@@ -747,14 +765,13 @@ class ServerInstanceTest : public QObject {
                                       .arg(fakeServer)
                                       .toUtf8();
 #ifdef Q_OS_WIN
-        const QString scriptName = QStringLiteral("run.bat");
+        const QString scriptName = providerStartScript
+            ? QStringLiteral("start.bat") : QStringLiteral("run.bat");
 #else
-        const QString scriptName = QStringLiteral("run.sh");
+        const QString scriptName = providerStartScript
+            ? QStringLiteral("start.sh") : QStringLiteral("run.sh");
 #endif
         QVERIFY(writeFile(QDir(serverDirectory).filePath(scriptName), script));
-        QVERIFY(writeArchive(QDir(serverDirectory).filePath("server.jar"), {
-            { "META-INF/MANIFEST.MF", "Main-Class: net.minecraft.bundler.Main\n" },
-        }));
 
         QVERIFY(server.start());
         QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Running, 5000);
@@ -773,6 +790,47 @@ class ServerInstanceTest : public QObject {
         QVERIFY(server.consoleLog().contains("opaque wrapper"));
         QCOMPARE(readFile(QDir(serverDirectory).filePath(scriptName)), script);
 
+        QVERIFY(server.stop());
+        QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Stopped, 5000);
+    }
+
+    void prefersGeneratedRunScriptWhenBothWrapperNamesExist()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QString serverDirectory = temporaryRoot.filePath("server");
+        const QString fakeServer = QDir::toNativeSeparators(fakeMinecraftServerPath());
+
+        ServerInstance server("preferred-forge-wrapper", "Preferred Forge wrapper");
+        server.setServerDirectory(serverDirectory);
+        server.setVersion("1.21.1");
+        server.setLoaderType("forge");
+        server.setPort(unusedPort());
+        server.setEulaAccepted(true);
+        server.setJavaPath(fakeMinecraftServerPath());
+
+#ifdef Q_OS_WIN
+        const QString runName = QStringLiteral("run.bat");
+        const QString startName = QStringLiteral("start.bat");
+        const QByteArray runScript = QString(
+            "@echo off\r\necho SELECTED:run\r\n\"%1\" %*\r\n").arg(fakeServer).toUtf8();
+        const QByteArray startScript = QString(
+            "@echo off\r\necho SELECTED:start\r\n\"%1\" %*\r\n").arg(fakeServer).toUtf8();
+#else
+        const QString runName = QStringLiteral("run.sh");
+        const QString startName = QStringLiteral("start.sh");
+        const QByteArray runScript = QString(
+            "#!/bin/sh\nprintf 'SELECTED:run\\n'\n\"%1\" \"$@\"\n").arg(fakeServer).toUtf8();
+        const QByteArray startScript = QString(
+            "#!/bin/sh\nprintf 'SELECTED:start\\n'\n\"%1\" \"$@\"\n").arg(fakeServer).toUtf8();
+#endif
+        QVERIFY(writeFile(QDir(serverDirectory).filePath(runName), runScript));
+        QVERIFY(writeFile(QDir(serverDirectory).filePath(startName), startScript));
+
+        QVERIFY(server.start());
+        QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Running, 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(server.consoleLog().contains("SELECTED:run"), 5000);
+        QVERIFY(!server.consoleLog().contains("SELECTED:start"));
         QVERIFY(server.stop());
         QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Stopped, 5000);
     }
@@ -875,9 +933,9 @@ class ServerInstanceTest : public QObject {
                  qPrintable(error));
         QCOMPARE(tokens, QStringList({ "-Dpath=C:\\mods", "-Dother=X" }));
 
-        // Quoted Windows path with spaces: backslashes preserved, quotes removed.
+        // Java requires escaped backslashes inside quotes.
         QVERIFY2(ServerJvmArgs::tokenizeArgfile(
-                     "\"-Dpath=C:\\Program Files\\Server\"", &tokens, &error),
+                     "\"-Dpath=C:\\\\Program Files\\\\Server\"", &tokens, &error),
                  qPrintable(error));
         QCOMPARE(tokens, QStringList({ "-Dpath=C:\\Program Files\\Server" }));
 
@@ -905,14 +963,18 @@ class ServerInstanceTest : public QObject {
                  qPrintable(error));
         QCOMPARE(tokens, QStringList({ "-Dpath=C:\\new\\temp" }));
 
-        // True line continuation joins lines with no whitespace added.
+        // Unquoted backslashes do not join lines in Java argument files.
         QVERIFY2(ServerJvmArgs::tokenizeArgfile(
                      "-Dfoo=bar\\\nBaz -Dkeep=true", &tokens, &error),
                  qPrintable(error));
-        QCOMPARE(tokens, QStringList({ "-Dfoo=barBaz", "-Dkeep=true" }));
+        QCOMPARE(tokens, QStringList({ "-Dfoo=bar\\", "Baz", "-Dkeep=true" }));
         QVERIFY2(ServerJvmArgs::tokenizeArgfile(
                      "-Dfoo=bar\\\r\nBaz", &tokens, &error),
                  qPrintable(error));
+        QCOMPARE(tokens, QStringList({ "-Dfoo=bar\\", "Baz" }));
+
+        QVERIFY2(ServerJvmArgs::tokenizeArgfile(
+                     "\"-Dfoo=bar\\\r\n  \tBaz\"", &tokens, &error), qPrintable(error));
         QCOMPARE(tokens, QStringList({ "-Dfoo=barBaz" }));
     }
 
@@ -948,7 +1010,7 @@ class ServerInstanceTest : public QObject {
             "-Dfile.encoding=UTF-8\n"
             "\"-Dquoted=value with spaces\"\n"
             "'-Dsingle=value with spaces'\n"
-            "-Dhash=bar#baz\n");
+            "\"-Dhash=bar#baz\"\n");
         const ServerJvmFilterResult filtered = ServerJvmArgs::prepareContent(content, 17);
         QVERIFY2(filtered.ok, qPrintable(filtered.errorMessage));
         QVERIFY(filtered.keptTokens.contains("-XX:+UseG1GC"));
@@ -996,11 +1058,117 @@ class ServerInstanceTest : public QObject {
         QVERIFY(!missing.ok);
         QVERIFY(missing.errorMessage.contains("Could not read"));
 
-        const QString nulPath = temporaryRoot.filePath("nul.txt");
+        // NUL (including NUL.txt) is a reserved Windows device name.
+        const QString nulPath = temporaryRoot.filePath("embedded-nul-args.txt");
         QVERIFY(writeFile(nulPath, QByteArray("ok\0bad", 6)));
         const ServerJvmFilterResult nul = ServerJvmArgs::prepareFile(nulPath, 17);
         QVERIFY(!nul.ok);
         QVERIFY(nul.errorMessage.contains("NUL"));
+    }
+
+    void preservesArgumentsInRealJava()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        const QString java = qEnvironmentVariable(
+            "JLAUNCHER_TEST_JAVA", QStringLiteral(JLAUNCHER_TEST_JAVA_PATH));
+        QVERIFY2(QFileInfo(java).isFile(), qPrintable(java));
+        const QString probe = root.filePath("ArgumentProbe.java");
+        QVERIFY(writeFile(probe, R"(import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+class ArgumentProbe {
+    public static void main(String[] keys) {
+        for (String key : keys) {
+            String value = String.valueOf(System.getProperty(key));
+            System.out.println(Base64.getEncoder().encodeToString(value.getBytes(StandardCharsets.UTF_8)));
+        }
+    }
+}
+)"));
+        QString diagnostics;
+        auto run = [&](const QStringList &options, const QStringList &keys,
+                       const QString &environmentOptions, QByteArray *output) {
+            QProcess process;
+            auto environment = QProcessEnvironment::systemEnvironment();
+            for (const QString &key : { QStringLiteral("JAVA_TOOL_OPTIONS"),
+                                       QStringLiteral("_JAVA_OPTIONS"), QStringLiteral("JDK_JAVA_OPTIONS") }) {
+                environment.remove(key);
+            }
+            if (!environmentOptions.isEmpty()) {
+                environment.insert("JAVA_TOOL_OPTIONS", environmentOptions);
+            }
+            process.setProcessEnvironment(environment);
+            process.start(java, options + QStringList{ probe } + keys);
+            const bool finished = process.waitForFinished(30000);
+            if (!finished) {
+                process.kill();
+                process.waitForFinished();
+            }
+            diagnostics = process.errorString() + '\n' + QString::fromUtf8(process.readAllStandardError());
+            *output = process.readAllStandardOutput().replace("\r\n", "\n");
+            return finished && process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
+        };
+        auto encodedValues = [](const QStringList &values) {
+            QByteArray output;
+            for (const QString &value : values) {
+                output += value.toUtf8().toBase64() + '\n';
+            }
+            return output;
+        };
+
+        const QString original = root.filePath("provider-args.txt");
+        const QString effective = root.filePath("effective-args.txt");
+        QByteArray provider =
+            "-Dprobe.path=C:\\mods\n"
+            "\"-Dprobe.spaces=C:\\\\Program Files\\\\Server\"\n"
+            "'-Dprobe.single=C:\\\\mods'\n"
+            "\"-Dprobe.control=a\\nb\\rc\\td\\fe\"\n"
+            "\"-Dprobe.join=first\\\r\n  \tsecond\"\n"
+            "-Dprobe.dropped=ignored#comment\n"
+            "\"-Dprobe.hash=kept#hash\"\n"
+            "# CR-only comment\r-Dprobe.after=present\n";
+        provider += QStringLiteral("-Dprobe.native=a\u00a0b\n").toLocal8Bit();
+        const QStringList keys{ "probe.path", "probe.spaces", "probe.single", "probe.control",
+                                "probe.join", "probe.dropped", "probe.hash", "probe.after", "probe.native" };
+        const QByteArray expected = encodedValues({ "C:\\mods", "C:\\Program Files\\Server", "C:\\mods",
+                                                     "a\nb\rc\td\fe", "firstsecond", "null", "kept#hash", "present",
+                                                     QStringLiteral("a\u00a0b") });
+        QVERIFY(writeFile(original, provider));
+        ServerJvmFilterResult prepared;
+        QVERIFY2(ServerJvmArgs::writeEffectiveFileForSource(original, effective, 17, &prepared),
+                 qPrintable(prepared.errorMessage));
+        QByteArray actual;
+        QVERIFY2(run({ "@" + original }, keys, {}, &actual), qPrintable(diagnostics));
+        QCOMPARE(actual, expected);
+        QVERIFY2(run({ "@" + effective }, keys, {}, &actual), qPrintable(diagnostics));
+        QCOMPARE(actual, expected);
+        QCOMPARE(readFile(original), provider);
+
+        // Check the serializer independently of our parser, using values that
+        // require different escaping in @-files and JAVA_TOOL_OPTIONS.
+        const QStringList values{ "C:\\Program Files\\Server\\", "a\"b'c", "line\nrow\rcol\tend\f",
+                                  "a#b", QStringLiteral("a\u00a0b") };
+        QStringList valueKeys;
+        QStringList tokens;
+        QStringList environmentTokens;
+        for (int i = 0; i < values.size(); ++i) {
+            const QString key = QStringLiteral("probe.value%1").arg(i);
+            valueKeys << key;
+            tokens << ("-D" + key + '=' + values.at(i));
+            environmentTokens << ServerJvmArgs::quoteEnvToken(tokens.constLast());
+        }
+        QString error;
+        QVERIFY2(ServerJvmArgs::writeEffectiveArgfile(effective, tokens, &error), qPrintable(error));
+        QVERIFY2(run({ "@" + effective }, valueKeys, {}, &actual), qPrintable(diagnostics));
+        QCOMPARE(actual, encodedValues(values));
+        QVERIFY2(run({}, valueKeys, environmentTokens.join(' '), &actual), qPrintable(diagnostics));
+        QCOMPARE(actual, encodedValues(values));
+
+        const QString wrapper = ServerJvmArgs::wrapperEnvironmentArgs(
+            32, 64, QStringLiteral("\"-Dprobe.path=C:\\Program Files\\Server\" -Dprobe.quote=a\"\"\"b'c"));
+        QVERIFY2(run({}, { "probe.path", "probe.quote", "user.language", "user.country.format" },
+                     wrapper, &actual), qPrintable(diagnostics));
+        QCOMPARE(actual, encodedValues({ "C:\\Program Files\\Server", "a\"b'c", "en", "US" }));
     }
 
     void generatesEffectiveFileWithoutMutatingOriginal()
@@ -1602,6 +1770,53 @@ class ServerInstanceTest : public QObject {
         QCOMPARE(preserved.readAll(), workingJar);
     }
 
+    void preparesMissingServerSoftwareWithoutStartingMinecraft()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QByteArray payload("verified prepared server jar");
+        const QString payloadPath = temporaryRoot.filePath("provider/server.jar");
+        const QString metadataPath = temporaryRoot.filePath("provider/version.json");
+        const QString manifestPath = temporaryRoot.filePath("provider/manifest.json");
+        QVERIFY(writeFile(payloadPath, payload));
+        const QString sha1 = QString::fromLatin1(
+            QCryptographicHash::hash(payload, QCryptographicHash::Sha1).toHex());
+        QVERIFY(writeFile(metadataPath, QJsonDocument(QJsonObject{
+            { "downloads", QJsonObject{{ "server", QJsonObject{
+                { "url", QUrl::fromLocalFile(payloadPath).toString() },
+                { "sha1", sha1 },
+            } }} },
+        }).toJson(QJsonDocument::Compact)));
+        QVERIFY(writeFile(manifestPath, QJsonDocument(QJsonObject{
+            { "versions", QJsonArray{ QJsonObject{
+                { "id", "1.21.8" }, { "type", "release" },
+                { "url", QUrl::fromLocalFile(metadataPath).toString() },
+            } } },
+        }).toJson(QJsonDocument::Compact)));
+
+        ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
+        endpoints.vanillaManifest = QUrl::fromLocalFile(manifestPath);
+        ServerInstance server("prepare-runtime", "Prepare runtime", endpoints);
+        server.setServerDirectory(temporaryRoot.filePath("server"));
+        server.setVersion("1.21.8");
+        server.setLoaderType("vanilla");
+        server.setJavaPath(fakeMinecraftServerPath());
+        QSignalSpy finished(&server, &ServerInstance::serverSoftwareDownloadFinished);
+
+        QVERIFY(server.prepareServerSoftware());
+        QCOMPARE(server.status(), ServerStatus::Downloading);
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 5000);
+        QVERIFY(finished.constFirst().at(1).toBool());
+        QCOMPARE(server.status(), ServerStatus::Stopped);
+        QCOMPARE(server.processId(), qint64(0));
+        QCOMPARE(readFile(server.serverJarPath()), payload);
+
+        // An already prepared target is retained without another download.
+        QVERIFY(server.prepareServerSoftware());
+        QCOMPARE(finished.size(), 1);
+        QCOMPARE(readFile(server.serverJarPath()), payload);
+    }
+
     void commitsVersionOnlyAfterVerifiedServerUpgradeDownload()
     {
         QTemporaryDir temporaryRoot;
@@ -2175,8 +2390,16 @@ class ServerInstanceTest : public QObject {
         const QString installed = QDir(server.modsDirectory()).filePath("example.jar");
         QCOMPARE(QFileInfo(installed).size(), qint64(13));
 
+        const QString connectorCache =
+            QDir(server.modsDirectory()).filePath(".connector/cached.jar");
+        const QString fabricCache = QDir(server.serverDirectory()).filePath(
+            ".fabric/processedMods/cached.jar");
+        QVERIFY(writeFile(connectorCache, "generated"));
+        QVERIFY(writeFile(fabricCache, "generated"));
         QVERIFY(writeFile(source, "replacement version"));
         QVERIFY(server.addMods({ source }, &error));
+        QVERIFY(!QFileInfo::exists(QFileInfo(connectorCache).dir().absolutePath()));
+        QVERIFY(!QFileInfo::exists(QFileInfo(fabricCache).dir().absolutePath()));
         QFile installedFile(installed);
         QVERIFY(installedFile.open(QIODevice::ReadOnly));
         QCOMPARE(installedFile.readAll(), QByteArray("replacement version"));

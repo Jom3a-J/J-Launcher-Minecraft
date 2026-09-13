@@ -455,6 +455,11 @@ void showServerFailureDialog(QWidget *parent,
     dialog.exec();
 
     if (disableAndRetryButton && dialog.clickedButton() == disableAndRetryButton) {
+        QString cacheError;
+        if (server && !server->invalidateContentCaches(&cacheError)) {
+            QMessageBox::warning(parent, QObject::tr("Could Not Retry Server"), cacheError);
+            return;
+        }
         QStringList failures;
         QStringList disabledNames;
         for (const QString& source : suspectFiles) {
@@ -462,6 +467,7 @@ void showServerFailureDialog(QWidget *parent,
             if (QFileInfo::exists(destination) || !QFile::rename(source, destination)) {
                 failures << QFileInfo(source).fileName();
             } else {
+                ServerModpackInstaller::markKnownClientOnlyFile(destination);
                 disabledNames << QFileInfo(source).fileName();
             }
         }
@@ -1657,9 +1663,27 @@ void ServerListPage::onInstallModpack()
         return;
     }
 
+    QString selectedServerRoot;
+    const QStringList serverRootChoices =
+        ServerModpackInstaller::publishedServerRootChoices(instance->instanceRoot());
+    if (serverRootChoices.size() > 1) {
+        bool accepted = false;
+        selectedServerRoot = QInputDialog::getItem(
+            this, tr("Choose Server Pack Folder"),
+            tr("This pack contains multiple possible server folders. Choose the folder containing the server files:"),
+            serverRootChoices, 0, false, &accepted);
+        if (!accepted || selectedServerRoot.isEmpty()) {
+            QMessageBox::information(
+                this, tr("Server Creation Paused"),
+                tr("No server was created. The downloaded modpack instance was kept so you can try again without downloading it again."));
+            return;
+        }
+    }
+
     const ServerModpackInstallResult result =
         ServerModpackInstaller::createMatchingServer(
-            m_serverManager, *instance, instance->name() + tr(" Server"));
+            m_serverManager, *instance, instance->name() + tr(" Server"),
+            selectedServerRoot);
     if (!result.isValid()) {
         const QString reason = Privacy::sanitizeText(result.error);
         const QString recovery =
@@ -1694,6 +1718,12 @@ void ServerListPage::onInstallModpack()
     updateServerList();
     updateUI();
 
+    const auto createdServer = m_serverManager->getServer(result.serverId);
+    const bool neededServerSoftware =
+        createdServer && !createdServer->hasInstalledLaunchTarget();
+    const bool softwarePreparationAccepted =
+        !neededServerSoftware || createdServer->prepareServerSoftware();
+
     QString details = tr("Created client instance \"%1\" and matching stopped server "
                          "\"%2\" with the same Minecraft and loader versions.")
                           .arg(instance->name(),
@@ -1714,11 +1744,25 @@ void ServerListPage::onInstallModpack()
         details += tr("\n\nExcluded %1 client-only file(s) from the server.")
                        .arg(result.skippedClientFiles.size());
     }
-    if (const auto createdServer = m_serverManager->getServer(result.serverId)) {
+    if (!result.missingFiles.isEmpty() || !result.dependencyRequirements.isEmpty()) {
+        QStringList requirements;
+        for (const QString &path : result.missingFiles) {
+            requirements.append(tr("Missing file: %1").arg(path));
+        }
+        requirements.append(result.dependencyRequirements);
+        details += tr("\n\nRequired before startup:\n%1\n\nAdd the missing files from their trusted provider, then start the server again. J Launcher will recheck them locally.")
+                       .arg(requirements.join(QStringLiteral("\n")));
+    }
+    if (createdServer) {
         details += tr("\n\nServer memory: %1 MB minimum / %2 MB maximum (automatic). "
                        "You can change this later in Server Settings.")
                        .arg(createdServer->minMemory())
                        .arg(createdServer->maxMemory());
+    }
+    if (neededServerSoftware && softwarePreparationAccepted) {
+        details += tr("\n\nServer software preparation started. J Launcher will download and verify the exact Minecraft and loader files while the server remains stopped. Follow progress in Console.");
+    } else if (neededServerSoftware) {
+        details += tr("\n\nServer software could not start downloading. The server was kept; review Console, configure the required Java runtime, and retry from Server Software.");
     }
     if (!result.warnings.isEmpty()) {
         details += tr("\n\nCompatibility note:\n%1")
@@ -1895,6 +1939,13 @@ void ServerListPage::onToggleInstalledContent()
         QMessageBox::warning(this, tr("Could Not Change Content"), tr("A file with the target name already exists."));
         return;
     }
+    const auto server = m_serverManager
+        ? m_serverManager->getServer(m_selectedServerId) : nullptr;
+    QString cacheError;
+    if (server && !server->invalidateContentCaches(&cacheError)) {
+        QMessageBox::warning(this, tr("Could Not Change Content"), cacheError);
+        return;
+    }
     if (!QFile::rename(source, destination)) {
         QMessageBox::warning(this, tr("Could Not Change Content"), tr("The selected file could not be renamed."));
         return;
@@ -1912,6 +1963,13 @@ void ServerListPage::onRemoveInstalledContent()
     if (QMessageBox::question(this, tr("Remove Installed Content"),
                               tr("Remove %1 from this server?").arg(QFileInfo(path).fileName()),
                               QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) {
+        return;
+    }
+    const auto server = m_serverManager
+        ? m_serverManager->getServer(m_selectedServerId) : nullptr;
+    QString cacheError;
+    if (server && !server->invalidateContentCaches(&cacheError)) {
+        QMessageBox::warning(this, tr("Could Not Remove Content"), cacheError);
         return;
     }
     if (!QFile::remove(path)) {
@@ -2775,6 +2833,14 @@ void ServerListPage::onInstallContentUpdate()
             }
         }
         if (result.success) {
+            if (const auto updatedServer = m_serverManager
+                    ? m_serverManager->getServer(serverId) : nullptr) {
+                QString cacheError;
+                if (!updatedServer->invalidateContentCaches(&cacheError)) {
+                    QMessageBox::warning(this, tr("Content Cache Could Not Be Cleared"),
+                                         cacheError);
+                }
+            }
             QSettings settings;
             const QString prefix = QString("ServerContentSources/%1/").arg(serverId);
             const QString updatedSource = QStringLiteral("%1:%2")
