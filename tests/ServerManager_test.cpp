@@ -1070,7 +1070,7 @@ class ServerManagerTest : public QObject {
         QVERIFY(!incompleteServer->start());
         QCOMPARE(incompleteServer->status(), ServerStatus::Error);
         QVERIFY(incompleteServer->consoleLog().contains("topography-preset"));
-        QVERIFY(manager.deleteServer(incompleteServer->id()));
+        QVERIFY(manager.deleteServerPermanently(incompleteServer->id()));
         QCOMPARE(manager.serverCount(), 0);
 
         // A known adapter value overrides the incorrect packaged default.
@@ -1112,7 +1112,7 @@ class ServerManagerTest : public QObject {
         incompleteServer->setEulaAccepted(true);
         QVERIFY(!incompleteServer->start());
         QVERIFY(incompleteServer->consoleLog().contains("fusion"));
-        QVERIFY(manager.deleteServer(incompleteServer->id()));
+        QVERIFY(manager.deleteServerPermanently(incompleteServer->id()));
         QCOMPARE(manager.serverCount(), 0);
 
         const QString nestedFusionPath = root.filePath("nested-fusion.jar");
@@ -1184,7 +1184,7 @@ class ServerManagerTest : public QObject {
         missingServer->setEulaAccepted(true);
         QVERIFY(!missingServer->start());
         QVERIFY(missingServer->consoleLog().contains("requiredlib"));
-        QVERIFY(manager.deleteServer(missingServer->id()));
+        QVERIFY(manager.deleteServerPermanently(missingServer->id()));
         QCOMPARE(manager.serverCount(), 0);
 
         QVERIFY(writeForgeModJar(
@@ -1208,7 +1208,7 @@ class ServerManagerTest : public QObject {
         QVERIFY(mismatchedResult.warnings.join('\n').contains("version", Qt::CaseInsensitive));
         QVERIFY(mismatchedResult.warnings.join('\n').contains("[1,)"));
         QVERIFY(mismatchedResult.warnings.join('\n').contains("0.5.0"));
-        QVERIFY(manager.deleteServer(mismatchedResult.serverId));
+        QVERIFY(manager.deleteServerPermanently(mismatchedResult.serverId));
         QCOMPARE(manager.serverCount(), 0);
 
         QVERIFY(writeForgeModJar(
@@ -1349,7 +1349,7 @@ class ServerManagerTest : public QObject {
         QVERIFY(result.warnings.join('\n').contains("example"));
         QVERIFY(result.warnings.join('\n').contains("requiredlib"));
         QVERIFY(!result.warnings.join('\n').contains("clienthelper"));
-        QVERIFY(manager.deleteServer(result.serverId));
+        QVERIFY(manager.deleteServerPermanently(result.serverId));
         QVERIFY(!result.warnings.join('\n').contains("optionalhelper"));
         QCOMPARE(manager.serverCount(), 0);
 
@@ -1374,7 +1374,7 @@ class ServerManagerTest : public QObject {
         QVERIFY(mismatchedResult.warnings.join('\n').contains("version", Qt::CaseInsensitive));
         QVERIFY(mismatchedResult.warnings.join('\n').contains("[1,2)"));
         QVERIFY(mismatchedResult.warnings.join('\n').contains("2.0.0"));
-        QVERIFY(manager.deleteServer(mismatchedResult.serverId));
+        QVERIFY(manager.deleteServerPermanently(mismatchedResult.serverId));
         QCOMPARE(manager.serverCount(), 0);
 
         QVERIFY(writeForgeModJar(
