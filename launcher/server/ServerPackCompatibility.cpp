@@ -103,22 +103,42 @@ QString normalizedProvider(QString provider)
     return provider;
 }
 
-void addReason(ServerPackCompatibilityReport &report, const QString &reason)
+// Blocker policy: only missing instances and unsafe paths block. Everything
+// else derived from optional provider metadata is advisory: the installed
+// profile (AuthoritativeInstalledProfile) wins and projection falls back to
+// conservative local content. Downloaded-content hash mismatches verified at
+// download time stay fatal in the download layer, not here.
+void addBlocker(ServerPackCompatibilityReport &report, ServerPackIssueKind kind,
+                const QString &message,
+                ServerPackTrust trust = ServerPackTrust::AdvisoryProviderMetadata)
 {
     report.state = ServerPackCompatibilityState::Incompatible;
-    report.reasons.append(reason);
+    report.reasons.append(message);
+    report.issues.append({ kind, ServerPackIssueSeverity::Blocker, trust, message });
 }
 
-void addWarning(ServerPackCompatibilityReport &report, const QString &warning)
+void addAdvisory(ServerPackCompatibilityReport &report, ServerPackIssueKind kind,
+                 const QString &message,
+                 ServerPackTrust trust = ServerPackTrust::AdvisoryProviderMetadata)
 {
-    report.warnings.append(warning);
+    report.warnings.append(message);
+    report.issues.append({ kind, ServerPackIssueSeverity::Advisory, trust, message });
 }
 
-void addProjectionWarning(ServerPackCompatibilityReport &report, const QString &warning)
+void addProjectionAdvisory(ServerPackCompatibilityReport &report,
+                           ServerPackIssueKind kind, const QString &message)
 {
-    if (!report.projectionWarnings.contains(warning)) {
-        report.projectionWarnings.append(warning);
+    if (!report.projectionWarnings.contains(message)) {
+        report.projectionWarnings.append(message);
     }
+    for (const auto &existing : report.issues) {
+        if (existing.kind == kind && existing.message == message
+            && existing.severity == ServerPackIssueSeverity::Advisory) {
+            return;
+        }
+    }
+    report.issues.append({ kind, ServerPackIssueSeverity::Advisory,
+                           ServerPackTrust::AdvisoryProviderMetadata, message });
 }
 
 int serverSideRank(ServerPackFileSide side)
@@ -141,14 +161,21 @@ bool readJsonObject(const QString &path, const QString &description,
 {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
-        addReason(report, QObject::tr("Could not read %1.").arg(description));
+        // Optional provider/installed documents: fall back to the installed
+        // profile and local content. The installer blocks later only if the
+        // actual server profile has no usable Minecraft/loader.
+        addAdvisory(report, ServerPackIssueKind::UnreadableMetadata,
+                    QObject::tr("Could not read %1; it was ignored and the installed pack profile will be used.")
+                        .arg(description));
         return false;
     }
 
     QJsonParseError parseError;
     const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &parseError);
     if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
-        addReason(report, QObject::tr("The %1 is malformed.").arg(description));
+        addAdvisory(report, ServerPackIssueKind::MalformedMetadata,
+                    QObject::tr("The %1 is malformed; it was ignored and the installed pack profile will be used.")
+                        .arg(description));
         return false;
     }
     *object = document.object();
@@ -192,8 +219,12 @@ void setHash(ServerPackFileDecision &decision, const QJsonObject &hashes,
             continue;
         }
         if (!validHash(algorithm, value)) {
-            addReason(report, QObject::tr("The provider supplied an invalid %1 hash for %2.")
-                                  .arg(algorithm, decision.path));
+            // Content is already local; treat as unverified, never claim
+            // integrity. Download-time hash mismatches remain fatal in the
+            // download layer.
+            addAdvisory(report, ServerPackIssueKind::UnverifiedIntegrity,
+                        QObject::tr("The provider supplied an invalid %1 hash for %2; it is treated as unverified.")
+                            .arg(algorithm, decision.path));
             return;
         }
         decision.integrity = ServerPackIntegrityState::ProviderHashAvailable;
@@ -202,8 +233,9 @@ void setHash(ServerPackFileDecision &decision, const QJsonObject &hashes,
         decision.hashSource = source;
         return;
     }
-    addWarning(report, QObject::tr("No supported hash was supplied for %1; it is unverified.")
-                              .arg(decision.path));
+    addAdvisory(report, ServerPackIssueKind::UnverifiedIntegrity,
+                QObject::tr("No supported hash was supplied for %1; it is unverified.")
+                    .arg(decision.path));
 }
 
 void addFile(ServerPackCompatibilityReport &report, const QString &path,
@@ -211,9 +243,15 @@ void addFile(ServerPackCompatibilityReport &report, const QString &path,
              const QString &hashSource = QString())
 {
     const QString normalized = normalizedPath(path);
+    if (normalized.isEmpty()) {
+        addAdvisory(report, ServerPackIssueKind::InvalidFileEntry,
+                    QObject::tr("The provider supplied an empty server file entry; it was skipped."));
+        return;
+    }
     if (!isSafeRelativePath(normalized)) {
-        addReason(report, QObject::tr("The provider supplied an unsafe server file path: %1")
-                              .arg(path));
+        addBlocker(report, ServerPackIssueKind::UnsafePath,
+                   QObject::tr("The provider supplied an unsafe server file path: %1")
+                       .arg(path));
         return;
     }
 
@@ -241,17 +279,18 @@ void addFile(ServerPackCompatibilityReport &report, const QString &path,
                    && iterator->side != ServerPackFileSide::Unknown
                    && iterator->side != side) {
             // Side labels are advisory; retain the most server-capable label
-            // regardless of metadata order. Actual path/hash/provider checks
-            // remain compatibility failures.
+            // regardless of metadata order. Unsafe paths still block above.
             const bool clientOnlyConflict = side == ServerPackFileSide::ClientOnly
                 || iterator->side == ServerPackFileSide::ClientOnly;
             if (serverSideRank(side) > serverSideRank(iterator->side)) {
                 iterator->side = side;
             }
             if (clientOnlyConflict) {
-                addProjectionWarning(report, QObject::tr(
-                    "%1 is marked both game-only and for servers. This does not block server creation.")
-                                              .arg(normalized));
+                addProjectionAdvisory(report,
+                                      ServerPackIssueKind::CompatibilityUncertainty,
+                                      QObject::tr(
+                                          "%1 is marked both game-only and for servers. This does not block server creation.")
+                                          .arg(normalized));
             }
         }
         if (hashes && iterator->integrity == ServerPackIntegrityState::Unverified) {
@@ -270,7 +309,9 @@ void addPathList(ServerPackCompatibilityReport &report, const QString &path,
         return;
     }
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        addReason(report, QObject::tr("Could not read the %1.").arg(description));
+        addAdvisory(report, ServerPackIssueKind::UnreadableMetadata,
+                    QObject::tr("Could not read the %1; it was ignored.")
+                        .arg(description));
         return;
     }
     while (!file.atEnd()) {
@@ -313,12 +354,16 @@ void readComponentMetadata(const QString &instanceRoot,
     }
     const QJsonValue componentsValue = document.value(QStringLiteral("components"));
     if (!componentsValue.isArray()) {
-        addReason(report, QObject::tr("The installed component document has no valid component list."));
+        addAdvisory(report, ServerPackIssueKind::MalformedMetadata,
+                    QObject::tr("The installed component document has no valid component list; the installed pack profile will be used where available."),
+                    ServerPackTrust::AuthoritativeInstalledProfile);
         return;
     }
     for (const QJsonValue &value : componentsValue.toArray()) {
         if (!value.isObject()) {
-            addReason(report, QObject::tr("The installed component document contains an invalid component."));
+            addAdvisory(report, ServerPackIssueKind::MalformedMetadata,
+                        QObject::tr("The installed component document contains an invalid component; it was skipped."),
+                        ServerPackTrust::AuthoritativeInstalledProfile);
             continue;
         }
         const QJsonObject component = value.toObject();
@@ -361,13 +406,15 @@ void readModrinthMetadata(const QString &instanceRoot,
         return;
     }
     if (document.value(QStringLiteral("game")).toString() != QStringLiteral("minecraft")) {
-        addReason(report, QObject::tr("The Modrinth pack declares an unsupported game."));
+        addAdvisory(report, ServerPackIssueKind::UnsupportedGame,
+                    QObject::tr("The Modrinth pack declares an unsupported game; it was ignored and the installed pack profile will be used."));
     }
 
     const QJsonValue dependenciesValue = document.value(QStringLiteral("dependencies"));
     if (!dependenciesValue.isObject()) {
-        addWarning(report, QObject::tr(
-            "The Modrinth pack has no complete dependency metadata; compatibility is unverified."));
+        addAdvisory(report, ServerPackIssueKind::CompatibilityUncertainty,
+                    QObject::tr(
+                        "The Modrinth pack has no complete dependency metadata; compatibility is unverified."));
     } else {
         const QJsonObject dependencies = dependenciesValue.toObject();
         const QString minecraft = dependencies.value(QStringLiteral("minecraft")).toString();
@@ -375,56 +422,73 @@ void readModrinthMetadata(const QString &instanceRoot,
             report.minecraftVersion = minecraft;
             report.minecraftVersionMetadataPresent = true;
         } else {
-            addWarning(report, QObject::tr(
-                "The Modrinth pack does not declare a Minecraft version; compatibility is unverified."));
+            addAdvisory(report, ServerPackIssueKind::CompatibilityUncertainty,
+                        QObject::tr(
+                            "The Modrinth pack does not declare a Minecraft version; compatibility is unverified."));
         }
         const QStringList loaderKeys{
             QStringLiteral("fabric-loader"), QStringLiteral("forge"),
             QStringLiteral("neoforge"), QStringLiteral("quilt-loader"),
         };
         QString declaredLoader;
+        QStringList extraLoaders;
         for (const QString &key : loaderKeys) {
             const QString version = dependencies.value(key).toString();
             if (version.isEmpty()) {
                 continue;
             }
             if (!declaredLoader.isEmpty()) {
-                addReason(report, QObject::tr("The Modrinth pack declares more than one loader."));
-                break;
+                extraLoaders.append(key);
+                continue;
             }
             declaredLoader = normalizedLoader(key);
             report.loaderType = declaredLoader;
             report.loaderVersion = version;
             report.loaderMetadataPresent = true;
         }
+        if (!extraLoaders.isEmpty()) {
+            addAdvisory(report, ServerPackIssueKind::MultipleLoaders,
+                        QObject::tr("The Modrinth pack declares more than one loader (%1); only %2 was kept and the installed pack profile wins.")
+                            .arg((QStringList{ declaredLoader } + extraLoaders).join(QStringLiteral(", ")),
+                                 declaredLoader));
+        }
         for (auto iterator = dependencies.constBegin(); iterator != dependencies.constEnd(); ++iterator) {
             if (iterator.key().contains(QStringLiteral("loader"), Qt::CaseInsensitive)
                 && !loaderKeys.contains(iterator.key())) {
-                addReason(report, QObject::tr("The Modrinth pack declares an unknown loader: %1")
-                                      .arg(iterator.key()));
+                addAdvisory(report, ServerPackIssueKind::UnknownLoader,
+                            QObject::tr("The Modrinth pack declares an unknown loader: %1; it was ignored and the installed pack profile wins.")
+                                .arg(iterator.key()));
             }
         }
     }
 
     const QJsonValue filesValue = document.value(QStringLiteral("files"));
     if (!filesValue.isArray()) {
-        addReason(report, QObject::tr("The Modrinth pack has no valid file list."));
+        addAdvisory(report, ServerPackIssueKind::MissingFileList,
+                    QObject::tr("The Modrinth pack has no valid file list; server content will be projected conservatively from local files."));
         return;
     }
     for (const QJsonValue &value : filesValue.toArray()) {
         if (!value.isObject()) {
-            addReason(report, QObject::tr("The Modrinth pack contains an invalid file entry."));
+            addAdvisory(report, ServerPackIssueKind::InvalidFileEntry,
+                        QObject::tr("The Modrinth pack contains an invalid file entry; it was skipped."));
             continue;
         }
         const QJsonObject file = value.toObject();
         const QString pathValue = file.value(QStringLiteral("path")).toString();
+        if (normalizedPath(pathValue).isEmpty()) {
+            addAdvisory(report, ServerPackIssueKind::InvalidFileEntry,
+                        QObject::tr("The Modrinth pack contains a file entry without a path; it was skipped."));
+            continue;
+        }
         const QJsonValue environmentValue = file.value(QStringLiteral("env"));
         ServerPackFileSide side = ServerPackFileSide::Unknown;
         if (!environmentValue.isUndefined()) {
             if (!environmentValue.isObject()) {
-                addReason(report, QObject::tr(
-                    "The Modrinth environment metadata for %1 is not an object.")
-                                  .arg(pathValue));
+                addAdvisory(report, ServerPackIssueKind::InvalidFileEntry,
+                            QObject::tr(
+                                "The Modrinth environment metadata for %1 is not an object; its side is treated as unknown.")
+                                .arg(pathValue));
             } else {
                 const QJsonObject environment = environmentValue.toObject();
                 if (!environment.isEmpty()) {
@@ -436,9 +500,10 @@ void readModrinthMetadata(const QString &instanceRoot,
                         }
                         if (!value.isString()) {
                             valid = false;
-                            addReason(report, QObject::tr(
-                                "The Modrinth environment value for %1 is not a string.")
-                                                  .arg(pathValue));
+                            addAdvisory(report, ServerPackIssueKind::InvalidFileEntry,
+                                        QObject::tr(
+                                            "The Modrinth environment value for %1 is not a string; its side is treated as unknown.")
+                                            .arg(pathValue));
                             return QString();
                         }
                         const QString result = value.toString();
@@ -446,9 +511,10 @@ void readModrinthMetadata(const QString &instanceRoot,
                             && result != QStringLiteral("optional")
                             && result != QStringLiteral("unsupported")) {
                             valid = false;
-                            addReason(report, QObject::tr(
-                                "The Modrinth environment value for %1 is invalid.")
-                                                  .arg(pathValue));
+                            addAdvisory(report, ServerPackIssueKind::InvalidFileEntry,
+                                        QObject::tr(
+                                            "The Modrinth environment value for %1 is invalid; its side is treated as unknown.")
+                                            .arg(pathValue));
                         }
                         return result;
                     };
@@ -456,9 +522,10 @@ void readModrinthMetadata(const QString &instanceRoot,
                     const QString server = readEnvironmentValue(QStringLiteral("server"));
                     if (valid && client == QStringLiteral("unsupported")
                         && server == QStringLiteral("unsupported")) {
-                        addReason(report, QObject::tr(
-                            "The Modrinth environment metadata for %1 marks the file unsupported on both sides.")
-                                              .arg(pathValue));
+                        addAdvisory(report, ServerPackIssueKind::CompatibilityUncertainty,
+                                    QObject::tr(
+                                        "The Modrinth environment metadata for %1 marks the file unsupported on both sides; it is included conservatively as unknown.")
+                                        .arg(pathValue));
                     } else if (valid && server == QStringLiteral("unsupported")) {
                         side = ServerPackFileSide::ClientOnly;
                     } else if (valid && client == QStringLiteral("unsupported")) {
@@ -493,24 +560,29 @@ void readCurseForgeMetadata(const QString &instanceRoot,
     }
     if (document.value(QStringLiteral("manifestType")).toString()
         != QStringLiteral("minecraftModpack")) {
-        addReason(report, QObject::tr("The CurseForge manifest is not a Minecraft modpack."));
+        addAdvisory(report, ServerPackIssueKind::UnsupportedGame,
+                    QObject::tr("The CurseForge manifest is not a Minecraft modpack; it was ignored and the installed pack profile will be used."));
     }
     const QJsonObject minecraft = document.value(QStringLiteral("minecraft")).toObject();
     report.minecraftVersion = minecraft.value(QStringLiteral("version")).toString();
     if (report.minecraftVersion.isEmpty()) {
-        addReason(report, QObject::tr("The CurseForge manifest does not declare a Minecraft version."));
+        addAdvisory(report, ServerPackIssueKind::MalformedMetadata,
+                    QObject::tr("The CurseForge manifest does not declare a Minecraft version; the installed pack profile will be used."));
     } else {
         report.minecraftVersionMetadataPresent = true;
     }
     const QJsonValue loadersValue = minecraft.value(QStringLiteral("modLoaders"));
     if (!loadersValue.isArray()) {
-        addReason(report, QObject::tr("The CurseForge manifest has no valid loader list."));
+        addAdvisory(report, ServerPackIssueKind::MalformedMetadata,
+                    QObject::tr("The CurseForge manifest has no valid loader list; the installed pack profile will be used."));
         return;
     }
     QString declaredLoader;
+    QStringList extraLoaders;
     for (const QJsonValue &value : loadersValue.toArray()) {
         if (!value.isObject()) {
-            addReason(report, QObject::tr("The CurseForge manifest contains an invalid loader entry."));
+            addAdvisory(report, ServerPackIssueKind::InvalidFileEntry,
+                        QObject::tr("The CurseForge manifest contains an invalid loader entry; it was skipped."));
             continue;
         }
         const QString id = value.toObject().value(QStringLiteral("id")).toString();
@@ -531,24 +603,31 @@ void readCurseForgeMetadata(const QString &instanceRoot,
             }
         }
         if (loader.isEmpty()) {
-            addReason(report, QObject::tr("The CurseForge manifest declares an unknown loader: %1")
-                                  .arg(id));
+            addAdvisory(report, ServerPackIssueKind::UnknownLoader,
+                        QObject::tr("The CurseForge manifest declares an unknown loader: %1; it was ignored.")
+                            .arg(id));
             continue;
         }
         if (version.isEmpty()) {
-            addReason(report, QObject::tr(
-                "The CurseForge manifest does not declare a version for the %1 loader.")
-                              .arg(loader));
+            addAdvisory(report, ServerPackIssueKind::InvalidFileEntry,
+                        QObject::tr(
+                            "The CurseForge manifest does not declare a version for the %1 loader; it was skipped.")
+                            .arg(loader));
             continue;
         }
         if (!declaredLoader.isEmpty()) {
-            addReason(report, QObject::tr("The CurseForge manifest declares more than one loader."));
+            extraLoaders.append(id);
             continue;
         }
         declaredLoader = loader;
         report.loaderType = loader;
         report.loaderVersion = version;
         report.loaderMetadataPresent = true;
+    }
+    if (!extraLoaders.isEmpty()) {
+        addAdvisory(report, ServerPackIssueKind::MultipleLoaders,
+                    QObject::tr("The CurseForge manifest declares more than one loader; only %1 was kept and the installed pack profile wins.")
+                        .arg(declaredLoader));
     }
 }
 
@@ -570,7 +649,8 @@ void readFtbAppMetadata(const QString &instanceRoot,
     }
     report.minecraftVersion = document.value(QStringLiteral("mcVersion")).toString();
     if (report.minecraftVersion.isEmpty()) {
-        addReason(report, QObject::tr("The FTB App metadata does not declare a Minecraft version."));
+        addAdvisory(report, ServerPackIssueKind::MalformedMetadata,
+                    QObject::tr("The FTB App metadata does not declare a Minecraft version; the installed pack profile will be used."));
     } else {
         report.minecraftVersionMetadataPresent = true;
     }
@@ -582,8 +662,9 @@ void readFtbAppMetadata(const QString &instanceRoot,
         report.loaderVersion = separator < 0 ? QString() : modLoader.mid(separator + 1);
         report.loaderMetadataPresent = !report.loaderVersion.isEmpty();
         if (!isRecognizedLoader(report.loaderType)) {
-            addReason(report, QObject::tr("The FTB App metadata declares an unknown loader: %1")
-                                  .arg(loader));
+            addAdvisory(report, ServerPackIssueKind::UnknownLoader,
+                        QObject::tr("The FTB App metadata declares an unknown loader: %1; it was ignored and the installed pack profile wins.")
+                            .arg(loader));
         }
     }
 }
@@ -606,14 +687,16 @@ void readTechnicMetadata(const QString &instanceRoot,
     }
     report.minecraftVersion = document.value(QStringLiteral("inheritsFrom")).toString();
     if (report.minecraftVersion.isEmpty()) {
-        addWarning(report, QObject::tr(
-            "Technic did not provide a Minecraft version; compatibility is unverified."));
+        addAdvisory(report, ServerPackIssueKind::CompatibilityUncertainty,
+                    QObject::tr(
+                        "Technic did not provide a Minecraft version; compatibility is unverified."));
     } else {
         report.minecraftVersionMetadataPresent = true;
     }
     const QJsonValue librariesValue = document.value(QStringLiteral("libraries"));
     if (!librariesValue.isArray()) {
-        addWarning(report, QObject::tr("Technic did not provide loader metadata; the loader is unverified."));
+        addAdvisory(report, ServerPackIssueKind::CompatibilityUncertainty,
+                    QObject::tr("Technic did not provide loader metadata; the loader is unverified."));
         return;
     }
     for (const QJsonValue &value : librariesValue.toArray()) {
@@ -707,12 +790,14 @@ void finalizeReport(ServerPackCompatibilityReport &report)
     }
     if (!report.providerMetadataPresent && !report.sideMetadataPresent
         && !report.hasDedicatedServerPack) {
-        addWarning(report, QObject::tr(
-            "No provider compatibility metadata was found; server content is included only as an unverified projection."));
+        addAdvisory(report, ServerPackIssueKind::CompatibilityUncertainty,
+                    QObject::tr(
+                        "No provider compatibility metadata was found; server content is included only as an unverified projection."));
     }
     if (!report.sideMetadataPresent && !report.hasDedicatedServerPack) {
-        addWarning(report, QObject::tr(
-            "No client/server side metadata was retained; server content is included conservatively and remains unverified."));
+        addAdvisory(report, ServerPackIssueKind::CompatibilityUncertainty,
+                    QObject::tr(
+                        "No client/server side metadata was retained; server content is included conservatively and remains unverified."));
     }
     QStringList unknownSidePaths;
     int unverifiedFiles = 0;
@@ -725,24 +810,29 @@ void finalizeReport(ServerPackCompatibilityReport &report)
         }
     }
     if (report.hasDedicatedServerPack && report.hasClientOnlyFileMetadata) {
-        addProjectionWarning(report, QObject::tr(
-            "Some files are marked game-only. The supplied server pack is used as-is."));
+        addProjectionAdvisory(report, ServerPackIssueKind::CompatibilityUncertainty,
+                              QObject::tr(
+                                  "Some files are marked game-only. The supplied server pack is used as-is."));
     }
     constexpr qsizetype unknownSideSampleLimit = 5;
     for (qsizetype i = 0; i < std::min(unknownSideSampleLimit, unknownSidePaths.size()); ++i) {
-        addWarning(report, QObject::tr(
-            "The server side of %1 is unknown; it was included conservatively and may need manual review.")
-                              .arg(unknownSidePaths.at(i)));
+        addAdvisory(report, ServerPackIssueKind::CompatibilityUncertainty,
+                    QObject::tr(
+                        "The server side of %1 is unknown; it was included conservatively and may need manual review.")
+                        .arg(unknownSidePaths.at(i)));
     }
     if (unknownSidePaths.size() > unknownSideSampleLimit) {
-        addWarning(report, QObject::tr(
-            "%1 additional server files have unknown side metadata; review the projection before launching.")
-                              .arg(unknownSidePaths.size() - unknownSideSampleLimit));
+        addAdvisory(report, ServerPackIssueKind::CompatibilityUncertainty,
+                    QObject::tr(
+                        "%1 additional server files have unknown side metadata; review the projection before launching.")
+                        .arg(unknownSidePaths.size() - unknownSideSampleLimit));
     }
+    report.unverifiedFileCount = unverifiedFiles;
     if (unverifiedFiles > 0) {
-        addWarning(report, QObject::tr(
-            "%1 server file(s) have no supported provider hash and remain unverified.")
-                              .arg(unverifiedFiles));
+        addAdvisory(report, ServerPackIssueKind::UnverifiedIntegrity,
+                    QObject::tr(
+                        "%1 server file(s) have no supported provider hash and remain unverified.")
+                        .arg(unverifiedFiles));
     }
     const bool hasDeclaredCompatibility = report.minecraftVersionMetadataPresent
         && report.loaderMetadataPresent
@@ -764,18 +854,24 @@ void compareExpected(ServerPackCompatibilityReport &report,
     if (!report.providerMetadataPresent || report.isIncompatible()) {
         return;
     }
+    // The installed profile always wins. Provider declarations that disagree
+    // are ignored with an advisory, never a blocker.
     if (!report.minecraftVersion.isEmpty() && !minecraftVersion.trimmed().isEmpty()
         && report.minecraftVersion != minecraftVersion.trimmed()) {
-        addReason(report, QObject::tr(
-            "The provider declares Minecraft %1, but the installed pack uses Minecraft %2.")
-                          .arg(report.minecraftVersion, minecraftVersion.trimmed()));
+        addAdvisory(report, ServerPackIssueKind::VersionMismatch,
+                    QObject::tr(
+                        "The provider declares Minecraft %1, but the installed pack uses Minecraft %2; using the installed version.")
+                        .arg(report.minecraftVersion, minecraftVersion.trimmed()),
+                    ServerPackTrust::AuthoritativeInstalledProfile);
     }
     const QString expectedLoader = normalizedLoader(loaderType);
     if (!report.loaderType.isEmpty() && !expectedLoader.isEmpty()
         && normalizedLoader(report.loaderType) != expectedLoader) {
-        addReason(report, QObject::tr(
-            "The provider declares the %1 loader, but the installed pack uses %2.")
-                          .arg(report.loaderType, expectedLoader));
+        addAdvisory(report, ServerPackIssueKind::VersionMismatch,
+                    QObject::tr(
+                        "The provider declares the %1 loader, but the installed pack uses %2; using the installed loader.")
+                        .arg(report.loaderType, expectedLoader),
+                    ServerPackTrust::AuthoritativeInstalledProfile);
     }
     const QString providerLoaderVersion = normalizedLoaderVersion(
         report.loaderType, report.loaderVersion, report.minecraftVersion);
@@ -783,13 +879,16 @@ void compareExpected(ServerPackCompatibilityReport &report,
         expectedLoader, loaderVersion, minecraftVersion);
     if (!providerLoaderVersion.isEmpty() && !expectedLoaderVersion.isEmpty()
         && providerLoaderVersion != expectedLoaderVersion) {
-        addReason(report, QObject::tr(
-            "The provider declares loader version %1, but the installed pack uses %2.")
-                          .arg(report.loaderVersion, loaderVersion.trimmed()));
+        addAdvisory(report, ServerPackIssueKind::VersionMismatch,
+                    QObject::tr(
+                        "The provider declares loader version %1, but the installed pack uses %2; using the installed version.")
+                        .arg(report.loaderVersion, loaderVersion.trimmed()),
+                    ServerPackTrust::AuthoritativeInstalledProfile);
     }
     if (!report.loaderType.isEmpty() && !isRecognizedLoader(report.loaderType)) {
-        addReason(report, QObject::tr("The provider declares an unknown loader: %1")
-                              .arg(report.loaderType));
+        addAdvisory(report, ServerPackIssueKind::UnknownLoader,
+                    QObject::tr("The provider declares an unknown loader: %1; it was ignored and the installed pack profile wins.")
+                        .arg(report.loaderType));
     }
 }
 
@@ -799,7 +898,9 @@ ServerPackCompatibilityReport inspectServerPack(const QString &instanceRoot)
 {
     ServerPackCompatibilityReport report;
     if (instanceRoot.trimmed().isEmpty() || !QFileInfo(instanceRoot).isDir()) {
-        addReason(report, QObject::tr("The modpack instance directory is missing."));
+        addBlocker(report, ServerPackIssueKind::MissingInstance,
+                   QObject::tr("The modpack instance directory is missing."),
+                   ServerPackTrust::AuthoritativeInstalledProfile);
         return report;
     }
 
@@ -819,7 +920,25 @@ ServerPackCompatibilityReport inspectServerPack(const QString &instanceRoot)
     const int providerDocuments = static_cast<int>(hasModrinth) + static_cast<int>(hasCurseForge)
         + static_cast<int>(hasFtbApp) + static_cast<int>(hasTechnic);
     if (providerDocuments > 1) {
-        addReason(report, QObject::tr("The installed pack contains conflicting provider metadata."));
+        // Deterministic priority: Modrinth > CurseForge > FTB App > Technic.
+        // Only the first is parsed; the rest are ignored with a warning.
+        QStringList present;
+        if (hasModrinth) {
+            present.append(QStringLiteral("Modrinth"));
+        }
+        if (hasCurseForge) {
+            present.append(QStringLiteral("CurseForge"));
+        }
+        if (hasFtbApp) {
+            present.append(QStringLiteral("FTB App"));
+        }
+        if (hasTechnic) {
+            present.append(QStringLiteral("Technic"));
+        }
+        const QString winner = present.constFirst();
+        addAdvisory(report, ServerPackIssueKind::ConflictingProviders,
+                    QObject::tr("The installed pack contains conflicting provider metadata (%1); only %2 was used and the rest were ignored.")
+                        .arg(present.join(QStringLiteral(", ")), winner));
     }
     if (hasModrinth) {
         readModrinthMetadata(instanceRoot, report);
@@ -862,4 +981,37 @@ QString serverPackCompatibilityDescription(const ServerPackCompatibilityReport &
         return {};
     }
     return report.reasons.join(QStringLiteral("\n"));
+}
+
+QString serverPackIssueKindName(ServerPackIssueKind kind)
+{
+    switch (kind) {
+        case ServerPackIssueKind::MissingInstance:
+            return QStringLiteral("MissingInstance");
+        case ServerPackIssueKind::UnsafePath:
+            return QStringLiteral("UnsafePath");
+        case ServerPackIssueKind::UnreadableMetadata:
+            return QStringLiteral("UnreadableMetadata");
+        case ServerPackIssueKind::MalformedMetadata:
+            return QStringLiteral("MalformedMetadata");
+        case ServerPackIssueKind::ConflictingProviders:
+            return QStringLiteral("ConflictingProviders");
+        case ServerPackIssueKind::UnsupportedGame:
+            return QStringLiteral("UnsupportedGame");
+        case ServerPackIssueKind::MissingFileList:
+            return QStringLiteral("MissingFileList");
+        case ServerPackIssueKind::InvalidFileEntry:
+            return QStringLiteral("InvalidFileEntry");
+        case ServerPackIssueKind::UnknownLoader:
+            return QStringLiteral("UnknownLoader");
+        case ServerPackIssueKind::MultipleLoaders:
+            return QStringLiteral("MultipleLoaders");
+        case ServerPackIssueKind::VersionMismatch:
+            return QStringLiteral("VersionMismatch");
+        case ServerPackIssueKind::UnverifiedIntegrity:
+            return QStringLiteral("UnverifiedIntegrity");
+        case ServerPackIssueKind::CompatibilityUncertainty:
+            return QStringLiteral("CompatibilityUncertainty");
+    }
+    return QStringLiteral("Unknown");
 }

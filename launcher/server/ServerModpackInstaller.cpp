@@ -24,6 +24,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QSet>
 #include <QSettings>
 #include <QTemporaryDir>
@@ -137,18 +138,36 @@ bool hasServerContentRoot(const QString &path)
     return false;
 }
 
-QString publishedServerPackRoot(const QString &instanceRoot, QString *error)
+bool hasServerRootEvidence(const QString &path)
+{
+    if (hasServerContentRoot(path)) {
+        return true;
+    }
+    const QDir directory(path);
+    const QStringList rootFiles{
+        QStringLiteral("server.jar"),
+        QStringLiteral("run.bat"), QStringLiteral("run.sh"),
+        QStringLiteral("start.bat"), QStringLiteral("start.sh"),
+        QStringLiteral("server.properties"),
+        QStringLiteral("default-server.properties"),
+    };
+    for (const QString &name : rootFiles) {
+        if (QFileInfo(directory.filePath(name)).isFile()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+QStringList publishedServerPackRootChoicesInternal(const QString &instanceRoot)
 {
     const QString extractedRoot = QDir(instanceRoot).filePath(
         QStringLiteral("server-pack/server-files"));
     if (!QFileInfo(extractedRoot).isDir()) {
-        if (error) {
-            *error = QObject::tr("The published server pack was not extracted.");
-        }
         return {};
     }
-    if (hasServerContentRoot(extractedRoot)) {
-        return extractedRoot;
+    if (hasServerRootEvidence(extractedRoot)) {
+        return { QStringLiteral(".") };
     }
 
     const QDir base(extractedRoot);
@@ -157,32 +176,68 @@ QString publishedServerPackRoot(const QString &instanceRoot, QString *error)
                           QDirIterator::Subdirectories);
     while (iterator.hasNext()) {
         const QString path = iterator.next();
-        if (!hasServerContentRoot(path)) {
+        if (!hasServerRootEvidence(path)) {
             continue;
         }
         const QString relative = normalizedRelativePath(base.relativeFilePath(path));
-        candidates.append({ relative.count(QLatin1Char('/')), path });
-    }
-
-    if (candidates.isEmpty()) {
-        if (error) {
-            *error = QObject::tr(
-                "The published server pack contains no supported server content folders.");
-        }
-        return {};
+        candidates.append({ relative.count(QLatin1Char('/')), relative });
     }
     std::sort(candidates.begin(), candidates.end(),
               [](const auto &left, const auto &right) {
-                  return left.first < right.first;
+                  if (left.first != right.first) return left.first < right.first;
+                  return left.second.compare(right.second, Qt::CaseInsensitive) < 0;
               });
-    if (candidates.size() > 1 && candidates.at(0).first == candidates.at(1).first) {
+    QStringList choices;
+    if (!candidates.isEmpty()) {
+        const int shallowest = candidates.constFirst().first;
+        for (const auto &candidate : std::as_const(candidates)) {
+            if (candidate.first != shallowest) break;
+            choices.append(candidate.second);
+        }
+    }
+    return choices;
+}
+
+QString publishedServerPackRoot(const QString &instanceRoot,
+                                const QString &selectedRoot, QString *error)
+{
+    const QString extractedRoot = QDir(instanceRoot).filePath(
+        QStringLiteral("server-pack/server-files"));
+    if (!QFileInfo(extractedRoot).isDir()) {
         if (error) {
             *error = QObject::tr(
-                "The published server pack has more than one possible content root.");
+                "The published server pack was not extracted.");
         }
         return {};
     }
-    return candidates.constFirst().second;
+    const QStringList choices = publishedServerPackRootChoicesInternal(instanceRoot);
+    if (choices.isEmpty()) {
+        if (error) {
+            *error = QObject::tr(
+                "The published server pack contains no usable server files.");
+        }
+        return {};
+    }
+    QString choice = normalizedRelativePath(selectedRoot);
+    if (selectedRoot.trimmed().isEmpty()) {
+        if (choices.size() > 1) {
+            if (error) {
+                *error = QObject::tr(
+                    "The published server pack has more than one possible content root. Choose one and retry.");
+            }
+            return {};
+        }
+        choice = choices.constFirst();
+    }
+    if (!choices.contains(choice, Qt::CaseInsensitive)) {
+        if (error) {
+            *error = QObject::tr("The selected server-pack root is not available: %1")
+                         .arg(selectedRoot);
+        }
+        return {};
+    }
+    return choice == QStringLiteral(".")
+        ? extractedRoot : QDir(extractedRoot).filePath(choice);
 }
 
 bool copyFile(const QString &source, const QString &destination, QString *error)
@@ -357,10 +412,10 @@ bool applyServerPropertyOverrides(const QString &instanceRoot,
         }
         return false;
     }
+    // Adapter-provided values describe the required setup for this newly
+    // created server. They must replace blank or incorrect pack defaults.
     for (auto iterator = overrides.cbegin(); iterator != overrides.cend(); ++iterator) {
-        if (!properties.contains(iterator.key())) {
-            properties.insert(iterator.key(), iterator.value());
-        }
+        properties.insert(iterator.key(), iterator.value());
     }
     properties.insert(QStringLiteral("server-port"),
                       QString::number(server->port()));
@@ -368,17 +423,25 @@ bool applyServerPropertyOverrides(const QString &instanceRoot,
                                   error);
 }
 
-bool readPathList(const QString &path, QSet<QString> *paths, QString *error)
+bool readPathList(const QString &path, QSet<QString> *paths, QString *error,
+                QStringList *warnings = nullptr)
 {
     QFile file(path);
     if (!file.exists()) {
         return true;
     }
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        if (error) {
-            *error = QObject::tr("Could not read the server compatibility manifest.");
+        // Optional compatibility lists: ignore with a warning and fall back
+        // to conservative local content. Unsafe paths below still block.
+        const QString warning = QObject::tr(
+            "Could not read the server compatibility manifest %1; it was ignored.")
+                                      .arg(QFileInfo(path).fileName());
+        if (warnings && !warnings->contains(warning)) {
+            warnings->append(warning);
+        } else {
+            qWarning().noquote() << warning;
         }
-        return false;
+        return true;
     }
     while (!file.atEnd()) {
         const QString entry = normalizedRelativePath(
@@ -401,7 +464,9 @@ bool readPathList(const QString &path, QSet<QString> *paths, QString *error)
 
 bool readModrinthRules(const QString &instanceRoot, const QString &gameRoot,
                        QSet<QString> *includedPaths, QSet<QString> *excludedPaths,
-                       QStringList *skippedClientFiles, QString *error)
+                       QStringList *skippedClientFiles, QString *error,
+                       QStringList *warnings = nullptr,
+                       QStringList *missingRequiredFiles = nullptr)
 {
     const QString mrpackRoot = QDir(instanceRoot).filePath(QStringLiteral("mrpack"));
     QFile indexFile(QDir(mrpackRoot).filePath(QStringLiteral("modrinth.index.json")));
@@ -409,23 +474,55 @@ bool readModrinthRules(const QString &instanceRoot, const QString &gameRoot,
         return true;
     }
     if (!indexFile.open(QIODevice::ReadOnly)) {
-        if (error) {
-            *error = QObject::tr("Could not read the installed Modrinth pack index.");
+        // Optional provider index: ignore with a warning when the installed
+        // profile remains usable. Compatibility already reports this.
+        const QString warning = QObject::tr(
+            "Could not read the installed Modrinth pack index; it was ignored and local content will be used.");
+        if (warnings && !warnings->contains(warning)) {
+            warnings->append(warning);
         }
-        return false;
+        return true;
     }
     QJsonParseError parseError;
     const QJsonDocument document = QJsonDocument::fromJson(indexFile.readAll(), &parseError);
     if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
-        if (error) {
-            *error = QObject::tr("The installed Modrinth pack index is invalid.");
+        const QString warning = QObject::tr(
+            "The installed Modrinth pack index is malformed; it was ignored and local content will be used conservatively.");
+        if (warnings && !warnings->contains(warning)) {
+            warnings->append(warning);
         }
-        return false;
+        return true;
     }
 
-    for (const QJsonValue &value : document.object().value(QStringLiteral("files")).toArray()) {
+    const QJsonValue filesValue = document.object().value(QStringLiteral("files"));
+    if (!filesValue.isArray()) {
+        const QString warning = QObject::tr(
+            "The installed Modrinth pack has no valid file list; server content will be projected conservatively from local files.");
+        if (warnings && !warnings->contains(warning)) {
+            warnings->append(warning);
+        }
+        return true;
+    }
+    for (const QJsonValue &value : filesValue.toArray()) {
+        if (!value.isObject()) {
+            const QString warning = QObject::tr(
+                "The installed Modrinth pack contains an invalid file entry; it was skipped.");
+            if (warnings && !warnings->contains(warning)) {
+                warnings->append(warning);
+            }
+            continue;
+        }
         const QJsonObject file = value.toObject();
-        const QString path = normalizedRelativePath(file.value(QStringLiteral("path")).toString());
+        const QString rawPath = file.value(QStringLiteral("path")).toString();
+        const QString path = normalizedRelativePath(rawPath);
+        if (path.isEmpty()) {
+            const QString warning = QObject::tr(
+                "The installed Modrinth pack contains a file entry without a path; it was skipped.");
+            if (warnings && !warnings->contains(warning)) {
+                warnings->append(warning);
+            }
+            continue;
+        }
         if (!isSafeRelativePath(path)) {
             if (error) {
                 *error = QObject::tr("The installed Modrinth pack contains an unsafe path: %1")
@@ -437,11 +534,32 @@ bool readModrinthRules(const QString &instanceRoot, const QString &gameRoot,
                                            .value(QStringLiteral("server"))
                                            .toString();
         if (serverSupport == QStringLiteral("unsupported")) {
+            // Side conflicts are advisory and order-independent: retain the
+            // most server-capable label (include wins). Compatibility already
+            // warns about the conflict.
+            bool alreadyIncluded = false;
+            for (const QString &included : std::as_const(*includedPaths)) {
+                if (included.compare(path, Qt::CaseInsensitive) == 0) {
+                    alreadyIncluded = true;
+                    break;
+                }
+            }
+            if (alreadyIncluded) {
+                continue;
+            }
             excludedPaths->insert(path.toLower());
             if (skippedClientFiles) {
                 skippedClientFiles->append(path);
             }
             continue;
+        }
+        if (excludedPaths->remove(path.toLower()) && skippedClientFiles) {
+            skippedClientFiles->erase(
+                std::remove_if(skippedClientFiles->begin(), skippedClientFiles->end(),
+                               [&path](const QString &skipped) {
+                                   return skipped.compare(path, Qt::CaseInsensitive) == 0;
+                               }),
+                skippedClientFiles->end());
         }
         includedPaths->insert(path);
         if (serverSupport == QStringLiteral("required")
@@ -451,18 +569,20 @@ bool readModrinthRules(const QString &instanceRoot, const QString &gameRoot,
             if (QFileInfo::exists(cachedPath)) {
                 continue;
             }
-            if (error) {
-                *error = QObject::tr(
-                             "This pack has a required server-only file that the client download "
-                             "does not contain: %1")
-                             .arg(path);
+            if (missingRequiredFiles && !missingRequiredFiles->contains(path)) {
+                missingRequiredFiles->append(path);
             }
-            return false;
+            if (warnings) {
+                const QString warning = QObject::tr(
+                    "Required server file is missing: %1. Add it before starting the server.")
+                                            .arg(path);
+                if (!warnings->contains(warning)) warnings->append(warning);
+            }
         }
     }
 
     if (!readPathList(QDir(mrpackRoot).filePath(QStringLiteral("overrides.txt")),
-                      includedPaths, error)) {
+                      includedPaths, error, warnings)) {
         return false;
     }
 
@@ -520,8 +640,15 @@ bool jarDeclaresClientOnly(const QString &path)
     return false;
 }
 
+// Definite: complete parsing proved a missing mandatory dependency or a
+// definite incompatible version. Blocks derived servers; published packs stay
+// authoritative and let the loader validate at startup.
+// Inconclusive: parser limits, malformed metadata, invalid/unverifiable
+// ranges. Advisory for both published and derived servers.
+// Unsafe: traversal/absolute paths or containment violations. Always blocks.
 enum class DependencyValidationFailure {
     None,
+    Definite,
     Inconclusive,
     Unsafe,
 };
@@ -604,6 +731,9 @@ bool collectFabricMetadata(const QString &jarPath, const QString &temporaryRoot,
         MMCZip::ArchiveReader nestedSource(jarPath);
         const auto nestedFile = nestedSource.goToFile(nestedPath);
         if (!nestedFile) {
+            if (failure) {
+                *failure = DependencyValidationFailure::Definite;
+            }
             if (error) {
                 *error = QObject::tr(
                              "Fabric mod \"%1\" declares a bundled dependency that is missing: %2")
@@ -674,7 +804,7 @@ bool validateFabricDependencyClosure(const QString &serverRoot,
             continue;
         }
         if (failure) {
-            *failure = DependencyValidationFailure::Inconclusive;
+            *failure = DependencyValidationFailure::Definite;
         }
         if (error) {
             *error = QObject::tr(
@@ -1171,6 +1301,7 @@ bool collectForgeBundledMetadata(const QString &jarPath, const QString &loaderTy
         MMCZip::ArchiveReader nestedArchive(jarPath);
         const auto entry = nestedArchive.goToFile(path);
         if (!entry || !entry->isFile()) {
+            if (failure) *failure = DependencyValidationFailure::Definite;
             if (error) *error = QObject::tr("Bundled dependency %1 is missing from %2.").arg(path, QFileInfo(jarPath).fileName());
             return false;
         }
@@ -1255,7 +1386,7 @@ bool validateForgeDependencyClosure(const QString &serverRoot,
         const bool dependencyPresent = providedIds.contains(requirement.dependencyId);
         if (requirement.kind == ForgeDependencyKind::Required && !dependencyPresent) {
             if (failure) {
-                *failure = DependencyValidationFailure::Inconclusive;
+                *failure = DependencyValidationFailure::Definite;
             }
             if (error) {
                 *error = QObject::tr(
@@ -1320,7 +1451,7 @@ bool validateForgeDependencyClosure(const QString &serverRoot,
                 continue;
             }
             if (failure) {
-                *failure = DependencyValidationFailure::Inconclusive;
+                *failure = DependencyValidationFailure::Definite;
             }
             if (error) {
                 *error = QObject::tr(
@@ -1335,7 +1466,7 @@ bool validateForgeDependencyClosure(const QString &serverRoot,
         if (requirement.kind == ForgeDependencyKind::Incompatible
             && versionMatches) {
             if (failure) {
-                *failure = DependencyValidationFailure::Inconclusive;
+                *failure = DependencyValidationFailure::Definite;
             }
             if (error) {
                 *error = QObject::tr(
@@ -1390,7 +1521,9 @@ void readDeclaredClientOnlyMods(const QString &gameRoot, QSet<QString> *excluded
         const QString relativePath = normalizedRelativePath(
             QStringLiteral("mods/") + jar.fileName());
         if (!excludedPaths->contains(relativePath.toLower())
-            && jarDeclaresClientOnly(jar.absoluteFilePath())) {
+            && (jarDeclaresClientOnly(jar.absoluteFilePath())
+                || ServerModpackInstaller::isKnownClientOnlyFile(
+                    jar.absoluteFilePath()))) {
             excludeClientOnlyMod(jar.fileName(), excludedPaths,
                                  skippedClientFiles);
         }
@@ -1422,7 +1555,9 @@ void readServerPairClientOnlyFiles(const QString &instanceRoot,
 bool copyIncludedServerFiles(const QString &instanceRoot, const QString &gameRoot,
                              const QSet<QString> &includedPaths,
                              const QSet<QString> &excludedPaths,
-                             const QString &destination, QString *error)
+                             const QString &destination,
+                             QStringList *missingRequiredFiles,
+                             QStringList *warnings, QString *error)
 {
     QStringList sortedPaths(includedPaths.cbegin(), includedPaths.cend());
     sortedPaths.sort(Qt::CaseInsensitive);
@@ -1453,12 +1588,16 @@ bool copyIncludedServerFiles(const QString &instanceRoot, const QString &gameRoo
             }
         }
         if (source.isEmpty()) {
-            if (error) {
-                *error = QObject::tr(
-                             "A provider-declared server file is missing after download: %1")
-                             .arg(relativePath);
+            if (missingRequiredFiles && !missingRequiredFiles->contains(relativePath)) {
+                missingRequiredFiles->append(relativePath);
             }
-            return false;
+            if (warnings) {
+                const QString warning = QObject::tr(
+                    "Required server file is missing: %1. Add it before starting the server.")
+                                            .arg(relativePath);
+                if (!warnings->contains(warning)) warnings->append(warning);
+            }
+            continue;
         }
         const QString destinationPath =
             relativePath.compare(QStringLiteral("default-server.properties"),
@@ -1470,6 +1609,58 @@ bool copyIncludedServerFiles(const QString &instanceRoot, const QString &gameRoo
         }
     }
     return true;
+}
+
+bool writeRequiredFilesManifest(const QString &destination,
+                                QStringList missingPaths, QString *error)
+{
+    if (missingPaths.isEmpty()) return true;
+    missingPaths.removeDuplicates();
+    missingPaths.sort(Qt::CaseInsensitive);
+    QSaveFile file(QDir(destination).filePath(
+        QStringLiteral("jlauncher_required_server_files.txt")));
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        if (error) *error = QObject::tr("Could not save the missing server-file requirements.");
+        return false;
+    }
+    QByteArray contents;
+    for (const QString &path : std::as_const(missingPaths)) {
+        contents += path.toUtf8() + '\n';
+    }
+    if (file.write(contents) != contents.size() || !file.commit()) {
+        file.cancelWriting();
+        if (error) *error = QObject::tr("Could not save the missing server-file requirements.");
+        return false;
+    }
+    return true;
+}
+
+bool writeDerivedServerMarker(const QString &destination, QString *error)
+{
+    QSaveFile file(QDir(destination).filePath(
+        QStringLiteral("jlauncher_derived_server.txt")));
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)
+        || file.write("Dependencies are checked before startup.\n") < 0
+        || !file.commit()) {
+        file.cancelWriting();
+        if (error) *error = QObject::tr("Could not save the derived-server readiness marker.");
+        return false;
+    }
+    return true;
+}
+
+bool hasUsablePreparedContent(const QString &destination)
+{
+    QDirIterator iterator(destination, QDir::Files | QDir::NoSymLinks,
+                          QDirIterator::Subdirectories);
+    while (iterator.hasNext()) {
+        const QString name = QFileInfo(iterator.next()).fileName();
+        if (name != QStringLiteral("jlauncher_required_server_files.txt")
+            && name != QStringLiteral("jlauncher_derived_server.txt")) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void importContentTracking(const QString &gameRoot,
@@ -1488,6 +1679,34 @@ void importContentTracking(const QString &gameRoot,
         }
     }
 }
+}
+
+ServerDependencyCheckResult ServerModpackInstaller::checkServerDependencies(
+    const QString &serverRoot, const QString &loaderType,
+    const QString &minecraftVersion, const QString &loaderVersion)
+{
+    ServerDependencyCheckResult result;
+    DependencyValidationFailure failure = DependencyValidationFailure::None;
+    const QString loader = loaderType.trimmed().toLower();
+    bool valid = true;
+    if (loader == QStringLiteral("fabric")) {
+        valid = validateFabricDependencyClosure(serverRoot, &failure, &result.error);
+    } else if (loader == QStringLiteral("forge")
+               || loader == QStringLiteral("neoforge")) {
+        valid = validateForgeDependencyClosure(
+            serverRoot, loader, minecraftVersion, loaderVersion,
+            &result.warnings, &failure, &result.error);
+    }
+    if (valid) {
+        result.state = ServerDependencyCheckState::Compatible;
+    } else if (failure == DependencyValidationFailure::Unsafe) {
+        result.state = ServerDependencyCheckState::Unsafe;
+    } else if (failure == DependencyValidationFailure::Definite) {
+        result.state = ServerDependencyCheckState::DefiniteFailure;
+    } else {
+        result.state = ServerDependencyCheckState::Inconclusive;
+    }
+    return result;
 }
 
 ServerModpackProfile ServerModpackInstaller::profileForVersions(
@@ -1580,6 +1799,28 @@ QString ServerModpackInstaller::contentTrackingSource(
     return {};
 }
 
+bool ServerModpackInstaller::markKnownClientOnlyFile(const QString &filePath)
+{
+    const QString hash = Hashing::hash(
+        filePath, Hashing::Algorithm::Sha256).toLower();
+    if (hash.isEmpty()) return false;
+    QSettings settings;
+    settings.setValue(
+        QStringLiteral("ServerCompatibility/KnownClientOnlyHashes/") + hash,
+        QFileInfo(filePath).fileName());
+    settings.sync();
+    return settings.status() == QSettings::NoError;
+}
+
+bool ServerModpackInstaller::isKnownClientOnlyFile(const QString &filePath)
+{
+    const QString hash = Hashing::hash(
+        filePath, Hashing::Algorithm::Sha256).toLower();
+    return !hash.isEmpty()
+        && QSettings().contains(
+            QStringLiteral("ServerCompatibility/KnownClientOnlyHashes/") + hash);
+}
+
 ServerModpackProfile ServerModpackInstaller::inspect(const MinecraftInstance &instance)
 {
     const auto *profile = instance.getPackProfile();
@@ -1646,8 +1887,11 @@ bool ServerModpackInstaller::prepareContent(const QString &instanceRoot,
                                             const QString &gameRoot,
                                             const QString &destination,
                                             QStringList *skippedClientFiles,
-                                            QString *error)
+                                            QString *error, QStringList *warnings,
+                                            const QString &publishedServerRoot,
+                                            QStringList *missingRequiredFiles)
 {
+    if (missingRequiredFiles) missingRequiredFiles->clear();
     if (!QFileInfo(gameRoot).isDir()) {
         if (error) {
             *error = QObject::tr("The downloaded instance has no game directory.");
@@ -1669,11 +1913,13 @@ bool ServerModpackInstaller::prepareContent(const QString &instanceRoot,
     }
 
     if (compatibility.hasDedicatedServerPack) {
-        const QString serverPackRoot = publishedServerPackRoot(instanceRoot, error);
+        const QString serverPackRoot = publishedServerPackRoot(
+            instanceRoot, publishedServerRoot, error);
         return !serverPackRoot.isEmpty()
             && copyDirectoryContents(serverPackRoot, destination, error);
     }
 
+    QStringList missingFiles;
     QSet<QString> includedPaths;
     QSet<QString> supplementalServerPaths;
     QSet<QString> excludedPaths;
@@ -1691,17 +1937,18 @@ bool ServerModpackInstaller::prepareContent(const QString &instanceRoot,
         }
     }
     if (!readModrinthRules(instanceRoot, gameRoot, &includedPaths, &excludedPaths,
-                           skippedClientFiles, error)) {
+                           skippedClientFiles, error, warnings,
+                           &missingFiles)) {
         return false;
     }
     if (!readPathList(
             QDir(instanceRoot).filePath(QStringLiteral("server-pack/include.txt")),
-            &includedPaths, error)) {
+            &includedPaths, error, warnings)) {
         return false;
     }
     if (!readPathList(
             QDir(instanceRoot).filePath(QStringLiteral("flame/overrides.txt")),
-            &includedPaths, error)) {
+            &includedPaths, error, warnings)) {
         return false;
     }
     readDeclaredClientOnlyMods(gameRoot, &excludedPaths, skippedClientFiles);
@@ -1711,12 +1958,14 @@ bool ServerModpackInstaller::prepareContent(const QString &instanceRoot,
     if (!includedPaths.isEmpty()) {
         includedPaths.unite(supplementalServerPaths);
         const bool copied = copyIncludedServerFiles(
-            instanceRoot, gameRoot, includedPaths, excludedPaths, destination, error);
+            instanceRoot, gameRoot, includedPaths, excludedPaths, destination,
+            &missingFiles, warnings, error);
         if (copied && skippedClientFiles) {
             skippedClientFiles->removeDuplicates();
             skippedClientFiles->sort(Qt::CaseInsensitive);
         }
-        return copied;
+        if (missingRequiredFiles) *missingRequiredFiles = missingFiles;
+        return copied && writeRequiredFilesManifest(destination, missingFiles, error);
     }
 
     for (const QString &root : serverContentRoots()) {
@@ -1749,19 +1998,27 @@ bool ServerModpackInstaller::prepareContent(const QString &instanceRoot,
     if (!supplementalServerPaths.isEmpty()
         && !copyIncludedServerFiles(instanceRoot, gameRoot,
                                     supplementalServerPaths, excludedPaths,
-                                    destination, error)) {
+                                    destination, &missingFiles,
+                                    warnings, error)) {
         return false;
     }
     if (skippedClientFiles) {
         skippedClientFiles->removeDuplicates();
         skippedClientFiles->sort(Qt::CaseInsensitive);
     }
-    return true;
+    if (missingRequiredFiles) *missingRequiredFiles = missingFiles;
+    return writeRequiredFilesManifest(destination, missingFiles, error);
+}
+
+QStringList ServerModpackInstaller::publishedServerRootChoices(
+    const QString &instanceRoot)
+{
+    return publishedServerPackRootChoicesInternal(instanceRoot);
 }
 
 ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
     ServerManager *manager, const MinecraftInstance &instance,
-    const QString &serverName)
+    const QString &serverName, const QString &publishedServerRoot)
 {
     // Trust an explicit pack recommendation only when the source instance
     // truly overrides memory or carries an exported recommendation. The
@@ -1779,14 +2036,14 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
                                 serverName.trimmed().isEmpty()
                                     ? instance.name() + QObject::tr(" Server")
                                     : serverName,
-                                providerRecommendation, 0);
+                                providerRecommendation, 0, publishedServerRoot);
 }
 
 ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
     ServerManager *manager, const ServerModpackProfile &profile,
     const QString &instanceRoot, const QString &gameRoot,
     const QString &serverName, int providerRecommendationMiB,
-    quint64 totalRamMiB)
+    quint64 totalRamMiB, const QString &publishedServerRoot)
 {
     ServerModpackInstallResult result;
     if (!manager) {
@@ -1832,18 +2089,53 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
             "Server compatibility is unknown; client-only content could not be proven safe "
             "for a dedicated server."));
     }
+    // Surface advisory provider diagnostics without string matching: the
+    // installed profile already won, these only explain what was ignored.
+    // Integrity is aggregated by count below to avoid one warning per file.
+    // Published packs are authoritative byte-identical content; their missing
+    // hashes are expected and stay silent (the loader validates at startup).
+    for (const ServerPackIssue &issue : compatibility.issues) {
+        if (issue.severity != ServerPackIssueSeverity::Advisory) {
+            continue;
+        }
+        if (issue.kind == ServerPackIssueKind::UnverifiedIntegrity) {
+            continue;
+        }
+        if (!result.warnings.contains(issue.message)) {
+            result.warnings.append(issue.message);
+        }
+    }
+    if (!hasPublishedServerPack && compatibility.unverifiedFileCount > 0) {
+        const QString integritySummary = QObject::tr(
+            "%1 server file(s) have no supported provider hash and remain unverified.")
+                                             .arg(compatibility.unverifiedFileCount);
+        if (!result.warnings.contains(integritySummary)) {
+            result.warnings.append(integritySummary);
+        }
+    }
     for (const QString &warning : compatibility.projectionWarnings) {
         if (!result.warnings.contains(warning)) {
             result.warnings.append(warning);
+        }
+    }
+    if (compatibility.hasAnyAdvisory() && compatibility.providerMetadataPresent) {
+        const QString installedSummary = QObject::tr(
+            "Using installed Minecraft %1 with %2 %3; provider values that disagreed were ignored. "
+            "The server was created stopped and may still fail to start if third-party content is broken.")
+                                             .arg(profile.minecraftVersion, profile.loaderType,
+                                                  profile.loaderVersion);
+        if (!result.warnings.contains(installedSummary)) {
+            result.warnings.append(installedSummary);
         }
     }
 
     QTemporaryDir staging;
     QString preparationError;
     if (!staging.isValid()
-        || !prepareContent(instanceRoot, gameRoot,
-                           staging.path(), &result.skippedClientFiles,
-                           &preparationError)) {
+        || !prepareContent(instanceRoot, gameRoot, staging.path(),
+                           &result.skippedClientFiles, &preparationError,
+                           &result.warnings, publishedServerRoot,
+                           &result.missingFiles)) {
         if (preparationError.isEmpty()) {
             preparationError = QObject::tr("Could not prepare the modpack for the server.");
         }
@@ -1853,40 +2145,46 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
             preparationError);
         return result;
     }
-    bool dependencyClosureValid = true;
-    DependencyValidationFailure dependencyFailure =
-        DependencyValidationFailure::None;
-    QString dependencyError;
-    if (profile.loaderType == QStringLiteral("fabric")) {
-        dependencyClosureValid = validateFabricDependencyClosure(
-            staging.path(), &dependencyFailure, &dependencyError);
-    } else if (profile.loaderType == QStringLiteral("forge")
-               || profile.loaderType == QStringLiteral("neoforge")) {
-        dependencyClosureValid = validateForgeDependencyClosure(
-            staging.path(), profile.loaderType, profile.minecraftVersion,
-            profile.loaderVersion, &result.warnings, &dependencyFailure,
-            &dependencyError);
+    if (!hasUsablePreparedContent(staging.path())) {
+        recordServerModpackFailure(
+            &result, ServerModpackFailureCategory::ContentProjection,
+            ServerModpackFailureStage::ContentPreparation,
+            QObject::tr("The modpack contains no usable server content to create."));
+        return result;
+    }
+    const ServerDependencyCheckResult dependencyCheck = checkServerDependencies(
+        staging.path(), profile.loaderType, profile.minecraftVersion,
+        profile.loaderVersion);
+    for (const QString &warning : dependencyCheck.warnings) {
+        if (!result.warnings.contains(warning)) result.warnings.append(warning);
     }
     QString dependencyWarning;
-    if (!dependencyClosureValid) {
-        if (hasPublishedServerPack
-            && dependencyFailure == DependencyValidationFailure::Inconclusive) {
-            dependencyWarning = QObject::tr(
-                "The launcher could not confirm all dependencies in the published server pack. "
-                "The server was created; the %1 loader will check them at startup.\n\nDetails: %2")
-                                    .arg(profile.loaderType, dependencyError);
-        } else {
-            if (!hasPublishedServerPack) {
-                dependencyError = QObject::tr(
-                                      "No dedicated server version was supplied by %1, and the "
-                                      "derived server copy is incomplete.\n\n%2")
-                                      .arg(compatibility.provider, dependencyError);
-            }
+    if (!dependencyCheck.isCompatible()) {
+        if (dependencyCheck.state == ServerDependencyCheckState::Unsafe) {
             recordServerModpackFailure(
                 &result, ServerModpackFailureCategory::DependencyIncompatibility,
                 ServerModpackFailureStage::DependencyValidation,
-                dependencyError);
+                dependencyCheck.error);
             return result;
+        }
+        if (!dependencyCheck.error.isEmpty()) {
+            result.dependencyRequirements.append(dependencyCheck.error);
+        }
+        if (hasPublishedServerPack) {
+            // Published packs are authoritative; the loader validates at startup.
+            dependencyWarning = QObject::tr(
+                "The launcher could not confirm all dependencies in the published server pack. "
+                "The server was created; the %1 loader will check them at startup.\n\nDetails: %2")
+                                    .arg(profile.loaderType, dependencyCheck.error);
+        } else if (dependencyCheck.state == ServerDependencyCheckState::Inconclusive) {
+            dependencyWarning = QObject::tr(
+                "The launcher could not fully verify dependencies in the derived server copy. "
+                "The server was created stopped, but it may fail to start; the %1 loader will check them at startup.\n\nDetails: %2")
+                                    .arg(profile.loaderType, dependencyCheck.error);
+        } else {
+            dependencyWarning = QObject::tr(
+                "The derived server is missing required content. It was created stopped so you can add the missing dependency.\n\nDetails: %1")
+                                    .arg(dependencyCheck.error);
         }
     }
 
@@ -1916,6 +2214,16 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
         manager->deleteServer(server->id());
         recordServerModpackFailure(
             &result, ServerModpackFailureCategory::ContentProjection,
+            ServerModpackFailureStage::ContentInstallation,
+            installationError);
+        return result;
+    }
+    if (!hasPublishedServerPack
+        && !writeDerivedServerMarker(server->serverDirectory(),
+                                     &installationError)) {
+        manager->deleteServer(server->id());
+        recordServerModpackFailure(
+            &result, ServerModpackFailureCategory::LauncherInternal,
             ServerModpackFailureStage::ContentInstallation,
             installationError);
         return result;

@@ -96,6 +96,8 @@ public:
     bool stop();
     bool restart();
     bool isRunning() const;
+    bool prepareServerSoftware();
+    bool hasInstalledLaunchTarget() const { return hasLaunchTarget(); }
     bool downloadServerJar(const QString &javaPath = QString(), bool startAfterDownload = true);
     bool downloadServerJarForVersion(const QString &targetVersion,
                                      const QString &javaPath = QString(),
@@ -143,6 +145,7 @@ public:
     ServerContentType contentType() const;
     static ServerContentType contentTypeForLoader(const QString &loaderType);
     bool addContentFiles(const QStringList &paths, QString *error = nullptr);
+    bool invalidateContentCaches(QString *error = nullptr) const;
 
 signals:
     void statusChanged(ServerStatus status);
@@ -174,7 +177,9 @@ private:
     int requiredJavaVersion() const;
     int javaMajorVersion(const QString &path) const;
     QString compatibleJavaPath(int requiredVersion, int *detectedVersion) const;
-    bool installCompatibleJava(int requiredVersion);
+    bool installCompatibleJava(int requiredVersion,
+                               bool startAfterInstall = true,
+                               bool prepareServerAfterInstall = false);
     bool extractServerPack(const QString &archivePath, QString *error);
     void handleConsoleLine(const QString &line, bool error = false);
     bool beginServerDownload(const QString &targetVersion, const QString &targetLoaderVersion,

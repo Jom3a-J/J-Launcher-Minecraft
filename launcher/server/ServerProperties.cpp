@@ -93,6 +93,32 @@ QString ServerProperties::worldSetupIssue(const QString &serverRoot)
     if (!error.isEmpty()) {
         return error;
     }
+    QFile requiredFiles(root.filePath(
+        QStringLiteral("jlauncher_required_server_files.txt")));
+    if (requiredFiles.exists()) {
+        if (!requiredFiles.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            return QObject::tr("Setup required: could not read the missing server-file list.");
+        }
+        QStringList missing;
+        while (!requiredFiles.atEnd()) {
+            QString path = QDir::fromNativeSeparators(
+                QDir::cleanPath(QString::fromUtf8(requiredFiles.readLine()).trimmed()));
+            while (path.startsWith(QStringLiteral("./"))) path.remove(0, 2);
+            if (path.isEmpty() || path == QStringLiteral("..")
+                || path.startsWith(QStringLiteral("../"))
+                || QDir::isAbsolutePath(path)) {
+                return QObject::tr("Setup required: the missing server-file list contains an unsafe path.");
+            }
+            const QFileInfo file(root.filePath(path));
+            if (!file.isFile() || file.isSymLink()) missing.append(path);
+        }
+        if (!missing.isEmpty()) {
+            missing.removeDuplicates();
+            return QObject::tr(
+                "Setup required: add these missing server files before starting: %1")
+                .arg(missing.mid(0, 10).join(QStringLiteral(", ")));
+        }
+    }
     // Existing worlds own their generation settings. Never regenerate them.
     const QString world = properties.value("level-name", "world");
     if (QFileInfo(root.filePath(world + "/level.dat")).isFile()) {

@@ -14,6 +14,8 @@
  */
 
 #include "ServerInstance.h"
+#include "ServerJvmArgs.h"
+#include "ServerModpackInstaller.h"
 #include "ServerPackImportTransaction.h"
 #include "ServerDownloader.h"
 #include "ServerProperties.h"
@@ -206,6 +208,27 @@ bool ServerInstance::start()
         return false;
     }
 
+    if (QFileInfo(QDir(m_serverDirectory).filePath(
+                      QStringLiteral("jlauncher_derived_server.txt"))).isFile()) {
+        const ServerDependencyCheckResult dependencyCheck =
+            ServerModpackInstaller::checkServerDependencies(
+                m_serverDirectory, m_loaderType, m_version, m_loaderVersion);
+        if (dependencyCheck.state == ServerDependencyCheckState::DefiniteFailure
+            || dependencyCheck.state == ServerDependencyCheckState::Unsafe) {
+            const QString message = tr(
+                "Setup required: server dependencies are missing or incompatible. %1")
+                                        .arg(dependencyCheck.error);
+            appendLog("[ERROR] " + message);
+            setStatus(ServerStatus::Error);
+            emit serverError(message);
+            return false;
+        }
+        if (dependencyCheck.state == ServerDependencyCheckState::Inconclusive) {
+            appendLog(tr("[WARN] Dependency inspection was inconclusive; the loader will perform the final check: %1")
+                          .arg(dependencyCheck.error));
+        }
+    }
+
     if (!m_eulaAccepted) {
         const QString message = tr("Accept the Minecraft EULA before starting this server.");
         appendLog("[ERROR] " + message);
@@ -303,20 +326,80 @@ bool ServerInstance::start()
     m_startupTimedOut = false;
     setStatus(ServerStatus::Starting);
 
+    // Launcher-owned JVM settings. Memory stays authoritative and the locale
+    // is pinned to en_US (including the FORMAT category) so pack-supplied
+    // options cannot reintroduce host-locale digits into resource paths.
+    // Client launches are untouched; only dedicated-server paths use this.
+    const QStringList serverLocaleArgs = ServerJvmArgs::serverLocaleJvmArgs();
     QStringList jvmArgs;
     jvmArgs << QString("-Xmx%1M").arg(m_maxMemory);
     jvmArgs << QString("-Xms%1M").arg(m_minMemory);
     if (!m_extraJvmArguments.isEmpty()) {
         jvmArgs << QProcess::splitCommand(m_extraJvmArguments);
     }
+    jvmArgs << serverLocaleArgs;
+    const QString localeLogLine =
+        tr("[JVM] Using dedicated-server locale en_US (language=en country=US) on Java %1.")
+            .arg(detectedJava);
 
     if ((loader == QStringLiteral("forge") || loader == QStringLiteral("neoforge")) &&
         QFileInfo(loaderScriptPath()).isFile()) {
         const QString loaderArgsPath = loaderArgumentsFile();
         if (!loaderArgsPath.isEmpty()) {
             QStringList args;
-            if (QFile::exists(QDir(m_serverDirectory).filePath("user_jvm_args.txt"))) {
-                args << QStringLiteral("@user_jvm_args.txt");
+            const QDir serverDir(m_serverDirectory);
+            const QString suppliedArgsPath = serverDir.filePath(QStringLiteral("user_jvm_args.txt"));
+            if (QFile::exists(suppliedArgsPath)) {
+                // Preserve the original pack file byte-for-byte and launch
+                // with a separate launcher-owned effective argfile. Never
+                // pass supplied text through a shell; QProcess argv plus
+                // Java @-files carry the tokens verbatim.
+                const QString effectivePath =
+                    serverDir.filePath(ServerJvmArgs::effectiveFileName());
+                ServerJvmFilterResult prepared;
+                if (!ServerJvmArgs::writeEffectiveFileForSource(suppliedArgsPath, effectivePath,
+                                                                 detectedJava, &prepared)) {
+                    const QString message =
+                        tr("The server's supplied JVM arguments could not be prepared safely: %1 "
+                           "Check user_jvm_args.txt for unreadable content, oversized files, or unclosed quotes.")
+                            .arg(prepared.errorMessage);
+                    appendLog("[ERROR] " + message);
+                    setStatus(ServerStatus::Error);
+                    emit serverError(message);
+                    return false;
+                }
+                for (const QString &removed : prepared.removedMemoryOptions) {
+                    const QString warning =
+                        tr("[JVM] Removed pack memory option '%1'; using the launcher memory settings "
+                           "(%2 MiB min / %3 MiB max).")
+                            .arg(removed)
+                            .arg(m_minMemory)
+                            .arg(m_maxMemory);
+                    appendLog(warning);
+                    emit outputReceived(warning);
+                }
+                for (const QString &removed : prepared.removedUnsupportedOptions) {
+                    const QString warning =
+                        tr("[JVM] Removed option '%1' which is not supported by Java %2.")
+                            .arg(removed)
+                            .arg(detectedJava);
+                    appendLog(warning);
+                    emit outputReceived(warning);
+                }
+                appendLog(localeLogLine);
+                emit outputReceived(localeLogLine);
+                if (!prepared.keptTokens.isEmpty()) {
+                    appendLog(tr("[JVM] Kept %1 pack option(s) in %2; original user_jvm_args.txt left unchanged.")
+                                  .arg(prepared.keptTokens.size())
+                                  .arg(ServerJvmArgs::effectiveFileName()));
+                } else {
+                    appendLog(tr("[JVM] No pack JVM options remained after filtering; using launcher defaults. "
+                                 "Original user_jvm_args.txt left unchanged."));
+                }
+                args << (QStringLiteral("@") + ServerJvmArgs::effectiveFileName());
+            } else {
+                appendLog(localeLogLine);
+                emit outputReceived(localeLogLine);
             }
             args << jvmArgs;
             args << (QStringLiteral("@") +
@@ -329,19 +412,28 @@ bool ServerInstance::start()
             m_process->start(javaPath, args);
         } else {
             // Some published server packs replace the generated Forge script
-            // with a custom wrapper. Preserve that wrapper, but still pass the
-            // settings owned by the server UI to the Java process it starts.
-            QString environmentJvmArgs = QStringLiteral("-Xmx%1M -Xms%2M")
-                                             .arg(m_maxMemory)
-                                             .arg(m_minMemory);
-            if (!m_extraJvmArguments.isEmpty()) {
-                environmentJvmArgs += ' ' + m_extraJvmArguments;
-            }
+            // with a custom wrapper. The wrapper's hardcoded argfile cannot
+            // be parsed or rewritten safely, so preserve the wrapper and use
+            // only generic JVM environment protection. Pack memory flags
+            // inside the wrapper still override JAVA_TOOL_OPTIONS because
+            // JVM command-line options win over the environment.
+            const QString environmentJvmArgs =
+                ServerJvmArgs::wrapperEnvironmentArgs(m_minMemory, m_maxMemory, m_extraJvmArguments);
             serverEnvironment.insert(QStringLiteral("JAVA_TOOL_OPTIONS"), environmentJvmArgs);
             m_process->setProcessEnvironment(serverEnvironment);
-            appendLog(tr("[WARN] This server uses a custom loader script; applying memory and JVM settings through the process environment."));
+            appendLog(tr("[WARN] This server uses a custom loader script; applying memory, locale, and "
+                         "IgnoreUnrecognizedVMOptions through the process environment."));
+            appendLog(localeLogLine);
+            emit outputReceived(localeLogLine);
+            appendLog(tr("[JVM] JAVA_TOOL_OPTIONS carries launcher memory/locale plus "
+                         "-XX:+IgnoreUnrecognizedVMOptions so unknown pack options do not abort startup. "
+                         "Pack -Xms/-Xmx inside the opaque wrapper still take precedence and cannot be filtered safely."));
+            emit outputReceived(tr("[JVM] Opaque wrapper limit: launcher memory is a fallback; the wrapper's own memory flags win."));
 #ifdef Q_OS_WIN
-            m_process->start("cmd.exe", QStringList() << "/d" << "/c" << "run.bat" << "nogui");
+            m_process->start("cmd.exe",
+                             QStringList() << "/d" << "/c"
+                                           << QFileInfo(loaderScriptPath()).fileName()
+                                           << "nogui");
 #else
             m_process->start(QStringLiteral("/bin/sh"),
                              QStringList() << loaderScriptPath() << QStringLiteral("nogui"));
@@ -350,6 +442,7 @@ bool ServerInstance::start()
     } else {
         QStringList args = jvmArgs;
         args << "-jar" << serverJarPath() << "nogui";
+        appendLog(localeLogLine);
         m_process->start(javaPath, args);
     }
 
@@ -399,6 +492,50 @@ bool ServerInstance::restart()
         return false;
     }
     return true;
+}
+
+bool ServerInstance::prepareServerSoftware()
+{
+    if (m_status == ServerStatus::Downloading || m_status == ServerStatus::Running
+        || m_status == ServerStatus::Starting || m_status == ServerStatus::Stopping) {
+        return false;
+    }
+    if (hasLaunchTarget()) {
+        appendLog(tr("[DOWNLOAD] Server software is already installed."));
+        return true;
+    }
+    if (m_serverDirectory.trimmed().isEmpty()
+        || (!QDir(m_serverDirectory).exists()
+            && !QDir().mkpath(m_serverDirectory))) {
+        const QString message = tr("The server folder could not be prepared for software installation.");
+        appendLog("[DOWNLOAD ERROR] " + message);
+        setStatus(ServerStatus::Error);
+        emit serverError(message);
+        return false;
+    }
+
+    const int requiredJava = qMax(
+        requiredJavaVersion(), recommendedJavaMajor(m_version, m_loaderType));
+    int detectedJava = 0;
+    const QString javaPath = compatibleJavaPath(requiredJava, &detectedJava);
+    if (!javaPath.isEmpty()) {
+        m_javaPath = javaPath;
+        return downloadServerJar(javaPath, false);
+    }
+    if (requiredJava > 0) {
+        if (auto *application = APPLICATION_DYN;
+            application && application->settings()->get("AutomaticJavaDownload").toBool()) {
+            return installCompatibleJava(requiredJava, false, true);
+        }
+    }
+    const QString message = requiredJava > 0
+        ? tr("Server software needs Java %1 for installation. Configure Java or enable automatic Java downloads.")
+              .arg(requiredJava)
+        : tr("Server software installation needs a configured Java runtime.");
+    appendLog("[DOWNLOAD ERROR] " + message);
+    setStatus(ServerStatus::Error);
+    emit serverError(message);
+    return false;
 }
 
 bool ServerInstance::isRunning() const
@@ -552,11 +689,19 @@ bool ServerInstance::hasLaunchTarget() const
 QString ServerInstance::loaderScriptPath() const
 {
 #ifdef Q_OS_WIN
-    const QString scriptName = QStringLiteral("run.bat");
+    const QString preferredName = QStringLiteral("run.bat");
+    const QString fallbackName = QStringLiteral("start.bat");
 #else
-    const QString scriptName = QStringLiteral("run.sh");
+    const QString preferredName = QStringLiteral("run.sh");
+    const QString fallbackName = QStringLiteral("start.sh");
 #endif
-    return QDir(m_serverDirectory).filePath(scriptName);
+    const QDir serverDir(m_serverDirectory);
+    const QString preferred = serverDir.filePath(preferredName);
+    if (QFileInfo(preferred).isFile()) {
+        return preferred;
+    }
+    const QString fallback = serverDir.filePath(fallbackName);
+    return QFileInfo(fallback).isFile() ? fallback : preferred;
 }
 
 QString ServerInstance::loaderArgumentsFile() const
@@ -815,7 +960,9 @@ bool ServerInstance::isJavaMajorCompatible(int requiredVersion, int detectedVers
         && (requiredVersion == 0 || detectedVersion == requiredVersion);
 }
 
-bool ServerInstance::installCompatibleJava(int requiredVersion)
+bool ServerInstance::installCompatibleJava(int requiredVersion,
+                                           bool startAfterInstall,
+                                           bool prepareServerAfterInstall)
 {
     if (m_javaInstallTask || requiredVersion <= 0) {
         return false;
@@ -842,12 +989,17 @@ bool ServerInstance::installCompatibleJava(int requiredVersion)
                 appendLog(line);
                 emit outputReceived(line);
             });
-    connect(installTask.get(), &Task::succeeded, this, [this, installTask] {
+    connect(installTask.get(), &Task::succeeded, this,
+            [this, installTask, startAfterInstall, prepareServerAfterInstall] {
         m_javaPath = installTask->javaPath();
         appendLog(tr("[JAVA] Managed Java installed at %1").arg(m_javaPath));
         m_javaInstallTask.reset();
         setStatus(ServerStatus::Stopped);
-        QTimer::singleShot(0, this, [this] { start(); });
+        if (prepareServerAfterInstall) {
+            QTimer::singleShot(0, this, [this] { prepareServerSoftware(); });
+        } else if (startAfterInstall) {
+            QTimer::singleShot(0, this, [this] { start(); });
+        }
     });
     connect(installTask.get(), &Task::failed, this, [this](const QString &reason) {
         const QString message = tr("Automatic Java installation failed: %1").arg(reason);
@@ -868,6 +1020,34 @@ bool ServerInstance::installCompatibleJava(int requiredVersion)
 bool ServerInstance::addMods(const QStringList &paths, QString *error)
 {
     return addContentFiles(paths, error);
+}
+
+bool ServerInstance::invalidateContentCaches(QString *error) const
+{
+    if (contentType() != ServerContentType::Mod) {
+        return true;
+    }
+    const QStringList caches{
+        QDir(modsDirectory()).filePath(QStringLiteral(".connector")),
+        QDir(m_serverDirectory).filePath(QStringLiteral(".fabric/processedMods")),
+    };
+    for (const QString &path : caches) {
+        const QFileInfo info(path);
+        if (!info.exists() && !info.isSymLink()) {
+            continue;
+        }
+        const bool removed = info.isSymLink() || !info.isDir()
+            ? QFile::remove(path)
+            : QDir(path).removeRecursively();
+        if (!removed) {
+            if (error) {
+                *error = tr("Could not clear the generated mod cache '%1'.")
+                             .arg(QFileInfo(path).fileName());
+            }
+            return false;
+        }
+    }
+    return true;
 }
 
 bool ServerInstance::addContentFiles(const QStringList &paths, QString *error)
@@ -901,6 +1081,10 @@ bool ServerInstance::addContentFiles(const QStringList &paths, QString *error)
             }
             return false;
         }
+    }
+
+    if (!invalidateContentCaches(error)) {
+        return false;
     }
 
     const QString destinationDirectory = contentDirectory();
@@ -1153,9 +1337,15 @@ void ServerInstance::onProcessFinished(int exitCode, QProcess::ExitStatus exitSt
         const bool incompatibleJava =
             details.contains(QStringLiteral("UnsupportedClassVersionError"), Qt::CaseInsensitive)
             || details.contains(QStringLiteral("class file version"), Qt::CaseInsensitive);
+        const bool unrecognizedJvmOption =
+            details.contains(QStringLiteral("Unrecognized VM option"), Qt::CaseInsensitive)
+            || details.contains(QStringLiteral("Unrecognized option"), Qt::CaseInsensitive);
         const QString message = incompatibleJava
             ? tr("The server exited because the selected Java runtime is incompatible with this Minecraft or loader version. "
                  "Choose the required Java version or enable automatic Java downloads.")
+            : unrecognizedJvmOption
+            ? tr("The server exited because a supplied JVM option is not supported by the selected Java runtime. "
+                 "Check user_jvm_args.txt and the [JVM] launch log lines for the filtered option.")
             : tr("The server process exited before reporting that it was ready (exit code %1).").arg(exitCode);
         appendLog("[ERROR] " + message);
         emit serverError(message);
@@ -1181,6 +1371,16 @@ void ServerInstance::onProcessFinished(int exitCode, QProcess::ExitStatus exitSt
 void ServerInstance::onProcessError(QProcess::ProcessError error)
 {
     m_startupTimeoutTimer.stop();
+
+    // QProcess can report a process error while a server is already being
+    // stopped (for example when the JVM closes its pipes before the wrapper
+    // process finishes). That is part of the requested shutdown, not a server
+    // crash, and must not briefly put the server into the Error state.
+    if (m_status == ServerStatus::Stopping) {
+        appendLog(tr("[INFO] Server process reported an expected shutdown-time process event."));
+        return;
+    }
+
     setStatus(ServerStatus::Error);
 
     QString errorMsg;

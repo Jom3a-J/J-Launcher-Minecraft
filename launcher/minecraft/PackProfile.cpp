@@ -42,6 +42,7 @@
 #include <QDebug>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QSaveFile>
@@ -283,6 +284,27 @@ bool PackProfile::save_internal()
 {
     qDebug() << d->m_instance->name() << "|" << "Component list save performed now";
     auto filename = componentsFilePath();
+
+    // Imports are built in instances/.tmp and then moved into their final
+    // location. A PackProfile owned by the import task can outlive that move,
+    // leaving a deferred save timer pointing at the old staging path. Do not
+    // turn that normal hand-off into a critical error or retry forever; the
+    // published instance is reloaded and saved from its final path.
+    const QString normalizedRoot = QDir::fromNativeSeparators(
+        QDir::cleanPath(d->m_instance->instanceRoot()));
+    const bool isMissingStagingRoot =
+        !QFileInfo::exists(d->m_instance->instanceRoot())
+        && normalizedRoot.contains(QStringLiteral("/.tmp/"));
+    if (isMissingStagingRoot) {
+        qCDebug(instanceProfileC)
+            << d->m_instance->name()
+            << "| Skipping deferred component save for finalized staging path"
+            << filename;
+        d->dirty = false;
+        d->m_saveTimer.stop();
+        return true;
+    }
+
     if (savePackProfile(filename, d->components)) {
         d->dirty = false;
         return true;

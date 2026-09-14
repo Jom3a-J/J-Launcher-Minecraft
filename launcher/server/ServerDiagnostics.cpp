@@ -65,6 +65,8 @@ ServerCrashCause ServerDiagnostics::classifyCrash(const QString& log)
     if (lower.contains("unsupportedclassversionerror")
         || lower.contains("requires the use of java")
         || lower.contains("class file version")
+        || lower.contains("unrecognized vm option")
+        || lower.contains("unrecognized option")
         || lower.contains("failed to start server. is java installed")) {
         return ServerCrashCause::JavaVersion;
     }
@@ -89,6 +91,8 @@ ServerCrashCause ServerDiagnostics::classifyCrash(const QString& log)
         || lower.contains("duplicate mods found")
         || (lower.contains("cannot load class")
             && lower.contains("environment type server"))
+        || (lower.contains("attempted to load class")
+            && lower.contains("invalid dist dedicated_server"))
         || (lower.contains("requires version") && lower.contains("missing"))) {
         return ServerCrashCause::Content;
     }
@@ -178,6 +182,11 @@ QStringList ServerDiagnostics::suspectedModIds(const QString& log)
             QRegularExpression::CaseInsensitiveOption),
         QRegularExpression(
             QStringLiteral(R"(mixin[^\r\n]*?\bfrom mod\s+['\"]?([a-z0-9_.-]+))"),
+            QRegularExpression::CaseInsensitiveOption),
+        // Forge mod-loading crash reports identify the failing mod in a
+        // section heading such as "-- MOD ruokmod --".
+        QRegularExpression(
+            QStringLiteral(R"((?:^|[\r\n])--\s*MOD\s+([a-z0-9_.-]+)\s*--(?:[\r\n]|$))"),
             QRegularExpression::CaseInsensitiveOption),
     };
     for (const QRegularExpression& pattern : patterns) {
