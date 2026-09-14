@@ -66,8 +66,15 @@ ecm_add_test(XmlLogs_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR
 
 add_executable(FakeMinecraftServer server/FakeMinecraftServer.cpp)
 
-ecm_add_test(ServerManager_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
-    TEST_NAME ServerManager)
+add_executable(ServerManager ServerManager_test.cpp)
+target_link_libraries(ServerManager Launcher_logic Qt${QT_VERSION_MAJOR}::Test)
+target_compile_definitions(ServerManager PRIVATE QT_FORCE_ASSERTS)
+ecm_mark_nongui_executable(ServerManager)
+ecm_mark_as_test(ServerManager)
+add_test(NAME ServerManager COMMAND ${CMAKE_COMMAND}
+    "-DTEST_EXECUTABLE=$<TARGET_FILE:ServerManager>"
+    "-DTEST_LOG=$<TARGET_FILE_DIR:ServerManager>/ServerManager-test-output.txt"
+    -P "${CMAKE_CURRENT_SOURCE_DIR}/RunQtTest.cmake")
 add_dependencies(ServerManager FakeMinecraftServer)
 
 ecm_add_test(ServerMemory_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
