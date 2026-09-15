@@ -203,16 +203,22 @@ jobs:
           }
 
           $qtPrefix = Join-Path $env:QT_ROOT "$env:QT_VERSION\msvc2022_64"
-          & .\scripts\phase9-windows-preflight.ps1 `
-              -BuildDirectory $env:BUILD_DIRECTORY `
-              -OutputDirectory $env:PREFLIGHT_DIRECTORY `
-              -QtRoot $qtPrefix `
-              -CMakeToolchainFile .\cmake\vcpkg\scripts\buildsystems\vcpkg.cmake `
-              -Generator 'Ninja Multi-Config' `
-              -ExpectedTag $env:RELEASE_TAG `
-              -ReleaseStage $env:RELEASE_STAGE `
-              -CurseForgeApiKey $env:CURSEFORGE_API_KEY `
-              -ParallelJobs 2
+          $preflightScript = '.\scripts\phase9-windows-preflight.ps1'
+          $preflightArguments = @{
+              BuildDirectory = $env:BUILD_DIRECTORY
+              OutputDirectory = $env:PREFLIGHT_DIRECTORY
+              QtRoot = $qtPrefix
+              CMakeToolchainFile = '.\cmake\vcpkg\scripts\buildsystems\vcpkg.cmake'
+              Generator = 'Ninja Multi-Config'
+              ExpectedTag = $env:RELEASE_TAG
+              ReleaseStage = $env:RELEASE_STAGE
+              ParallelJobs = 2
+          }
+          $preflightCommand = Get-Command -Name $preflightScript
+          if ($preflightCommand.Parameters.ContainsKey('CurseForgeApiKey')) {
+              $preflightArguments.CurseForgeApiKey = $env:CURSEFORGE_API_KEY
+          }
+          & $preflightScript @preflightArguments
 
       - name: Check out release tooling from the workflow revision
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
