@@ -26,6 +26,8 @@ std::pair<Upload::Ptr, QByteArray*> ApiUpload::makeByteArray(QUrl url, QByteArra
 {
     auto [up, response] = Upload::makeByteArray(url, m_post_data);
     up->addHeaderProxy(std::make_unique<ApiHeaderProxy>());
+    // API calls are latency critical: they must not queue behind bulk file transfers.
+    up->setLatencyCritical(true);
     return { up, response };
 }
 

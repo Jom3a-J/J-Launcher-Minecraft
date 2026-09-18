@@ -145,7 +145,18 @@ void ConcurrentTask::executeNextSubTask()
         return;
     }
 
-    startSubTask(m_queue.dequeue());
+    auto next = takeNextSubTask();
+    if (!next) {
+        // The subclass deferred this round; it will drive us again when it can.
+        return;
+    }
+
+    startSubTask(next);
+}
+
+Task::Ptr ConcurrentTask::takeNextSubTask()
+{
+    return m_queue.dequeue();
 }
 
 void ConcurrentTask::startSubTask(Task::Ptr next)

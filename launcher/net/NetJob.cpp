@@ -46,14 +46,24 @@
 #include "ui/dialogs/NetworkJobFailedDialog.h"
 #endif
 
-NetJob::NetJob(QString job_name, QNetworkAccessManager* network, int max_concurrent) : ConcurrentTask(job_name), m_network(network)
+NetJob::NetJob(QString job_name, QNetworkAccessManager* network, int max_concurrent, Net::HostScheduler* scheduler)
+    : ConcurrentTask(job_name), m_network(network), m_scheduler(scheduler ? scheduler : Net::HostScheduler::global())
 {
-#if defined(LAUNCHER_APPLICATION)
-    if (APPLICATION_DYN && max_concurrent < 0)
-        max_concurrent = APPLICATION->settings()->get("NumberOfConcurrentDownloads").toInt();
-#endif
-    if (max_concurrent > 0)
-        setMaxConcurrent(max_concurrent);
+    // Admission is decided per host by the scheduler. The job's own width only has to be wide
+    // enough not to be the binding constraint; callers that pass an explicit value still win.
+    setMaxConcurrent(max_concurrent > 0 ? max_concurrent : Net::HostScheduler::GlobalCap);
+
+    m_state_flush.setSingleShot(true);
+    m_state_flush.setTimerType(Qt::CoarseTimer);
+    connect(&m_state_flush, &QTimer::timeout, this, [this] { emitState(m_queue.isEmpty() && m_doing.isEmpty()); });
+
+    connect(m_scheduler, &Net::HostScheduler::capacityAvailable, this, &NetJob::onCapacityAvailable);
+}
+
+NetJob::~NetJob()
+{
+    // Nothing else can report these requests as finished any more.
+    releaseAllPermits(Net::HostOutcome::Aborted);
 }
 
 auto NetJob::addNetAction(Net::NetRequest::Ptr action) -> bool
@@ -61,12 +71,22 @@ auto NetJob::addNetAction(Net::NetRequest::Ptr action) -> bool
     action->setNetwork(m_network);
 
     addTask(action);
+    m_admission_blocked = false;
 
     return true;
 }
 
+void NetJob::executeTask()
+{
+    // One kick is enough: executeNextSubTask() posts itself again for as long as it keeps being
+    // admitted, so there is no need to queue one invocation per concurrency slot.
+    QMetaObject::invokeMethod(this, &NetJob::executeNextSubTask, Qt::QueuedConnection);
+}
+
 void NetJob::executeNextSubTask()
 {
+    m_capacity_wakeup_pending = false;
+
     // We're finished, check for failures and retry if we can (up to 3 times)
     if (isRunning() && m_queue.isEmpty() && m_doing.isEmpty() && !m_failed.isEmpty() && m_try < 3) {
         m_try += 1;
@@ -80,7 +100,138 @@ void NetJob::executeNextSubTask()
             return true;
         });
     }
+
+    const auto doing_before = m_doing.count();
     ConcurrentTask::executeNextSubTask();
+
+    // One wake-up can cover several freed permits, so keep filling the pipeline until admission
+    // stops granting or the queue runs dry.
+    if (m_doing.count() > doing_before && !m_queue.isEmpty()) {
+        QMetaObject::invokeMethod(this, &NetJob::executeNextSubTask, Qt::QueuedConnection);
+    }
+}
+
+Task::Ptr NetJob::takeNextSubTask()
+{
+    if (!m_scheduler) {
+        // The injected scheduler outlived its usefulness; fall back to plain FIFO rather than
+        // stalling the job forever.
+        return ConcurrentTask::takeNextSubTask();
+    }
+
+    // A queue of thousands of files is normal, so do not rescan it while the scheduler is known
+    // to have nothing for us. The flag is cleared whenever capacity or the queue changes, and it
+    // is ignored while nothing is running so a missed wake-up can never stall the job for good.
+    if (m_admission_blocked && !m_doing.isEmpty())
+        return nullptr;
+
+    QSet<QString> refusedHosts;
+    for (int i = 0; i < m_queue.size(); i++) {
+        auto* request = dynamic_cast<Net::NetRequest*>(m_queue.at(i).get());
+        if (!request) {
+            // Not a network request, so there is nothing to admit: run it like ConcurrentTask would.
+            m_admission_blocked = false;
+            return m_queue.takeAt(i);
+        }
+
+        const QUrl url = request->url();
+        // One refusal per host is enough; the answer cannot change mid-scan.
+        if (refusedHosts.contains(Net::HostScheduler::hostKey(url)))
+            continue;
+
+        const auto permit = m_scheduler->tryAcquire(url, request->isLatencyCritical());
+        if (permit == Net::HostScheduler::InvalidPermit) {
+            // Skip past saturated or cooling down hosts instead of letting the head of the queue
+            // stall requests to hosts that still have capacity.
+            refusedHosts.insert(Net::HostScheduler::hostKey(url));
+            continue;
+        }
+
+        auto task = m_queue.takeAt(i);
+        m_permits.insert(task.get(), permit);
+        m_admission_blocked = false;
+
+        // Both connections are torn down again by ConcurrentTask::subTaskFinished(), which
+        // disconnects everything from the request to this job.
+        auto* admitted = task.get();
+        connect(request, &Net::NetRequest::rateLimited, this, [this](const QUrl& url, qint64 retryAfterSeconds) {
+            if (m_scheduler)
+                m_scheduler->reportRateLimited(url, retryAfterSeconds);
+        });
+        connect(request, &Net::NetRequest::redirectedToNewHost, this, [this, admitted](const QUrl& url) {
+            const auto held = m_permits.value(admitted, Net::HostScheduler::InvalidPermit);
+            if (held != Net::HostScheduler::InvalidPermit && m_scheduler)
+                m_scheduler->migratePermit(held, url);
+        });
+
+        return task;
+    }
+
+    // Nothing admissible right now; the requests stay queued, so the denominator is unchanged.
+    m_admission_blocked = true;
+    return nullptr;
+}
+
+void NetJob::onCapacityAvailable()
+{
+    m_admission_blocked = false;
+
+    if (m_capacity_wakeup_pending || !isRunning() || m_queue.isEmpty())
+        return;
+    if (m_doing.count() >= m_total_max_size)
+        return;
+
+    m_capacity_wakeup_pending = true;
+    QMetaObject::invokeMethod(this, &NetJob::executeNextSubTask, Qt::QueuedConnection);
+}
+
+Net::HostOutcome NetJob::outcomeFor(Task* task, TaskStepState state)
+{
+    if (state == TaskStepState::Succeeded)
+        return Net::HostOutcome::Success;
+
+    auto* request = dynamic_cast<Net::NetRequest*>(task);
+    if (!request)
+        return Net::HostOutcome::Failure;
+
+    // 429/503 is reported through NetRequest::rateLimited() the moment it is seen, so it is
+    // deliberately not classified again here: doing both would penalise the host twice.
+    switch (request->error()) {
+        case QNetworkReply::RemoteHostClosedError:
+        case QNetworkReply::ConnectionRefusedError:
+            return Net::HostOutcome::ConnectionReset;
+        case QNetworkReply::OperationCanceledError:
+            return Net::HostOutcome::Aborted;
+        default:
+            return Net::HostOutcome::Failure;
+    }
+}
+
+void NetJob::subTaskFinished(Task::Ptr task, TaskStepState state)
+{
+    releasePermit(task.get(), outcomeFor(task.get(), state));
+
+    ConcurrentTask::subTaskFinished(task, state);
+}
+
+void NetJob::releasePermit(Task* task, Net::HostOutcome outcome)
+{
+    const auto permit = m_permits.take(task);
+    if (permit == Net::HostScheduler::InvalidPermit)
+        return;  // never held one, or it was already given back
+    if (m_scheduler)
+        m_scheduler->release(permit, outcome);
+}
+
+void NetJob::releaseAllPermits(Net::HostOutcome outcome)
+{
+    const auto permits = m_permits;
+    m_permits.clear();
+    if (!m_scheduler)
+        return;
+    for (const auto permit : permits) {
+        m_scheduler->release(permit, outcome);
+    }
 }
 
 auto NetJob::size() const -> int
@@ -123,6 +274,10 @@ auto NetJob::abort() -> bool
         fullyAborted &= part->abort();
     }
 
+    // Requests that reported back during the loop above already gave their permit back; hand back
+    // whatever is left so that an abort can never leak capacity.
+    releaseAllPermits(Net::HostOutcome::Aborted);
+
     if (fullyAborted)
         emitAborted();
     else
@@ -152,9 +307,44 @@ auto NetJob::getFailedFiles() -> QList<QString>
 
 void NetJob::updateState()
 {
-    emit progress(m_done.count(), totalSize());
+    // A terminal state is always published exactly. Everything in between is coalesced to
+    // StateUpdateIntervalMs: a job with hundreds of requests otherwise spends its time rebuilding
+    // the same status string.
+    if (m_queue.isEmpty() && m_doing.isEmpty()) {
+        emitState(true);
+        return;
+    }
+
+    if (!m_state_clock.isValid() || m_state_clock.elapsed() >= StateUpdateIntervalMs) {
+        emitState(false);
+        return;
+    }
+
+    if (!m_state_flush.isActive())
+        m_state_flush.start(static_cast<int>(StateUpdateIntervalMs - m_state_clock.elapsed()));
+}
+
+void NetJob::emitState(bool terminal)
+{
+    m_state_flush.stop();
+    m_state_clock.start();
+
+    const qint64 total = totalSize();
+    qint64 current = m_done.count();
+    if (terminal) {
+        // The exact value wins, even when a retry pass pushed finished requests back into the
+        // queue and the count therefore went down.
+        m_last_reported_progress = current;
+    } else {
+        // Intermediate updates never go backwards: a retry pass makes progress plateau rather
+        // than jump back.
+        current = qMax(current, m_last_reported_progress);
+        m_last_reported_progress = current;
+    }
+
+    setProgress(current, total);
     setStatus(tr("Executing %1 task(s) (%2 out of %3 are done)")
-                  .arg(QString::number(m_doing.count()), QString::number(m_done.count()), QString::number(totalSize())));
+                  .arg(QString::number(m_doing.count()), QString::number(current), QString::number(total)));
 }
 
 bool NetJob::isOnline()

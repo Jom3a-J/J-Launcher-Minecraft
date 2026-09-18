@@ -110,6 +110,10 @@ bool containsCredentials(const QNetworkRequest& request)
 NetRequest::NetRequest() : Task()
 {
     connect(&m_retryTimer, &QTimer::timeout, this, &NetRequest::executeTask);
+
+    m_progressFlush.setSingleShot(true);
+    m_progressFlush.setTimerType(Qt::CoarseTimer);
+    connect(&m_progressFlush, &QTimer::timeout, this, &NetRequest::publishProgress);
 }
 
 QString NetRequest::formatRequestForLogging(const QNetworkRequest& request)
@@ -183,6 +187,9 @@ void NetRequest::executeTask()
 
     m_last_progress_time = m_clock.now();
     m_last_progress_bytes = 0;
+    // A retry or a redirect starts the byte counts over, so the next update must not be held
+    // back by the throttle of the attempt that was replaced.
+    resetProgressThrottle();
 
     auto rep = getReply(request);
     if (rep == nullptr)  // it failed
@@ -196,8 +203,42 @@ void NetRequest::executeTask()
     connect(rep, &QNetworkReply::readyRead, this, &NetRequest::downloadReadyRead);
 }
 
+void NetRequest::resetProgressThrottle()
+{
+    m_progressFlush.stop();
+    m_progressClock.invalidate();
+    m_pendingProgressReceived = 0;
+    m_pendingProgressTotal = -1;
+}
+
 void NetRequest::onProgress(qint64 bytesReceived, qint64 bytesTotal)
 {
+    m_pendingProgressReceived = bytesReceived;
+    m_pendingProgressTotal = bytesTotal;
+
+    // The completed value is always published exactly; everything in between is coalesced to
+    // ProgressIntervalMs so that a large job does not spend its time formatting progress strings.
+    const bool complete = bytesTotal > 0 && bytesReceived >= bytesTotal;
+    if (!complete && m_progressClock.isValid()) {
+        const qint64 elapsedSincePublish = m_progressClock.elapsed();
+        if (elapsedSincePublish < ProgressIntervalMs) {
+            if (!m_progressFlush.isActive())
+                m_progressFlush.start(static_cast<int>(ProgressIntervalMs - elapsedSincePublish));
+            return;
+        }
+    }
+
+    publishProgress();
+}
+
+void NetRequest::publishProgress()
+{
+    m_progressFlush.stop();
+    m_progressClock.start();
+
+    const qint64 bytesReceived = m_pendingProgressReceived;
+    const qint64 bytesTotal = m_pendingProgressTotal;
+
     auto now = m_clock.now();
     auto elapsed = now - m_last_progress_time;
 
@@ -228,6 +269,12 @@ void NetRequest::onProgress(qint64 bytesReceived, qint64 bytesTotal)
 
 void NetRequest::downloadError(QNetworkReply::NetworkError error)
 {
+    if (const int status = replyStatusCode(); status == 429 /* Too Many Requests */ || status == 503 /* Service Unavailable */) {
+        // Report this the moment it is seen. With AutoRetry the task keeps running through the
+        // retry delay, so waiting for it to finish would let sibling requests keep pushing.
+        emit rateLimited(m_url, retryAfterSeconds());
+    }
+
     if (error == QNetworkReply::OperationCanceledError) {
         qCCritical(logCat) << getUid().toString() << "Aborted"
                            << Privacy::sanitizeUrl(m_url);
@@ -340,10 +387,17 @@ auto NetRequest::handleRedirect() -> bool
         return false;
     }
 
+    const bool crossHost = redirect.host().compare(currentUrl.host(), Qt::CaseInsensitive) != 0;
+
     m_redirectCount++;
     m_url = redirect;
     qCDebug(logCat) << getUid().toString() << "Following redirect to"
                     << Privacy::sanitizeUrl(m_url);
+    if (crossHost) {
+        // The transfer is about to move to a different host; admission control has to follow it
+        // so the destination's limit is not bypassed by redirected traffic.
+        emit redirectedToNewHost(m_url);
+    }
     executeTask();
 
     return true;
@@ -374,6 +428,11 @@ void NetRequest::downloadFinished()
     // currently waiting for retry
     if (m_retryTimer.isActive()) {
         return;
+    }
+
+    // make sure a coalesced progress update is not lost when the transfer ends
+    if (m_progressFlush.isActive()) {
+        publishProgress();
     }
 
     // handle HTTP redirection first
@@ -481,6 +540,7 @@ void NetRequest::downloadReadyRead()
 auto NetRequest::abort() -> bool
 {
     m_state = State::AbortedByUser;
+    m_progressFlush.stop();
     if (m_reply) {
         disconnect(m_reply.get(), &QNetworkReply::errorOccurred, nullptr, nullptr);
         m_reply->abort();
@@ -496,6 +556,15 @@ int NetRequest::replyStatusCode() const
 QNetworkReply::NetworkError NetRequest::error() const
 {
     return m_reply ? m_reply->error() : QNetworkReply::NoError;
+}
+
+qint64 NetRequest::retryAfterSeconds() const
+{
+    if (!m_reply || !m_reply->hasRawHeader("Retry-After")) {
+        return -1;
+    }
+    const auto delay = Net::parseRetryAfterDelay(m_reply->rawHeader("Retry-After"), QDateTime::currentDateTimeUtc());
+    return delay ? *delay : -1;
 }
 
 QUrl NetRequest::url() const

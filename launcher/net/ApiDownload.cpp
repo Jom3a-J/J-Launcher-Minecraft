@@ -35,6 +35,8 @@ std::pair<Download::Ptr, QByteArray*> ApiDownload::makeByteArray(QUrl url, Downl
 {
     auto [dl, response] = Download::makeByteArray(std::move(url), options);
     dl->addHeaderProxy(std::make_unique<ApiHeaderProxy>());
+    // In-memory API responses are metadata the user is waiting on, not bulk content.
+    dl->setLatencyCritical(true);
     return { dl, response };
 }
 

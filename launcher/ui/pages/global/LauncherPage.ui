@@ -607,6 +607,9 @@
           </item>
           <item row="1" column="1">
            <widget class="QSpinBox" name="numberOfConcurrentDownloadsSpinBox">
+            <property name="toolTip">
+             <string>How hard to push downloads, from 1 (gentlest) to 6. At 6 every download provider is used up to its own safe maximum; lower values scale all of those limits down. No more than 24 downloads ever run at once.</string>
+            </property>
             <property name="sizePolicy">
              <sizepolicy hsizetype="Maximum" vsizetype="Fixed">
               <horstretch>0</horstretch>
@@ -621,6 +624,9 @@
             </property>
             <property name="minimum">
              <number>1</number>
+            </property>
+            <property name="maximum">
+             <number>6</number>
             </property>
            </widget>
           </item>
@@ -652,8 +658,11 @@
           </item>
           <item row="1" column="0">
            <widget class="QLabel" name="numberOfConcurrentDownloadsLabel">
+            <property name="toolTip">
+             <string>How hard to push downloads, from 1 (gentlest) to 6. At 6 every download provider is used up to its own safe maximum; lower values scale all of those limits down. No more than 24 downloads ever run at once.</string>
+            </property>
             <property name="text">
-             <string>Concurrent Download Limit:</string>
+             <string>Download Concurrency Level:</string>
             </property>
            </widget>
           </item>

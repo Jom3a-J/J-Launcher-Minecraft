@@ -69,6 +69,8 @@
 #include "minecraft/launch/ScanModFolders.h"
 #include "minecraft/launch/VerifyJavaInstall.h"
 
+#include "tasks/ConcurrentTask.h"
+
 #include "minecraft/update/AssetUpdateTask.h"
 #include "minecraft/update/FoldersTask.h"
 #include "minecraft/update/LegacyFMLLibrariesTask.h"
@@ -1123,15 +1125,21 @@ QString MinecraftInstance::getStatusbarDescription()
 
 QList<LaunchStep::Ptr> MinecraftInstance::createUpdateTask()
 {
+    // Libraries and assets are independent of each other and write into disjoint trees (the
+    // shared libraries/jar mods directories versus the assets directory), so they can run at the
+    // same time. Admission control keeps the combined request volume within provider limits.
+    auto gameFiles = makeShared<ConcurrentTask>(tr("Game files for instance %1").arg(name()), 2);
+    gameFiles->addTask(makeShared<LibrariesTask>(this));
+    gameFiles->addTask(makeShared<AssetUpdateTask>(this));
+
     return {
         // create folders
         makeShared<FoldersTask>(this),
-        // libraries download
-        makeShared<LibrariesTask>(this),
-        // FML libraries download and copy into the instance
+        // libraries and assets download
+        gameFiles,
+        // FML libraries download and copy into the instance; still sequential, and still after
+        // the libraries download, exactly as before
         makeShared<LegacyFMLLibrariesTask>(this),
-        // assets update
-        makeShared<AssetUpdateTask>(this),
     };
 }
 

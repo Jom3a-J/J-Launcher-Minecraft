@@ -110,6 +110,7 @@
 #include <minecraft/auth/AccountList.h>
 #include "icons/IconList.h"
 #include "logs/Privacy.h"
+#include "net/HostScheduler.h"
 #include "net/HttpMetaCache.h"
 
 #include "updater/ExternalUpdater.h"
@@ -1049,6 +1050,16 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
     // initialize network access and proxy setup
     {
         m_network.reset(new QNetworkAccessManager());
+
+        // Network admission control is process wide and deliberately outlives the Application:
+        // NetJobs are children of many different owners and may still be returning permits while
+        // the Application itself is being torn down.
+        Net::HostScheduler::global()->setNormalPerHostLevel(settings()->get("NumberOfConcurrentDownloads").toInt());
+        connect(settings(), &SettingsObject::SettingChanged, this, [](const Setting& setting, QVariant value) {
+            if (setting.id() == "NumberOfConcurrentDownloads")
+                Net::HostScheduler::global()->setNormalPerHostLevel(value.toInt());
+        });
+
         QString proxyTypeStr = settings()->get("ProxyType").toString();
         QString addr = settings()->get("ProxyAddr").toString();
         int port = settings()->get("ProxyPort").value<qint16>();

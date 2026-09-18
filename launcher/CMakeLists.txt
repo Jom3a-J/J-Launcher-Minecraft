@@ -121,6 +121,8 @@ set(NET_SOURCES
     net/DummySink.h
     net/FileSink.cpp
     net/FileSink.h
+    net/HostScheduler.cpp
+    net/HostScheduler.h
     net/HttpMetaCache.cpp
     net/HttpMetaCache.h
     net/MetaCacheSink.cpp
@@ -656,6 +658,8 @@ set(PRISMUPDATER_SOURCES
     net/Download.h
     net/FileSink.cpp
     net/FileSink.h
+    net/HostScheduler.cpp
+    net/HostScheduler.h
     net/HttpMetaCache.cpp
     net/HttpMetaCache.h
     net/Logging.h
