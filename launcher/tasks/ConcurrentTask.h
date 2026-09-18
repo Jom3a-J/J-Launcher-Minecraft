@@ -81,7 +81,7 @@ class ConcurrentTask : public Task {
 
     void subTaskSucceeded(Task::Ptr);
     virtual void subTaskFailed(Task::Ptr, const QString& msg);
-    void subTaskFinished(Task::Ptr, TaskStepState);
+    virtual void subTaskFinished(Task::Ptr, TaskStepState);
     void subTaskStatus(Task::Ptr task, const QString& msg);
     void subTaskDetails(Task::Ptr task, const QString& msg);
     void subTaskProgress(Task::Ptr task, qint64 current, qint64 total);
@@ -91,6 +91,15 @@ class ConcurrentTask : public Task {
     unsigned int totalSize() const { return static_cast<unsigned int>(m_queue.size() + m_doing.size() + m_done.size()); }
 
     virtual void updateState();
+
+    /*! Takes the next sub task to start out of the queue.
+     *
+     *  The default is plain FIFO. A subclass may return a null pointer to defer starting anything
+     *  (for example while it waits for admission); it is then responsible for calling
+     *  executeNextSubTask() again once it can make progress. Sub tasks that are deferred stay in
+     *  the queue, so totalSize() and the progress denominator are unaffected.
+     */
+    virtual Task::Ptr takeNextSubTask();
 
     void startSubTask(Task::Ptr task);
 

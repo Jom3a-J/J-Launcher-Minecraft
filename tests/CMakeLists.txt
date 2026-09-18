@@ -132,3 +132,13 @@ set_tests_properties(NetRequest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscree
 
 ecm_add_test(Privacy_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME Privacy)
+
+ecm_add_test(HostScheduler_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME HostScheduler)
+
+ecm_add_test(NetJobScheduling_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME NetJobScheduling)
+set_tests_properties(NetJobScheduling PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+ecm_add_test(GameUpdateTaskGraph_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME GameUpdateTaskGraph)

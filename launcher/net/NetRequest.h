@@ -39,6 +39,7 @@
 
 #pragma once
 
+#include <QElapsedTimer>
 #include <QNetworkReply>
 #include <QUrl>
 #include <QTimer>
@@ -75,17 +76,46 @@ class NetRequest : public Task {
     // automatically handle HTTP 429 Too Many Requests errors and retry
     void enableAutoRetry(bool enable);
 
+    /*! Marks this request as latency critical metadata rather than a bulk file transfer.
+     *
+     *  Latency critical requests may use the permits HostScheduler reserves for metadata and API
+     *  traffic, so a long bulk download queue cannot starve them. Host classification already
+     *  covers the known API endpoints; this is for requests whose host does not identify them.
+     */
+    void setLatencyCritical(bool latencyCritical) { m_latencyCritical = latencyCritical; }
+    bool isLatencyCritical() const { return m_latencyCritical; }
+
     QUrl url() const;
     void setUrl(QUrl url) { m_url = url; }
     static QString formatRequestForLogging(const QNetworkRequest& request);
     int replyStatusCode() const;
     QNetworkReply::NetworkError error() const;
     QString errorString() const;
+    /*! Retry-After of the last reply, in seconds, or -1 when absent or unparsable. */
+    qint64 retryAfterSeconds() const;
+
+   signals:
+    /*! The server answered 429/503 for \a url.
+     *
+     *  Emitted as soon as the status is seen, not when the task finishes: a request that retries
+     *  internally keeps running for a while, and admission control has to know straight away.
+     *  \a retryAfterSeconds is -1 when the response carried no usable Retry-After header.
+     */
+    void rateLimited(const QUrl& url, qint64 retryAfterSeconds);
+
+    /*! The request is following a redirect that moves it to \a url on a different host. */
+    void redirectedToNewHost(const QUrl& url);
 
    private:
     auto handleRedirect() -> bool;
     void handleAutoRetry(int64_t delay);
     virtual QNetworkReply* getReply(QNetworkRequest&) = 0;
+
+   protected:
+    /*! Publishes the most recent byte counts as progress and details, and restarts the throttle. */
+    void publishProgress();
+    /*! Drops any coalesced progress update without publishing it. */
+    void resetProgressThrottle();
 
    protected slots:
     void onProgress(qint64 bytesReceived, qint64 bytesTotal);
@@ -120,7 +150,15 @@ class NetRequest : public Task {
     int m_redirectCount = 0;
     bool m_redirectRejected = false;
     bool m_requestHadCredentials = false;
+    bool m_latencyCritical = false;
     QTimer m_retryTimer;
+
+    /// Progress updates are coalesced to this rate; the final value is always published exactly.
+    static constexpr int ProgressIntervalMs = 100;
+    QElapsedTimer m_progressClock;
+    QTimer m_progressFlush;
+    qint64 m_pendingProgressReceived = 0;
+    qint64 m_pendingProgressTotal = -1;
 };
 }  // namespace Net
 
