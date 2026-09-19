@@ -28,6 +28,7 @@
 #include "ui/dialogs/NewInstanceDialog.h"
 #include "ui/dialogs/ProgressDialog.h"
 #include "ui/dialogs/ResourceDownloadDialog.h"
+#include "ui/pages/modplatform/ResourcePage.h"
 #include "ui/pages/server/ServerSettingsPage.h"
 #include "minecraft/MinecraftInstance.h"
 #include "minecraft/PackProfile.h"
@@ -1470,11 +1471,20 @@ void ServerListPage::onStartServer()
                 details = logLines.constLast().trimmed();
                 details.remove(QRegularExpression("^\\[ERROR\\]\\s*"));
             }
-            QMessageBox::warning(
-                this, tr("Server Could Not Start"),
-                details.isEmpty()
-                    ? tr("The server could not be started. Open the Console tab for details.")
-                    : details);
+            const QStringList missing = missingServerDependencies(server.get());
+            if (!missing.isEmpty()) {
+                offerDependencyRepair(
+                    missing,
+                    details.isEmpty()
+                        ? tr("The server could not start because required mods are missing.")
+                        : details);
+            } else {
+                QMessageBox::warning(
+                    this, tr("Server Could Not Start"),
+                    details.isEmpty()
+                        ? tr("The server could not be started. Open the Console tab for details.")
+                        : details);
+            }
         }
     }
 }
@@ -1597,6 +1607,81 @@ void ServerListPage::onOpenFolder()
     auto server = m_serverManager->getServer(m_selectedServerId);
     if (server) {
         QDesktopServices::openUrl(QUrl::fromLocalFile(server->serverDirectory()));
+    }
+}
+
+namespace {
+// A mod's identifier inside its jar is not always what catalogs list it under:
+// "cloth-config2" is published as "Cloth Config". Searching a looser form of the
+// identifier matches far more of them. The exact identifier stays in the message
+// so the user can still confirm they picked the right mod.
+QString dependencySearchTerm(const QString &dependencyId)
+{
+    QString term = dependencyId;
+    term.replace(QLatin1Char('_'), QLatin1Char(' '));
+    term.replace(QLatin1Char('-'), QLatin1Char(' '));
+    term.remove(QRegularExpression(QStringLiteral("\\s*\\d+$")));
+    term = term.simplified();
+    // Identifiers commonly carry a suffix the catalog listing drops:
+    // "connectormod" is published as "Connector". Removing it is the difference
+    // between no results at all and the right mod ranked first.
+    static const QStringList redundantSuffixes{
+        QStringLiteral("mod"), QStringLiteral("forge"), QStringLiteral("fabric")
+    };
+    for (const QString &suffix : redundantSuffixes) {
+        if (term.size() > suffix.size() + 2 && term.endsWith(suffix)
+            && !term.endsWith(QLatin1Char(' ') + suffix)) {
+            term.chop(suffix.size());
+            term = term.simplified();
+            break;
+        }
+    }
+    return term.isEmpty() ? dependencyId : term;
+}
+}  // namespace
+
+QStringList ServerListPage::missingServerDependencies(ServerInstance *server) const
+{
+    if (!server) {
+        return {};
+    }
+    const QString root = server->serverDirectory();
+    if (!QFileInfo(QDir(root).filePath(
+                       QStringLiteral("jlauncher_derived_server.txt"))).isFile()) {
+        return {};
+    }
+    const ServerDependencyCheckResult check =
+        ServerModpackInstaller::checkServerDependencies(
+            root, server->loaderType(), server->version(), server->loaderVersion());
+    if (check.state == ServerDependencyCheckState::DefiniteFailure
+        || check.state == ServerDependencyCheckState::Unsafe) {
+        return check.missingDependencyIds;
+    }
+    return {};
+}
+
+void ServerListPage::offerDependencyRepair(const QStringList &missingIds,
+                                           const QString &introduction)
+{
+    if (missingIds.isEmpty()) {
+        return;
+    }
+    QMessageBox prompt(this);
+    prompt.setWindowTitle(tr("Missing Server Mods"));
+    prompt.setIcon(QMessageBox::Warning);
+    prompt.setText(introduction);
+    prompt.setInformativeText(
+        tr("Missing mod IDs: %1\n\n"
+           "Choose Find Missing Mods to search the same trusted catalogs. "
+           "J Launcher installs the file you pick, together with anything it "
+           "requires, into this server's mods folder.")
+            .arg(missingIds.join(QStringLiteral(", "))));
+    auto *findButton = prompt.addButton(tr("Find Missing Mods"),
+                                        QMessageBox::AcceptRole);
+    prompt.addButton(QMessageBox::Close);
+    prompt.exec();
+    if (prompt.clickedButton() == findButton) {
+        browseServerContent(dependencySearchTerm(missingIds.first()));
     }
 }
 
@@ -1768,10 +1853,37 @@ void ServerListPage::onInstallModpack()
         details += tr("\n\nCompatibility note:\n%1")
                        .arg(result.warnings.join(QStringLiteral("\n")));
     }
-    QMessageBox::information(this, tr("Modpack Ready"), details);
+    if (!result.missingDependencyIds.isEmpty()) {
+        QMessageBox ready(this);
+        ready.setWindowTitle(tr("Modpack Ready - Dependencies Needed"));
+        ready.setIcon(QMessageBox::Warning);
+        ready.setText(tr("The server was created, but required mods are missing."));
+        ready.setInformativeText(
+            details
+            + tr("\n\nMissing mod IDs: %1\nModpack source: %2\n\n"
+                 "Choose Find Missing Mods to search the same trusted catalogs. "
+                 "J Launcher will select compatible files, include their declared "
+                 "dependencies, and install them directly into this server's mods folder.")
+                  .arg(result.missingDependencyIds.join(QStringLiteral(", ")),
+                       result.provider));
+        auto *findButton = ready.addButton(tr("Find Missing Mods"),
+                                           QMessageBox::AcceptRole);
+        ready.addButton(QMessageBox::Close);
+        ready.exec();
+        if (ready.clickedButton() == findButton) {
+            browseServerContent(dependencySearchTerm(result.missingDependencyIds.first()));
+        }
+    } else {
+        QMessageBox::information(this, tr("Modpack Ready"), details);
+    }
 }
 
 void ServerListPage::onBrowseMods()
+{
+    browseServerContent();
+}
+
+void ServerListPage::browseServerContent(const QString &initialSearch)
 {
     if (!m_serverManager || m_selectedServerId.isEmpty()) {
         return;
@@ -1844,6 +1956,9 @@ void ServerListPage::onBrowseMods()
 
     ResourceDownload::ModDownloadDialog dialog(this, &serverContent, &compatibilityInstance,
                                                false, resourceType, loaderNames);
+    if (!initialSearch.trimmed().isEmpty() && dialog.selectedPage()) {
+        dialog.selectedPage()->setSearchTerm(initialSearch.trimmed());
+    }
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }
@@ -1898,6 +2013,15 @@ void ServerListPage::onBrowseMods()
     // installed files, so always bring the server views back in sync.
     refreshInstalledContent();
     refreshOverview();
+
+    // Installed mods can require further mods of their own, so recheck here
+    // rather than letting the next start attempt be the one that reports it.
+    const QStringList stillMissing = missingServerDependencies(server.get());
+    if (!stillMissing.isEmpty()) {
+        offerDependencyRepair(
+            stillMissing,
+            tr("Required mods are still missing after this installation."));
+    }
 }
 
 void ServerListPage::onAddLocalContent()

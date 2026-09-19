@@ -765,6 +765,7 @@ bool collectFabricMetadata(const QString &jarPath, const QString &temporaryRoot,
 
 bool validateFabricDependencyClosure(const QString &serverRoot,
                                      DependencyValidationFailure *failure,
+                                     QStringList *missingDependencyIds,
                                      QString *error)
 {
     if (failure) {
@@ -799,19 +800,29 @@ bool validateFabricDependencyClosure(const QString &serverRoot,
                   if (left.modId != right.modId) return left.modId < right.modId;
                   return left.dependencyId < right.dependencyId;
               });
+    // Report every unsatisfied requirement in one pass. Stopping at the first
+    // one forces the user through a separate repair round per missing mod.
+    QStringList missingDescriptions;
     for (const auto &requirement : requirements) {
         if (providedIds.contains(requirement.dependencyId)) {
             continue;
         }
+        if (missingDependencyIds
+            && !missingDependencyIds->contains(requirement.dependencyId)) {
+            missingDependencyIds->append(requirement.dependencyId);
+        }
+        missingDescriptions.append(
+            QObject::tr("Mod \"%1\" (%2) requires \"%3\", but that dependency is missing.")
+                .arg(requirement.modName, requirement.modId,
+                     requirement.dependencyId));
+    }
+    if (!missingDescriptions.isEmpty()) {
         if (failure) {
             *failure = DependencyValidationFailure::Definite;
         }
         if (error) {
-            *error = QObject::tr(
-                         "The pack does not contain a complete Fabric server. "
-                         "Mod \"%1\" (%2) requires \"%3\", but that dependency is missing.")
-                         .arg(requirement.modName, requirement.modId,
-                              requirement.dependencyId);
+            *error = QObject::tr("The pack does not contain a complete Fabric server. %1")
+                         .arg(missingDescriptions.join(QStringLiteral(" ")));
         }
         return false;
     }
@@ -1281,18 +1292,8 @@ bool collectForgeBundledMetadata(const QString &jarPath, const QString &loaderTy
     if (!collectForgeMetadata(jarPath, loaderType, providedIds, providedVersions,
                               requirements, warnings, error)) return false;
 
-    MMCZip::ArchiveReader archive(jarPath);
-    const auto metadata = archive.goToFile("META-INF/jarjar/metadata.json");
-    if (!metadata) return true;
-    QJsonParseError parseError;
-    const auto document = QJsonDocument::fromJson(metadata->readAll(), &parseError);
-    if (parseError.error != QJsonParseError::NoError || !document.isObject()
-        || !document.object().value("jars").isArray()) {
-        if (error) *error = QObject::tr("Invalid bundled dependency metadata in %1.").arg(QFileInfo(jarPath).fileName());
-        return false;
-    }
-    for (const auto &value : document.object().value("jars").toArray()) {
-        const QString path = value.toObject().value("path").toString();
+    // Extracts one embedded jar and inspects it under the same rules.
+    auto inspectEmbeddedJar = [&](const QString &path) -> bool {
         if (!isSafeRelativePath(path) || !path.endsWith(".jar", Qt::CaseInsensitive)) {
             if (failure) *failure = DependencyValidationFailure::Unsafe;
             if (error) *error = QObject::tr("Unsafe bundled dependency path in %1.").arg(QFileInfo(jarPath).fileName());
@@ -1315,9 +1316,43 @@ bool collectForgeBundledMetadata(const QString &jarPath, const QString &loaderTy
             return false;
         }
         file.close();
-        if (!collectForgeBundledMetadata(extracted, loaderType, temporaryRoot,
-                                         depth + 1, count, providedIds, providedVersions,
-                                         requirements, warnings, failure, error)) return false;
+        return collectForgeBundledMetadata(extracted, loaderType, temporaryRoot,
+                                           depth + 1, count, providedIds, providedVersions,
+                                           requirements, warnings, failure, error);
+    };
+
+    MMCZip::ArchiveReader archive(jarPath);
+    const auto metadata = archive.goToFile("META-INF/jarjar/metadata.json");
+    if (!metadata) {
+        // Not every mod ships the jarjar index. Connector, for instance, points
+        // at its embedded mod through the jar manifest instead, so the mod ids
+        // it provides stay invisible unless the folder itself is inspected -
+        // and the pack is then reported incomplete however often the user
+        // installs the very mod that is already sitting there.
+        MMCZip::ArchiveReader listing(jarPath);
+        if (!listing.collectFiles()) {
+            return true;
+        }
+        for (const QString &entry : listing.getFiles()) {
+            if (entry.startsWith(QStringLiteral("META-INF/jarjar/"), Qt::CaseInsensitive)
+                && entry.endsWith(QStringLiteral(".jar"), Qt::CaseInsensitive)
+                && !inspectEmbeddedJar(entry)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    QJsonParseError parseError;
+    const auto document = QJsonDocument::fromJson(metadata->readAll(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()
+        || !document.object().value("jars").isArray()) {
+        if (error) *error = QObject::tr("Invalid bundled dependency metadata in %1.").arg(QFileInfo(jarPath).fileName());
+        return false;
+    }
+    for (const auto &value : document.object().value("jars").toArray()) {
+        if (!inspectEmbeddedJar(value.toObject().value("path").toString())) {
+            return false;
+        }
     }
     return true;
 }
@@ -1328,6 +1363,7 @@ bool validateForgeDependencyClosure(const QString &serverRoot,
                                     const QString &loaderVersion,
                                     QStringList *warnings,
                                     DependencyValidationFailure *failure,
+                                    QStringList *missingDependencyIds,
                                     QString *error)
 {
     if (failure) {
@@ -1382,20 +1418,20 @@ bool validateForgeDependencyClosure(const QString &serverRoot,
               });
     const QString loaderName = isNeoForge ? QObject::tr("NeoForge")
                                           : QObject::tr("Forge");
+    // Collected across the whole loop so one repair round can cover every gap.
+    QStringList missingDescriptions;
     for (const ForgeDependencyRequirement &requirement : requirements) {
         const bool dependencyPresent = providedIds.contains(requirement.dependencyId);
         if (requirement.kind == ForgeDependencyKind::Required && !dependencyPresent) {
-            if (failure) {
-                *failure = DependencyValidationFailure::Definite;
+            if (missingDependencyIds
+                && !missingDependencyIds->contains(requirement.dependencyId)) {
+                missingDependencyIds->append(requirement.dependencyId);
             }
-            if (error) {
-                *error = QObject::tr(
-                             "The pack does not contain a complete %1 server. "
-                             "Mod \"%2\" (%3) requires \"%4\", but that dependency is missing.")
-                             .arg(loaderName, requirement.modName, requirement.modId,
-                                  requirement.dependencyId);
-            }
-            return false;
+            missingDescriptions.append(
+                QObject::tr("Mod \"%1\" (%2) requires \"%3\", but that dependency is missing.")
+                    .arg(requirement.modName, requirement.modId,
+                         requirement.dependencyId));
+            continue;
         }
         if (!dependencyPresent) {
             continue;
@@ -1477,6 +1513,17 @@ bool validateForgeDependencyClosure(const QString &serverRoot,
             }
             return false;
         }
+    }
+    if (!missingDescriptions.isEmpty()) {
+        if (failure) {
+            *failure = DependencyValidationFailure::Definite;
+        }
+        if (error) {
+            *error = QObject::tr("The pack does not contain a complete %1 server. %2")
+                         .arg(loaderName,
+                              missingDescriptions.join(QStringLiteral(" ")));
+        }
+        return false;
     }
     return true;
 }
@@ -1690,12 +1737,15 @@ ServerDependencyCheckResult ServerModpackInstaller::checkServerDependencies(
     const QString loader = loaderType.trimmed().toLower();
     bool valid = true;
     if (loader == QStringLiteral("fabric")) {
-        valid = validateFabricDependencyClosure(serverRoot, &failure, &result.error);
+        valid = validateFabricDependencyClosure(serverRoot, &failure,
+                                                &result.missingDependencyIds,
+                                                &result.error);
     } else if (loader == QStringLiteral("forge")
                || loader == QStringLiteral("neoforge")) {
         valid = validateForgeDependencyClosure(
             serverRoot, loader, minecraftVersion, loaderVersion,
-            &result.warnings, &failure, &result.error);
+            &result.warnings, &failure, &result.missingDependencyIds,
+            &result.error);
     }
     if (valid) {
         result.state = ServerDependencyCheckState::Compatible;
@@ -2155,6 +2205,7 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
     const ServerDependencyCheckResult dependencyCheck = checkServerDependencies(
         staging.path(), profile.loaderType, profile.minecraftVersion,
         profile.loaderVersion);
+    result.missingDependencyIds = dependencyCheck.missingDependencyIds;
     for (const QString &warning : dependencyCheck.warnings) {
         if (!result.warnings.contains(warning)) result.warnings.append(warning);
     }

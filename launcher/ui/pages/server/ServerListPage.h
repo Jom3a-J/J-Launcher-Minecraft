@@ -127,6 +127,10 @@ private:
                                    const QString &targetBuild = QString());
     void populateServerFileItem(class QTreeWidgetItem *item);
     void appendConsoleOutput(const QString &text);
+    void browseServerContent(const QString &initialSearch = QString());
+    QStringList missingServerDependencies(ServerInstance *server) const;
+    void offerDependencyRepair(const QStringList &missingIds,
+                               const QString &introduction);
     QString getStatusString(int status) const;
     static bool copyDirectory(const QString &source, const QString &destination, QString *error,
                               const QString &excludedTopLevel = QString());
