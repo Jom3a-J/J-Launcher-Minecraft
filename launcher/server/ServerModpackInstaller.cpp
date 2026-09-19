@@ -1233,6 +1233,12 @@ bool collectForgeMetadata(const QString &jarPath, const QString &loaderType,
                 return false;
             }
 
+            // The Java runtime is chosen by the launcher, not installed as a
+            // mod, so a requirement on it must never reach the missing list.
+            if (dependencyId == QStringLiteral("java")) {
+                continue;
+            }
+
             QString versionRange;
             if (const auto rangeValue = (*dependency)["versionRange"].as_string()) {
                 versionRange = QString::fromStdString(rangeValue->get()).trimmed();
@@ -1385,10 +1391,17 @@ bool validateForgeDependencyClosure(const QString &serverRoot,
     }
     const QString loaderId = isNeoForge ? QStringLiteral("neoforge")
                                         : QStringLiteral("forge");
-    QSet<QString> providedIds{ QStringLiteral("minecraft"), loaderId };
+    // The running loader satisfies both loader ids: NeoForge 1.20.1 is a Forge
+    // fork, and mods on it still declare a "forge" dependency. Reporting the
+    // other name as a missing mod sends the user hunting for something that is
+    // not a downloadable mod at all.
+    const QString otherLoaderId = isNeoForge ? QStringLiteral("forge")
+                                             : QStringLiteral("neoforge");
+    QSet<QString> providedIds{ QStringLiteral("minecraft"), loaderId, otherLoaderId };
     QHash<QString, QString> providedVersions{
         { QStringLiteral("minecraft"), minecraftVersion },
         { loaderId, loaderVersion },
+        { otherLoaderId, loaderVersion },
     };
     QList<ForgeDependencyRequirement> requirements;
     QTemporaryDir bundledFiles;

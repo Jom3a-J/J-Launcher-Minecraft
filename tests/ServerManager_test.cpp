@@ -1997,6 +1997,57 @@ class ServerManagerTest : public QObject {
         QCOMPARE(manager.serverCount(), 2);
     }
 
+    void treatsRuntimeRequirementsAsProvidedOnNeoForge()
+    {
+        // "java" is chosen by the launcher and NeoForge answers to "forge" as
+        // well, so neither is a mod anyone could download. Listing them as
+        // missing sends the user looking for something that does not exist.
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(writeForgeModJar(
+            QDir(gameRoot).filePath("mods/example.jar"),
+            "META-INF/neoforge.mods.toml",
+            QByteArrayLiteral(
+                "modLoader=\"javafml\"\n"
+                "loaderVersion=\"[4,)\"\n"
+                "license=\"Test\"\n"
+                "[[mods]]\n"
+                "modId=\"example\"\n"
+                "version=\"1.0.0\"\n"
+                "displayName=\"Example\"\n"
+                "[[dependencies.example]]\n"
+                "modId=\"java\"\n"
+                "type=\"required\"\n"
+                "versionRange=\"[21,)\"\n"
+                "ordering=\"NONE\"\n"
+                "side=\"BOTH\"\n"
+                "[[dependencies.example]]\n"
+                "modId=\"forge\"\n"
+                "type=\"required\"\n"
+                "versionRange=\"[21.1,)\"\n"
+                "ordering=\"NONE\"\n"
+                "side=\"BOTH\"\n")));
+        QTemporaryDir serverData;
+        QVERIFY(serverData.isValid());
+        ServerManager manager(serverData.path());
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.21.1", {}, {}, "21.1.0", {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Runtime Requirements");
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        QVERIFY2(result.missingDependencyIds.isEmpty(),
+                 qPrintable(result.missingDependencyIds.join(", ")));
+        const auto server = manager.getServer(result.serverId);
+        QVERIFY(server);
+        const auto check = ServerModpackInstaller::checkServerDependencies(
+            server->serverDirectory(), "neoforge", "1.21.1", "21.1.0");
+        QVERIFY2(check.missingDependencyIds.isEmpty(),
+                 qPrintable(check.missingDependencyIds.join(", ")));
+    }
+
     void recognizesForgeEmbeddedJarWithoutIndex()
     {
         // Some mods, Connector among them, embed the jar that declares their mod
