@@ -35,8 +35,12 @@
 #include "minecraft/mod/ModFolderModel.h"
 #include "modplatform/flame/FlameAPI.h"
 #include "BuildConfig.h"
+#include "FileSystem.h"
 #include "InstanceList.h"
+#include "InstanceTask.h"
 #include "QObjectPtr.h"
+#include "server/ServerMemory.h"
+#include "settings/INIFile.h"
 #include "settings/INISettingsObject.h"
 #include "tasks/ConcurrentTask.h"
 #include "logs/Privacy.h"
@@ -1611,6 +1615,21 @@ void ServerListPage::onOpenFolder()
 }
 
 namespace {
+// The pack is downloaded into a staging folder rather than an instance, so the
+// memory hint the pack author exported has to be read from the staged
+// instance.cfg instead of a live instance's settings.
+int stagedProviderRecommendation(const QString &instanceRoot)
+{
+    INIFile config;
+    if (!config.loadFile(FS::PathCombine(instanceRoot, QStringLiteral("instance.cfg")))) {
+        return 0;
+    }
+    return ServerMemory::resolveProviderRecommendation(
+        config.get(QStringLiteral("OverrideMemory"), false).toBool(),
+        config.get(QStringLiteral("MaxMemAlloc"), 0).toInt(),
+        config.get(QStringLiteral("ExportRecommendedRAM"), 0).toInt());
+}
+
 // A mod's identifier inside its jar is not always what catalogs list it under:
 // "cloth-config2" is published as "Cloth Config". Searching a looser form of the
 // identifier matches far more of them. The exact identifier stays in the message
@@ -1700,57 +1719,56 @@ void ServerListPage::onInstallModpack()
     }
     APPLICATION->settings()->set("LastUsedGroupForNewInstance", dialog.instGroup());
 
-    InstanceTask *creationTask = dialog.extractTask();
+    unique_qobject_ptr<InstanceTask> creationTask(dialog.extractTask());
     if (!creationTask) {
         QMessageBox::warning(this, tr("Create from Modpack"),
                              tr("No modpack was selected."));
         return;
     }
 
-    QSet<QString> existingInstanceIds;
-    for (int index = 0; index < APPLICATION->instances()->count(); ++index) {
-        existingInstanceIds.insert(APPLICATION->instances()->at(index)->id());
-    }
-
-    QString installedInstanceId;
-    const QMetaObject::Connection selectionConnection =
-        connect(APPLICATION->instances(), &InstanceList::instanceSelectRequest,
-                this, [&installedInstanceId](const QString &id) {
-                    installedInstanceId = id;
-                });
-    unique_qobject_ptr<Task> task(
-        APPLICATION->instances()->wrapInstanceTask(creationTask));
-    ProgressDialog progress(this);
-    progress.setWindowTitle(tr("Downloading Modpack and Creating Instance"));
-    progress.setSkipButton(true, tr("Abort"));
-    progress.execWithTask(task.get());
-    disconnect(selectionConnection);
-
-    if (!task->wasSuccessful() || installedInstanceId.isEmpty()) {
+    // The pack is downloaded into a staging folder and the server is built
+    // straight from it. Nothing is committed to the instance list, so making a
+    // server no longer makes a client instance the user did not ask for.
+    const QString stagingPath =
+        APPLICATION->instances()->getStagedInstancePath(creationTask->targetDir());
+    if (stagingPath.isEmpty()) {
         QMessageBox::critical(
             this, tr("Create from Modpack"),
-            task->failReason().isEmpty()
-                ? tr("The modpack instance could not be created.")
-                : tr("The modpack instance could not be created:\n%1")
-                      .arg(Privacy::sanitizeText(task->failReason())));
+            tr("A temporary folder for the download could not be created."));
         return;
     }
+    creationTask->setStagingPath(stagingPath);
+    creationTask->setParentSettings(APPLICATION->settings());
 
-    auto *instance = dynamic_cast<MinecraftInstance *>(
-        APPLICATION->instances()->getInstanceById(installedInstanceId));
-    if (!instance) {
-        if (!existingInstanceIds.contains(installedInstanceId)) {
-            APPLICATION->instances()->trashInstance(installedInstanceId);
+    const QString packName = creationTask->name();
+
+    int progressResult = QDialog::Rejected;
+    {
+        ProgressDialog progress(this);
+        progress.setWindowTitle(tr("Downloading Modpack"));
+        progress.setSkipButton(true, tr("Abort"));
+        progressResult = progress.execWithTask(creationTask.get());
+    }
+
+    if (!creationTask->wasSuccessful()) {
+        const QString reason = creationTask->failReason();
+        FS::deletePath(stagingPath);
+        if (reason.isEmpty() && progressResult == QDialog::Rejected) {
+            // Aborted from the progress dialog. The user knows; nothing was kept.
+            return;
         }
         QMessageBox::critical(
             this, tr("Create from Modpack"),
-            tr("The downloaded pack is not a Minecraft instance."));
+            reason.isEmpty()
+                ? tr("The modpack could not be downloaded.")
+                : tr("The modpack could not be downloaded:\n%1")
+                      .arg(Privacy::sanitizeText(reason)));
         return;
     }
 
     QString selectedServerRoot;
     const QStringList serverRootChoices =
-        ServerModpackInstaller::publishedServerRootChoices(instance->instanceRoot());
+        ServerModpackInstaller::publishedServerRootChoices(stagingPath);
     if (serverRootChoices.size() > 1) {
         bool accepted = false;
         selectedServerRoot = QInputDialog::getItem(
@@ -1758,28 +1776,33 @@ void ServerListPage::onInstallModpack()
             tr("This pack contains multiple possible server folders. Choose the folder containing the server files:"),
             serverRootChoices, 0, false, &accepted);
         if (!accepted || selectedServerRoot.isEmpty()) {
+            FS::deletePath(stagingPath);
             QMessageBox::information(
-                this, tr("Server Creation Paused"),
-                tr("No server was created. The downloaded modpack instance was kept so you can try again without downloading it again."));
+                this, tr("Server Creation Cancelled"),
+                tr("No server was created, and the downloaded files were removed."));
             return;
         }
     }
 
     const ServerModpackInstallResult result =
         ServerModpackInstaller::createMatchingServer(
-            m_serverManager, *instance, instance->name() + tr(" Server"),
+            m_serverManager,
+            ServerModpackInstaller::profileFromInstanceRoot(stagingPath),
+            stagingPath,
+            ServerModpackInstaller::gameRootForInstanceRoot(stagingPath),
+            packName + tr(" Server"),
+            stagedProviderRecommendation(stagingPath), 0,
             selectedServerRoot);
+
+    // The staged pack has served its purpose either way: on success its files
+    // are already copied into the server, on failure there is nothing to keep.
+    FS::deletePath(stagingPath);
     if (!result.isValid()) {
         const QString reason = Privacy::sanitizeText(result.error);
         const QString recovery =
             result.failureCategory == ServerModpackFailureCategory::CompatibilityMetadata
             ? tr("Try another pack version or report this problem to the pack author.")
             : tr("Review the reason, then try again.");
-        const bool wasNewInstance = !existingInstanceIds.contains(installedInstanceId);
-        if (wasNewInstance) {
-            APPLICATION->instances()->trashInstance(installedInstanceId);
-        }
-
         QMessageBox failureDialog(this);
         failureDialog.setWindowTitle(tr("Create from Modpack"));
         failureDialog.setIcon(QMessageBox::Critical);
@@ -1788,9 +1811,7 @@ void ServerListPage::onInstallModpack()
         failureDialog.setInformativeText(
             tr("Reason:\n%1\n\n%2\n\n%3")
                 .arg(reason, recovery,
-                     wasNewInstance
-                         ? tr("The newly downloaded instance was moved to the trash.")
-                         : tr("The existing instance was kept.")));
+                     tr("The downloaded files were removed. Nothing was added to your instances.")));
         failureDialog.setDetailedText(
             tr("Category: %1\nStage: %2")
                 .arg(serverModpackFailureCategoryName(result.failureCategory),
@@ -1809,10 +1830,10 @@ void ServerListPage::onInstallModpack()
     const bool softwarePreparationAccepted =
         !neededServerSoftware || createdServer->prepareServerSoftware();
 
-    QString details = tr("Created client instance \"%1\" and matching stopped server "
-                         "\"%2\" with the same Minecraft and loader versions.")
-                          .arg(instance->name(),
-                               m_serverManager->getServer(result.serverId)->name());
+    QString details = tr("Created stopped server \"%1\" from modpack \"%2\". "
+                         "No client instance was created.")
+                          .arg(m_serverManager->getServer(result.serverId)->name(),
+                               packName);
     if (result.hasDedicatedServerPack
         && result.provider.startsWith(QStringLiteral("ftb"), Qt::CaseInsensitive)) {
         details += tr("\n\nServer source: prepared by the official FTB server installer.");

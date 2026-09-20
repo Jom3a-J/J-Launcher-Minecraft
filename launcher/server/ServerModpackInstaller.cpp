@@ -1905,6 +1905,18 @@ ServerModpackProfile ServerModpackInstaller::inspect(const MinecraftInstance &in
     return savedProfile.isValid() ? savedProfile : resolvedProfile;
 }
 
+QString ServerModpackInstaller::gameRootForInstanceRoot(const QString &instanceRoot)
+{
+    // Same rule MinecraftInstance uses, so a pack that was never registered as
+    // an instance still resolves to the folder its files actually landed in.
+    const QFileInfo mcDir(QDir(instanceRoot).filePath(QStringLiteral("minecraft")));
+    const QFileInfo dotMcDir(QDir(instanceRoot).filePath(QStringLiteral(".minecraft")));
+    if (dotMcDir.exists() && !mcDir.exists()) {
+        return dotMcDir.filePath();
+    }
+    return mcDir.filePath();
+}
+
 ServerModpackProfile ServerModpackInstaller::profileFromInstanceRoot(
     const QString &instanceRoot)
 {

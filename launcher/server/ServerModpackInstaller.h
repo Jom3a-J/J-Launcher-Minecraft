@@ -80,6 +80,7 @@ public:
                                                    const QString &quiltVersion);
     static ServerModpackProfile inspect(const MinecraftInstance &instance);
     static ServerModpackProfile profileFromInstanceRoot(const QString &instanceRoot);
+    static QString gameRootForInstanceRoot(const QString &instanceRoot);
 
     static bool prepareContent(const QString &instanceRoot, const QString &gameRoot,
                                const QString &destination, QStringList *skippedClientFiles,

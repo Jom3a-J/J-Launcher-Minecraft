@@ -181,7 +181,7 @@ NewInstanceDialog::NewInstanceDialog(const QString& initialGroup,
     auto* okButton = m_buttons->button(QDialogButtonBox::Ok);
     okButton->setDefault(true);
     okButton->setAutoDefault(true);
-    okButton->setText(m_mode == Mode::ServerModpack ? tr("Create Instance and Server") : tr("OK"));
+    okButton->setText(m_mode == Mode::ServerModpack ? tr("Create Server") : tr("OK"));
     connect(okButton, &QPushButton::clicked, this, &NewInstanceDialog::accept);
 
     auto* cancelButton = m_buttons->button(QDialogButtonBox::Cancel);
