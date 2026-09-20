@@ -166,7 +166,11 @@ int HostScheduler::hardCeiling(HostClass hostClass)
             return 12;
         case HostClass::FlameCdn:
         case HostClass::ModrinthCdn:
-            return 8;
+            // Measured against a real 175 file, 255 MB modpack: 6 at a time gave 1.3-1.7 MB/s,
+            // 24 gave 2.6 MB/s, and 48 was both slower and started losing files. These CDNs
+            // serve far more than the 8 they were given; 16 sits inside the bulk cap and leaves
+            // room for other hosts in the same install.
+            return 16;
         case HostClass::FlameApi:
         case HostClass::ModrinthApi:
         case HostClass::LauncherMeta:
@@ -309,7 +313,12 @@ HostScheduler::Permit HostScheduler::tryAcquire(const QUrl& url, bool latencyCri
     const qint64 now = m_clock();
     if (m_stats_granted == 0)
         m_stats_started_at = now;
-    m_stats[key].granted++;
+    auto& grantStats = m_stats[key];
+    grantStats.granted++;
+    // Separates "the limit held us back" from "the job never asked for more": if peak in flight
+    // stays well under the permitted limit, admission was never the constraint.
+    grantStats.maxInFlight = std::max(grantStats.maxInFlight, state.inFlight);
+    grantStats.maxLimit = std::max(grantStats.maxLimit, effectiveLimit(state));
     m_stats_granted++;
 
     const Permit permit = ++m_next_permit;
@@ -378,6 +387,7 @@ QString HostScheduler::statsReport() const
         if (stats.granted == 0 && stats.denied == 0)
             continue;
         lines.append(QStringLiteral("  %1: %2 granted, %3 refused, %4 rate limited, "
+                                    "peak %8 in flight of %9 allowed, "
                                     "avg %5 ms, max %6 ms, %7 s of transfer")
                          .arg(host)
                          .arg(stats.granted)
@@ -385,7 +395,9 @@ QString HostScheduler::statsReport() const
                          .arg(stats.rateLimited)
                          .arg(stats.granted > 0 ? stats.serviceMsTotal / stats.granted : 0)
                          .arg(stats.serviceMsMax)
-                         .arg(stats.serviceMsTotal / 1000.0, 0, 'f', 1));
+                         .arg(stats.serviceMsTotal / 1000.0, 0, 'f', 1)
+                         .arg(stats.maxInFlight)
+                         .arg(stats.maxLimit));
     }
     return lines.join(QLatin1Char('\n'));
 }

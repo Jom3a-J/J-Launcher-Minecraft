@@ -86,8 +86,13 @@ class HostScheduler : public QObject {
     static constexpr int BulkCap = GlobalCap - ApiReserve;
     /// Level every adaptive host starts at, clamped by its ceiling.
     static constexpr int ColdStartLevel = 4;
-    /// Clean completions required before a host is allowed one more concurrent request.
-    static constexpr int CleanCompletionsPerStep = 10;
+    /*! Clean completions required before a host is allowed one more concurrent request.
+     *
+     *  A modpack is a few hundred files, so a slow ramp is most of the job: at ten per step a
+     *  host reaching a ceiling of 16 only gets there after 120 files. Five keeps the careful
+     *  climb while letting a normal install actually arrive at the ceiling.
+     */
+    static constexpr int CleanCompletionsPerStep = 5;
     /// The default value of the "NumberOfConcurrentDownloads" setting; the normal per host level.
     static constexpr int DefaultNormalLevel = 6;
     /// Hard ceiling for hosts we know nothing about.
@@ -226,6 +231,8 @@ class HostScheduler : public QObject {
         int rateLimited = 0;
         qint64 serviceMsTotal = 0;
         qint64 serviceMsMax = 0;
+        int maxInFlight = 0;
+        int maxLimit = 0;
     };
 
     HostState& stateFor(const QString& key, HostClass hostClass);
