@@ -81,11 +81,27 @@ class NetJob : public ConcurrentTask {
     auto canAbort() const -> bool override;
     auto addNetAction(Net::NetRequest::Ptr action) -> bool;
 
+    /*! Queues a sub task that is not a network request.
+     *
+     *  Such a task is admitted without a scheduler permit - it is not the thing that opens a
+     *  connection - and it counts as exactly one unit of this job's progress. Net::SegmentedDownload
+     *  uses this: the file is one unit here, while the requests that move its bytes are admitted
+     *  individually by an inner job that shares this job's scheduler.
+     */
+    void addTask(Task::Ptr task);
+
     auto getFailedActions() -> QList<Net::NetRequest*>;
     auto getFailedFiles() -> QList<QString>;
     void setAskRetry(bool askRetry);
 
     Net::HostScheduler* scheduler() const { return m_scheduler.data(); }
+    /*! The manager addNetAction() hands to every request it admits.
+     *
+     *  A sub task added with addTask() is not a request and so is never configured by the job;
+     *  one that does open connections of its own (Net::SegmentedDownload) needs this to run them
+     *  through the same manager as the rest of the job.
+     */
+    QNetworkAccessManager* network() const { return m_network; }
 
    public slots:
     // Qt can't handle auto at the start for some reason?

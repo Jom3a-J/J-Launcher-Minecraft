@@ -132,8 +132,12 @@ set(NET_SOURCES
     net/NetJob.cpp
     net/NetJob.h
     net/NetUtils.h
+    net/PartFile.cpp
+    net/PartFile.h
     net/PasteUpload.cpp
     net/PasteUpload.h
+    net/SegmentedDownload.cpp
+    net/SegmentedDownload.h
     net/Sink.h
     net/Validator.h
     net/Upload.cpp
@@ -570,6 +574,8 @@ set(MODRINTH_SOURCES
     modplatform/modrinth/ModrinthPackIndex.h
     modplatform/modrinth/ModrinthCheckUpdate.cpp
     modplatform/modrinth/ModrinthCheckUpdate.h
+    modplatform/modrinth/ModrinthDownloadPolicy.cpp
+    modplatform/modrinth/ModrinthDownloadPolicy.h
     modplatform/modrinth/ModrinthInstanceCreationTask.cpp
     modplatform/modrinth/ModrinthInstanceCreationTask.h
     modplatform/modrinth/ModrinthPackExportTask.cpp

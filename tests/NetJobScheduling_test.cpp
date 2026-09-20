@@ -105,6 +105,47 @@ class StubRequest : public Net::NetRequest {
     bool m_started = false;
 };
 
+/*! A plain Task in a NetJob, the way Net::SegmentedDownload sits in one.
+ *
+ *  It is deliberately not a Net::NetRequest: NetJob has to admit it without a permit, count it as
+ *  one unit of work, and - because nothing promises a bare Task can be started twice - never
+ *  restart it on its own.
+ */
+class StubPlainTask : public Task {
+    Q_OBJECT
+
+   public:
+    using Ptr = shared_qobject_ptr<StubPlainTask>;
+
+    StubPlainTask() { setObjectName(QStringLiteral("StubPlainTask")); }
+
+    int startCount() const { return m_startCount; }
+
+    void succeed()
+    {
+        if (isRunning())
+            emitSucceeded();
+    }
+    void fail(const QString& reason = QStringLiteral("stub plain failure"))
+    {
+        if (isRunning())
+            emitFailed(reason);
+    }
+
+    bool canAbort() const override { return true; }
+    bool abort() override
+    {
+        if (isRunning())
+            emitAborted();
+        return true;
+    }
+
+   private:
+    void executeTask() override { m_startCount++; }
+
+    int m_startCount = 0;
+};
+
 /*! Adds \a count stub requests for \a url to \a job and returns them. */
 QVector<StubRequest::Ptr> addStubs(NetJob& job, const QUrl& url, int count)
 {
@@ -504,6 +545,95 @@ class NetJobSchedulingTest : public QObject {
             QVERIFY2(update.first >= previous, "request progress went backwards");
             previous = update.first;
         }
+    }
+
+    /*! A sub task that is not a request runs without taking a permit, and still counts as one. */
+    void test_plainSubTaskRunsWithoutAPermit()
+    {
+        HostScheduler scheduler;
+        NetJob job(QStringLiteral("test"), nullptr, -1, &scheduler);
+
+        auto plain = makeShared<StubPlainTask>();
+        job.addTask(plain);
+        auto requests = addStubs(job, resourcesUrl(), 2);
+
+        QCOMPARE(job.size(), 3);
+
+        job.start();
+        QVERIFY(waitFor([&] { return plain->startCount() == 1; }));
+        QVERIFY(waitFor([&] { return countStarted(requests) == requests.size(); }));
+
+        // The coordinator is not the thing that opens a connection, so it holds no permit.
+        QCOMPARE(scheduler.outstandingPermits(), countStarted(requests));
+        QCOMPARE(scheduler.inFlightFor(resourcesUrl()), countStarted(requests));
+
+        QVERIFY(waitFor([&] {
+            plain->succeed();
+            for (const auto& request : requests)
+                request->succeed();
+            return job.isFinished();
+        }));
+        QVERIFY(job.wasSuccessful());
+        QCOMPARE(scheduler.outstandingPermits(), 0);
+    }
+
+    /*! A failing plain sub task must not crash the reporting paths that assume a request. */
+    void test_failedPlainSubTaskIsReportedSafely()
+    {
+        HostScheduler scheduler;
+        NetJob job(QStringLiteral("test"), nullptr, -1, &scheduler);
+        job.setAskRetry(false);
+
+        auto plain = makeShared<StubPlainTask>();
+        job.addTask(plain);
+
+        job.start();
+        QVERIFY(waitFor([&] { return plain->startCount() == 1; }));
+
+        // getFailedFiles()/getFailedActions() used to reinterpret whatever was in m_failed as a
+        // Net::NetRequest; this is the regression guard for that.
+        QVERIFY(waitFor([&] {
+            plain->fail();
+            return job.isFinished();
+        }));
+        QVERIFY(!job.wasSuccessful());
+        QCOMPARE(job.getFailedActions().size(), 0);
+        QCOMPARE(job.getFailedFiles().size(), 1);
+        QCOMPARE(job.getFailedFiles().first(), QStringLiteral("StubPlainTask"));
+        QCOMPARE(scheduler.outstandingPermits(), 0);
+    }
+
+    /*! Nothing may silently restart a plain sub task; it is expected to do its own retrying. */
+    void test_failedPlainSubTaskIsNotRestarted()
+    {
+        HostScheduler scheduler;
+        NetJob job(QStringLiteral("test"), nullptr, -1, &scheduler);
+        job.setAskRetry(false);
+
+        auto plain = makeShared<StubPlainTask>();
+        job.addTask(plain);
+
+        job.start();
+        QVERIFY(waitFor([&] { return plain->startCount() == 1; }));
+        plain->fail();
+
+        QVERIFY(waitFor([&] { return job.isFinished(); }));
+        QVERIFY(!job.wasSuccessful());
+        QCOMPARE(plain->startCount(), 1);
+
+        // A failing request, by contrast, still gets the job's usual retry passes.
+        HostScheduler retryScheduler;
+        NetJob retryJob(QStringLiteral("retry"), nullptr, -1, &retryScheduler);
+        retryJob.setAskRetry(false);
+        auto requests = addStubs(retryJob, resourcesUrl(), 1);
+        retryJob.start();
+        QVERIFY(waitFor([&] {
+            for (const auto& request : requests)
+                request->fail();
+            return retryJob.isFinished();
+        }));
+        QVERIFY(!retryJob.wasSuccessful());
+        QCOMPARE(retryScheduler.outstandingPermits(), 0);
     }
 
     /*! A throttled update is not lost: the flush timer publishes the latest value. */

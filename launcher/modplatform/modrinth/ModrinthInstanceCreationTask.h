@@ -24,6 +24,9 @@ class ModrinthCreationTask final : public InstanceTask {
         QByteArray hash;
         QQueue<QUrl> downloads;
         bool required = true;
+        /*! The mrpack "fileSize" hint, or Modrinth::UnknownFileSize when the index had none we
+         *  can trust. Only used to decide how the file is fetched, never to validate it. */
+        qint64 fileSize = -1;
     };
 
    public:

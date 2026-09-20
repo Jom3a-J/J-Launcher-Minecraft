@@ -20,6 +20,7 @@
 #include "logs/Privacy.h"
 
 #include "modplatform/ModIndex.h"
+#include "modplatform/modrinth/ModrinthDownloadPolicy.h"
 #include "settings/INISettingsObject.h"
 
 #include "ui/dialogs/CustomMessageBox.h"
@@ -264,6 +265,7 @@ void ModrinthCreationTask::createInstance()
     m_newInstance->saveNow();
 
     auto downloadMods = makeShared<NetJob>(tr("Mod Download Modrinth"), APPLICATION->network());
+    const int segmentedDownloadSegments = APPLICATION->settings()->get("SegmentedDownloadSegments").toInt();
 
     auto rootModpackPath = FS::PathCombine(m_stagingPath, m_rootPath);
     auto rootModpackUrl = QUrl::fromLocalFile(rootModpackPath);
@@ -299,23 +301,32 @@ void ModrinthCreationTask::createInstance()
                                         .loader = loader,
                                         .dependentOn = !m_managedId.isEmpty() ? m_managedVersionId : "" };
 
-        QUrl downloadUrl = file.downloads.dequeue();
-        auto dl = Net::ApiDownload::makeFile(downloadUrl, filePath, Net::Download::Option::NoOptions, meta);
-        dl->addValidator(new Net::ChecksumValidator(file.hashAlgorithm, file.hash));
-        downloadMods->addNetAction(dl);
+        Modrinth::PackFileDownload request{ .url = file.downloads.dequeue(),
+                                            .path = filePath,
+                                            .declaredSize = file.fileSize,
+                                            .hashAlgorithm = file.hashAlgorithm,
+                                            .hash = file.hash };
+        auto dl = Modrinth::enqueuePackFileDownload(downloadMods, request, meta, segmentedDownloadSegments);
         if (!file.downloads.empty()) {
             // FIXME: This really needs to be put into a ConcurrentTask of
             // MultipleOptionsTask's , once those exist :)
             auto param = dl.toWeakRef();
-            connect(dl.get(), &Task::failed, dl.get(), [&file, filePath, param, downloadMods, meta] {
-                QUrl fallbackUrl = file.downloads.dequeue();
-                auto ndl = Net::ApiDownload::makeFile(fallbackUrl, filePath, Net::Download::Option::NoOptions, meta);
-                ndl->addValidator(new Net::ChecksumValidator(file.hashAlgorithm, file.hash));
-                downloadMods->addNetAction(ndl);
-                if (auto shared = param.lock()) {
-                    shared->succeeded();
-                }
-            });
+            connect(dl.get(), &Task::failed, dl.get(),
+                    [&file, request, param, downloadMods, meta, segmentedDownloadSegments]() mutable {
+                        // The queue was not empty when this was connected, but the failure arrives
+                        // later and a task can report one more than once. Never dequeue blindly.
+                        if (file.downloads.isEmpty()) {
+                            return;
+                        }
+                        // The replacement goes through the same policy, so it is segmented or not
+                        // on its own merits rather than inheriting the failed attempt's shape. It
+                        // keeps the destination, the checksum and the metadata either way.
+                        request.url = file.downloads.dequeue();
+                        Modrinth::enqueuePackFileDownload(downloadMods, request, meta, segmentedDownloadSegments);
+                        if (auto shared = param.lock()) {
+                            shared->succeeded();
+                        }
+                    });
         }
     }
 
@@ -538,6 +549,10 @@ bool ModrinthCreationTask::parseManifest(const QString& indexPath, std::vector<F
                 QJsonObject hashes = Json::requireObject(modInfo, "hashes");
                 file.hash = QByteArray::fromHex(Json::requireString(hashes, "sha512").toLatin1());
                 file.hashAlgorithm = QCryptographicHash::Sha512;
+
+                // Optional, and only ever a hint about how to fetch the file. A pack that omits it
+                // or gets it wrong still installs, one ordinary request at a time.
+                file.fileSize = Modrinth::parseFileSize(modInfo.value(QStringLiteral("fileSize")));
 
                 // Do not use requireUrl, which uses StrictMode, instead use QUrl's default TolerantMode
                 // (as Modrinth seems to incorrectly handle spaces)

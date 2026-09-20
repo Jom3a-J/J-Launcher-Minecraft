@@ -111,6 +111,7 @@
 #include "icons/IconList.h"
 #include "logs/Privacy.h"
 #include "net/HostScheduler.h"
+#include "net/SegmentedDownload.h"
 #include "net/HttpMetaCache.h"
 
 #include "updater/ExternalUpdater.h"
@@ -665,6 +666,9 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
         m_settings->registerSetting("NumberOfConcurrentDownloads", 6);
         m_settings->registerSetting("NumberOfManualRetries", 1);
         m_settings->registerSetting("RequestTimeout", 60);
+        // How many parallel HTTP ranges one large file may be split into. 0 or 1 turns the
+        // behaviour off entirely and every download runs as a single stream.
+        m_settings->registerSetting("SegmentedDownloadSegments", Net::SegmentedDownload::DefaultSegments);
 
         QString defaultMonospace;
         int defaultSize = 11;

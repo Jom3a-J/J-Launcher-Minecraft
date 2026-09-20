@@ -71,9 +71,15 @@ auto NetJob::addNetAction(Net::NetRequest::Ptr action) -> bool
     action->setNetwork(m_network);
 
     addTask(action);
-    m_admission_blocked = false;
 
     return true;
+}
+
+void NetJob::addTask(Task::Ptr task)
+{
+    ConcurrentTask::addTask(std::move(task));
+    // The queue changed, so a previous "nothing is admissible" verdict no longer holds.
+    m_admission_blocked = false;
 }
 
 void NetJob::executeTask()
@@ -91,8 +97,16 @@ void NetJob::executeNextSubTask()
     if (isRunning() && m_queue.isEmpty() && m_doing.isEmpty() && !m_failed.isEmpty() && m_try < 3) {
         m_try += 1;
         m_failed.removeIf([this](QHash<Task*, Task::Ptr>::iterator task) {
+            auto* request = dynamic_cast<Net::NetRequest*>(task->get());
+            // Only requests are retried here. A sub task that is not one has no status code to
+            // judge and no promise that starting it a second time is even meaningful, so leave it
+            // failed rather than restarting something arbitrary; such a task is expected to do its
+            // own retrying (Net::SegmentedDownload retries its segments in its inner job).
+            if (!request) {
+                return false;
+            }
             // there is no point in retying on 404 Not Found
-            if (static_cast<Net::NetRequest*>(task->get())->replyStatusCode() == 404) {
+            if (request->replyStatusCode() == 404) {
                 return false;
             }
             m_done.remove(task->get());
@@ -290,7 +304,10 @@ auto NetJob::getFailedActions() -> QList<Net::NetRequest*>
 {
     QList<Net::NetRequest*> failed;
     for (auto index : m_failed) {
-        failed.push_back(dynamic_cast<Net::NetRequest*>(index.get()));
+        // A job may hold sub tasks that are not requests; they have no reply to report on.
+        if (auto* request = dynamic_cast<Net::NetRequest*>(index.get())) {
+            failed.push_back(request);
+        }
     }
     return failed;
 }
@@ -299,8 +316,11 @@ auto NetJob::getFailedFiles() -> QList<QString>
 {
     QList<QString> failed;
     for (auto index : m_failed) {
-        failed.append(Privacy::sanitizeUrl(
-            static_cast<Net::NetRequest*>(index.get())->url()));
+        if (auto* request = dynamic_cast<Net::NetRequest*>(index.get())) {
+            failed.append(Privacy::sanitizeUrl(request->url()));
+        } else {
+            failed.append(index->objectName());
+        }
     }
     return failed;
 }
