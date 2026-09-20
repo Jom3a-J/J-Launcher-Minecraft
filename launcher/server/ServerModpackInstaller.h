@@ -46,6 +46,7 @@ struct ServerModpackInstallResult {
     QStringList warnings;
     QStringList missingFiles;
     QStringList dependencyRequirements;
+    QStringList missingDependencyIds;
     QString error;
     bool hasDedicatedServerPack = false;
     ServerModpackFailureCategory failureCategory = ServerModpackFailureCategory::None;
@@ -65,6 +66,7 @@ struct ServerDependencyCheckResult {
     ServerDependencyCheckState state = ServerDependencyCheckState::Compatible;
     QString error;
     QStringList warnings;
+    QStringList missingDependencyIds;
 
     bool isCompatible() const { return state == ServerDependencyCheckState::Compatible; }
 };
@@ -78,6 +80,7 @@ public:
                                                    const QString &quiltVersion);
     static ServerModpackProfile inspect(const MinecraftInstance &instance);
     static ServerModpackProfile profileFromInstanceRoot(const QString &instanceRoot);
+    static QString gameRootForInstanceRoot(const QString &instanceRoot);
 
     static bool prepareContent(const QString &instanceRoot, const QString &gameRoot,
                                const QString &destination, QStringList *skippedClientFiles,

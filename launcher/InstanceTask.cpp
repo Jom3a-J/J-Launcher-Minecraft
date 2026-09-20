@@ -135,6 +135,13 @@ void InstanceTask::scheduleToDelete(QWidget* parent, const QDir& dir, const QStr
 
 void InstanceTask::downloadFiles(MinecraftInstance* inst)
 {
+    // A server pack is built from the downloaded pack alone. The client jar,
+    // the client libraries and the whole asset index are never run by a
+    // server, so fetching them here only makes the user wait.
+    if (shouldCreateServerPair()) {
+        emitSucceeded();
+        return;
+    }
     if (!APPLICATION->settings()->get("DownloadGameFilesDuringInstanceCreation").toBool()) {
         emitSucceeded();
         return;

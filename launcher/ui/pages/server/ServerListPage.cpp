@@ -28,14 +28,19 @@
 #include "ui/dialogs/NewInstanceDialog.h"
 #include "ui/dialogs/ProgressDialog.h"
 #include "ui/dialogs/ResourceDownloadDialog.h"
+#include "ui/pages/modplatform/ResourcePage.h"
 #include "ui/pages/server/ServerSettingsPage.h"
 #include "minecraft/MinecraftInstance.h"
 #include "minecraft/PackProfile.h"
 #include "minecraft/mod/ModFolderModel.h"
 #include "modplatform/flame/FlameAPI.h"
 #include "BuildConfig.h"
+#include "FileSystem.h"
 #include "InstanceList.h"
+#include "InstanceTask.h"
 #include "QObjectPtr.h"
+#include "server/ServerMemory.h"
+#include "settings/INIFile.h"
 #include "settings/INISettingsObject.h"
 #include "tasks/ConcurrentTask.h"
 #include "logs/Privacy.h"
@@ -1470,11 +1475,20 @@ void ServerListPage::onStartServer()
                 details = logLines.constLast().trimmed();
                 details.remove(QRegularExpression("^\\[ERROR\\]\\s*"));
             }
-            QMessageBox::warning(
-                this, tr("Server Could Not Start"),
-                details.isEmpty()
-                    ? tr("The server could not be started. Open the Console tab for details.")
-                    : details);
+            const QStringList missing = missingServerDependencies(server.get());
+            if (!missing.isEmpty()) {
+                offerDependencyRepair(
+                    missing,
+                    details.isEmpty()
+                        ? tr("The server could not start because required mods are missing.")
+                        : details);
+            } else {
+                QMessageBox::warning(
+                    this, tr("Server Could Not Start"),
+                    details.isEmpty()
+                        ? tr("The server could not be started. Open the Console tab for details.")
+                        : details);
+            }
         }
     }
 }
@@ -1600,6 +1614,96 @@ void ServerListPage::onOpenFolder()
     }
 }
 
+namespace {
+// The pack is downloaded into a staging folder rather than an instance, so the
+// memory hint the pack author exported has to be read from the staged
+// instance.cfg instead of a live instance's settings.
+int stagedProviderRecommendation(const QString &instanceRoot)
+{
+    INIFile config;
+    if (!config.loadFile(FS::PathCombine(instanceRoot, QStringLiteral("instance.cfg")))) {
+        return 0;
+    }
+    return ServerMemory::resolveProviderRecommendation(
+        config.get(QStringLiteral("OverrideMemory"), false).toBool(),
+        config.get(QStringLiteral("MaxMemAlloc"), 0).toInt(),
+        config.get(QStringLiteral("ExportRecommendedRAM"), 0).toInt());
+}
+
+// A mod's identifier inside its jar is not always what catalogs list it under:
+// "cloth-config2" is published as "Cloth Config". Searching a looser form of the
+// identifier matches far more of them. The exact identifier stays in the message
+// so the user can still confirm they picked the right mod.
+QString dependencySearchTerm(const QString &dependencyId)
+{
+    QString term = dependencyId;
+    term.replace(QLatin1Char('_'), QLatin1Char(' '));
+    term.replace(QLatin1Char('-'), QLatin1Char(' '));
+    term.remove(QRegularExpression(QStringLiteral("\\s*\\d+$")));
+    term = term.simplified();
+    // Identifiers commonly carry a suffix the catalog listing drops:
+    // "connectormod" is published as "Connector". Removing it is the difference
+    // between no results at all and the right mod ranked first.
+    static const QStringList redundantSuffixes{
+        QStringLiteral("mod"), QStringLiteral("forge"), QStringLiteral("fabric")
+    };
+    for (const QString &suffix : redundantSuffixes) {
+        if (term.size() > suffix.size() + 2 && term.endsWith(suffix)
+            && !term.endsWith(QLatin1Char(' ') + suffix)) {
+            term.chop(suffix.size());
+            term = term.simplified();
+            break;
+        }
+    }
+    return term.isEmpty() ? dependencyId : term;
+}
+}  // namespace
+
+QStringList ServerListPage::missingServerDependencies(ServerInstance *server) const
+{
+    if (!server) {
+        return {};
+    }
+    const QString root = server->serverDirectory();
+    if (!QFileInfo(QDir(root).filePath(
+                       QStringLiteral("jlauncher_derived_server.txt"))).isFile()) {
+        return {};
+    }
+    const ServerDependencyCheckResult check =
+        ServerModpackInstaller::checkServerDependencies(
+            root, server->loaderType(), server->version(), server->loaderVersion());
+    if (check.state == ServerDependencyCheckState::DefiniteFailure
+        || check.state == ServerDependencyCheckState::Unsafe) {
+        return check.missingDependencyIds;
+    }
+    return {};
+}
+
+void ServerListPage::offerDependencyRepair(const QStringList &missingIds,
+                                           const QString &introduction)
+{
+    if (missingIds.isEmpty()) {
+        return;
+    }
+    QMessageBox prompt(this);
+    prompt.setWindowTitle(tr("Missing Server Mods"));
+    prompt.setIcon(QMessageBox::Warning);
+    prompt.setText(introduction);
+    prompt.setInformativeText(
+        tr("Missing mod IDs: %1\n\n"
+           "Choose Find Missing Mods to search the same trusted catalogs. "
+           "J Launcher installs the file you pick, together with anything it "
+           "requires, into this server's mods folder.")
+            .arg(missingIds.join(QStringLiteral(", "))));
+    auto *findButton = prompt.addButton(tr("Find Missing Mods"),
+                                        QMessageBox::AcceptRole);
+    prompt.addButton(QMessageBox::Close);
+    prompt.exec();
+    if (prompt.clickedButton() == findButton) {
+        browseServerContent(dependencySearchTerm(missingIds.first()));
+    }
+}
+
 void ServerListPage::onInstallModpack()
 {
     if (!m_serverManager || !APPLICATION->instances()) {
@@ -1615,57 +1719,56 @@ void ServerListPage::onInstallModpack()
     }
     APPLICATION->settings()->set("LastUsedGroupForNewInstance", dialog.instGroup());
 
-    InstanceTask *creationTask = dialog.extractTask();
+    unique_qobject_ptr<InstanceTask> creationTask(dialog.extractTask());
     if (!creationTask) {
         QMessageBox::warning(this, tr("Create from Modpack"),
                              tr("No modpack was selected."));
         return;
     }
 
-    QSet<QString> existingInstanceIds;
-    for (int index = 0; index < APPLICATION->instances()->count(); ++index) {
-        existingInstanceIds.insert(APPLICATION->instances()->at(index)->id());
-    }
-
-    QString installedInstanceId;
-    const QMetaObject::Connection selectionConnection =
-        connect(APPLICATION->instances(), &InstanceList::instanceSelectRequest,
-                this, [&installedInstanceId](const QString &id) {
-                    installedInstanceId = id;
-                });
-    unique_qobject_ptr<Task> task(
-        APPLICATION->instances()->wrapInstanceTask(creationTask));
-    ProgressDialog progress(this);
-    progress.setWindowTitle(tr("Downloading Modpack and Creating Instance"));
-    progress.setSkipButton(true, tr("Abort"));
-    progress.execWithTask(task.get());
-    disconnect(selectionConnection);
-
-    if (!task->wasSuccessful() || installedInstanceId.isEmpty()) {
+    // The pack is downloaded into a staging folder and the server is built
+    // straight from it. Nothing is committed to the instance list, so making a
+    // server no longer makes a client instance the user did not ask for.
+    const QString stagingPath =
+        APPLICATION->instances()->getStagedInstancePath(creationTask->targetDir());
+    if (stagingPath.isEmpty()) {
         QMessageBox::critical(
             this, tr("Create from Modpack"),
-            task->failReason().isEmpty()
-                ? tr("The modpack instance could not be created.")
-                : tr("The modpack instance could not be created:\n%1")
-                      .arg(Privacy::sanitizeText(task->failReason())));
+            tr("A temporary folder for the download could not be created."));
         return;
     }
+    creationTask->setStagingPath(stagingPath);
+    creationTask->setParentSettings(APPLICATION->settings());
 
-    auto *instance = dynamic_cast<MinecraftInstance *>(
-        APPLICATION->instances()->getInstanceById(installedInstanceId));
-    if (!instance) {
-        if (!existingInstanceIds.contains(installedInstanceId)) {
-            APPLICATION->instances()->trashInstance(installedInstanceId);
+    const QString packName = creationTask->name();
+
+    int progressResult = QDialog::Rejected;
+    {
+        ProgressDialog progress(this);
+        progress.setWindowTitle(tr("Downloading Modpack"));
+        progress.setSkipButton(true, tr("Abort"));
+        progressResult = progress.execWithTask(creationTask.get());
+    }
+
+    if (!creationTask->wasSuccessful()) {
+        const QString reason = creationTask->failReason();
+        FS::deletePath(stagingPath);
+        if (reason.isEmpty() && progressResult == QDialog::Rejected) {
+            // Aborted from the progress dialog. The user knows; nothing was kept.
+            return;
         }
         QMessageBox::critical(
             this, tr("Create from Modpack"),
-            tr("The downloaded pack is not a Minecraft instance."));
+            reason.isEmpty()
+                ? tr("The modpack could not be downloaded.")
+                : tr("The modpack could not be downloaded:\n%1")
+                      .arg(Privacy::sanitizeText(reason)));
         return;
     }
 
     QString selectedServerRoot;
     const QStringList serverRootChoices =
-        ServerModpackInstaller::publishedServerRootChoices(instance->instanceRoot());
+        ServerModpackInstaller::publishedServerRootChoices(stagingPath);
     if (serverRootChoices.size() > 1) {
         bool accepted = false;
         selectedServerRoot = QInputDialog::getItem(
@@ -1673,28 +1776,33 @@ void ServerListPage::onInstallModpack()
             tr("This pack contains multiple possible server folders. Choose the folder containing the server files:"),
             serverRootChoices, 0, false, &accepted);
         if (!accepted || selectedServerRoot.isEmpty()) {
+            FS::deletePath(stagingPath);
             QMessageBox::information(
-                this, tr("Server Creation Paused"),
-                tr("No server was created. The downloaded modpack instance was kept so you can try again without downloading it again."));
+                this, tr("Server Creation Cancelled"),
+                tr("No server was created, and the downloaded files were removed."));
             return;
         }
     }
 
     const ServerModpackInstallResult result =
         ServerModpackInstaller::createMatchingServer(
-            m_serverManager, *instance, instance->name() + tr(" Server"),
+            m_serverManager,
+            ServerModpackInstaller::profileFromInstanceRoot(stagingPath),
+            stagingPath,
+            ServerModpackInstaller::gameRootForInstanceRoot(stagingPath),
+            packName + tr(" Server"),
+            stagedProviderRecommendation(stagingPath), 0,
             selectedServerRoot);
+
+    // The staged pack has served its purpose either way: on success its files
+    // are already copied into the server, on failure there is nothing to keep.
+    FS::deletePath(stagingPath);
     if (!result.isValid()) {
         const QString reason = Privacy::sanitizeText(result.error);
         const QString recovery =
             result.failureCategory == ServerModpackFailureCategory::CompatibilityMetadata
             ? tr("Try another pack version or report this problem to the pack author.")
             : tr("Review the reason, then try again.");
-        const bool wasNewInstance = !existingInstanceIds.contains(installedInstanceId);
-        if (wasNewInstance) {
-            APPLICATION->instances()->trashInstance(installedInstanceId);
-        }
-
         QMessageBox failureDialog(this);
         failureDialog.setWindowTitle(tr("Create from Modpack"));
         failureDialog.setIcon(QMessageBox::Critical);
@@ -1703,9 +1811,7 @@ void ServerListPage::onInstallModpack()
         failureDialog.setInformativeText(
             tr("Reason:\n%1\n\n%2\n\n%3")
                 .arg(reason, recovery,
-                     wasNewInstance
-                         ? tr("The newly downloaded instance was moved to the trash.")
-                         : tr("The existing instance was kept.")));
+                     tr("The downloaded files were removed. Nothing was added to your instances.")));
         failureDialog.setDetailedText(
             tr("Category: %1\nStage: %2")
                 .arg(serverModpackFailureCategoryName(result.failureCategory),
@@ -1724,10 +1830,10 @@ void ServerListPage::onInstallModpack()
     const bool softwarePreparationAccepted =
         !neededServerSoftware || createdServer->prepareServerSoftware();
 
-    QString details = tr("Created client instance \"%1\" and matching stopped server "
-                         "\"%2\" with the same Minecraft and loader versions.")
-                          .arg(instance->name(),
-                               m_serverManager->getServer(result.serverId)->name());
+    QString details = tr("Created stopped server \"%1\" from modpack \"%2\". "
+                         "No client instance was created.")
+                          .arg(m_serverManager->getServer(result.serverId)->name(),
+                               packName);
     if (result.hasDedicatedServerPack
         && result.provider.startsWith(QStringLiteral("ftb"), Qt::CaseInsensitive)) {
         details += tr("\n\nServer source: prepared by the official FTB server installer.");
@@ -1768,10 +1874,37 @@ void ServerListPage::onInstallModpack()
         details += tr("\n\nCompatibility note:\n%1")
                        .arg(result.warnings.join(QStringLiteral("\n")));
     }
-    QMessageBox::information(this, tr("Modpack Ready"), details);
+    if (!result.missingDependencyIds.isEmpty()) {
+        QMessageBox ready(this);
+        ready.setWindowTitle(tr("Modpack Ready - Dependencies Needed"));
+        ready.setIcon(QMessageBox::Warning);
+        ready.setText(tr("The server was created, but required mods are missing."));
+        ready.setInformativeText(
+            details
+            + tr("\n\nMissing mod IDs: %1\nModpack source: %2\n\n"
+                 "Choose Find Missing Mods to search the same trusted catalogs. "
+                 "J Launcher will select compatible files, include their declared "
+                 "dependencies, and install them directly into this server's mods folder.")
+                  .arg(result.missingDependencyIds.join(QStringLiteral(", ")),
+                       result.provider));
+        auto *findButton = ready.addButton(tr("Find Missing Mods"),
+                                           QMessageBox::AcceptRole);
+        ready.addButton(QMessageBox::Close);
+        ready.exec();
+        if (ready.clickedButton() == findButton) {
+            browseServerContent(dependencySearchTerm(result.missingDependencyIds.first()));
+        }
+    } else {
+        QMessageBox::information(this, tr("Modpack Ready"), details);
+    }
 }
 
 void ServerListPage::onBrowseMods()
+{
+    browseServerContent();
+}
+
+void ServerListPage::browseServerContent(const QString &initialSearch)
 {
     if (!m_serverManager || m_selectedServerId.isEmpty()) {
         return;
@@ -1844,6 +1977,9 @@ void ServerListPage::onBrowseMods()
 
     ResourceDownload::ModDownloadDialog dialog(this, &serverContent, &compatibilityInstance,
                                                false, resourceType, loaderNames);
+    if (!initialSearch.trimmed().isEmpty() && dialog.selectedPage()) {
+        dialog.selectedPage()->setSearchTerm(initialSearch.trimmed());
+    }
     if (dialog.exec() != QDialog::Accepted) {
         return;
     }
@@ -1898,6 +2034,15 @@ void ServerListPage::onBrowseMods()
     // installed files, so always bring the server views back in sync.
     refreshInstalledContent();
     refreshOverview();
+
+    // Installed mods can require further mods of their own, so recheck here
+    // rather than letting the next start attempt be the one that reports it.
+    const QStringList stillMissing = missingServerDependencies(server.get());
+    if (!stillMissing.isEmpty()) {
+        offerDependencyRepair(
+            stillMissing,
+            tr("Required mods are still missing after this installation."));
+    }
 }
 
 void ServerListPage::onAddLocalContent()

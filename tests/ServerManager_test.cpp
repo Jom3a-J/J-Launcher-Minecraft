@@ -1107,6 +1107,7 @@ class ServerManagerTest : public QObject {
         QVERIFY(result.warnings.join('\n').contains("connectedglass"));
         QVERIFY(result.warnings.join('\n').contains("fusion"));
         QVERIFY(result.dependencyRequirements.join('\n').contains("fusion"));
+        QCOMPARE(result.missingDependencyIds, QStringList{ QStringLiteral("fusion") });
         const auto incompleteServer = manager.getServer(result.serverId);
         QVERIFY(incompleteServer);
         incompleteServer->setEulaAccepted(true);
@@ -1994,6 +1995,106 @@ class ServerManagerTest : public QObject {
         QVERIFY(!missingServer->start());
         QVERIFY(missingServer->consoleLog().contains("ponder.jar"));
         QCOMPARE(manager.serverCount(), 2);
+    }
+
+    void treatsRuntimeRequirementsAsProvidedOnNeoForge()
+    {
+        // "java" is chosen by the launcher and NeoForge answers to "forge" as
+        // well, so neither is a mod anyone could download. Listing them as
+        // missing sends the user looking for something that does not exist.
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString instanceRoot = root.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(writeForgeModJar(
+            QDir(gameRoot).filePath("mods/example.jar"),
+            "META-INF/neoforge.mods.toml",
+            QByteArrayLiteral(
+                "modLoader=\"javafml\"\n"
+                "loaderVersion=\"[4,)\"\n"
+                "license=\"Test\"\n"
+                "[[mods]]\n"
+                "modId=\"example\"\n"
+                "version=\"1.0.0\"\n"
+                "displayName=\"Example\"\n"
+                "[[dependencies.example]]\n"
+                "modId=\"java\"\n"
+                "type=\"required\"\n"
+                "versionRange=\"[21,)\"\n"
+                "ordering=\"NONE\"\n"
+                "side=\"BOTH\"\n"
+                "[[dependencies.example]]\n"
+                "modId=\"forge\"\n"
+                "type=\"required\"\n"
+                "versionRange=\"[21.1,)\"\n"
+                "ordering=\"NONE\"\n"
+                "side=\"BOTH\"\n")));
+        QTemporaryDir serverData;
+        QVERIFY(serverData.isValid());
+        ServerManager manager(serverData.path());
+        const auto profile = ServerModpackInstaller::profileForVersions(
+            "1.21.1", {}, {}, "21.1.0", {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instanceRoot, gameRoot, "Runtime Requirements");
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        QVERIFY2(result.missingDependencyIds.isEmpty(),
+                 qPrintable(result.missingDependencyIds.join(", ")));
+        const auto server = manager.getServer(result.serverId);
+        QVERIFY(server);
+        const auto check = ServerModpackInstaller::checkServerDependencies(
+            server->serverDirectory(), "neoforge", "1.21.1", "21.1.0");
+        QVERIFY2(check.missingDependencyIds.isEmpty(),
+                 qPrintable(check.missingDependencyIds.join(", ")));
+    }
+
+    void recognizesForgeEmbeddedJarWithoutIndex()
+    {
+        // Some mods, Connector among them, embed the jar that declares their mod
+        // id without shipping META-INF/jarjar/metadata.json. Ignoring those jars
+        // reports the mod as missing even while it sits in the mods folder, so
+        // installing it again can never clear the failure.
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        const auto nested = root.filePath("connector-mod.jar");
+        QVERIFY(writeForgeModJar(nested, "META-INF/mods.toml",
+            "modLoader=\"javafml\"\n[[mods]]\nmodId=\"connectormod\"\nversion=\"1.0.0\"\n"));
+        QFile file(nested);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const auto bytes = file.readAll();
+        const auto instance = root.filePath("instance");
+        const auto game = QDir(instance).filePath("minecraft");
+        QVERIFY(QDir().mkpath(QDir(game).filePath("mods")));
+        {
+            MMCZip::ArchiveWriter writer(QDir(game).filePath("mods/requires-connector.jar"));
+            QVERIFY(writer.open());
+            QVERIFY(writer.addFile("META-INF/mods.toml", QByteArray(
+                "modLoader=\"javafml\"\n[[mods]]\nmodId=\"fabricmod\"\nversion=\"1.0.0\"\n"
+                "[[dependencies.fabricmod]]\nmodId=\"connectormod\"\nmandatory=true\n"
+                "versionRange=\"[1.0.0,)\"\nside=\"BOTH\"\n")));
+            QVERIFY(writer.close());
+        }
+        {
+            MMCZip::ArchiveWriter writer(QDir(game).filePath("mods/connector.jar"));
+            QVERIFY(writer.open());
+            QVERIFY(writer.addFile("META-INF/MANIFEST.MF", QByteArray(
+                "Manifest-Version: 1.0\nImplementation-Title: Connector\n")));
+            QVERIFY(writer.addFile("META-INF/jarjar/connector-mod.jar", bytes));
+            QVERIFY(writer.close());
+        }
+        ServerManager manager(root.filePath("servers"));
+        const auto profile = ServerModpackInstaller::profileForVersions("1.20.1", {}, "47.4.20", {}, {});
+        const auto result = ServerModpackInstaller::createMatchingServer(
+            &manager, profile, instance, game, "Embedded Without Index");
+        QVERIFY2(result.isValid(), qPrintable(result.error));
+        QVERIFY2(result.missingDependencyIds.isEmpty(),
+                 qPrintable(result.missingDependencyIds.join(", ")));
+        const auto server = manager.getServer(result.serverId);
+        QVERIFY(server);
+        QCOMPARE(ServerModpackInstaller::checkServerDependencies(
+                     server->serverDirectory(), "forge", "1.20.1", "47.4.20")
+                     .missingDependencyIds,
+                 QStringList{});
     }
 
     void createsRepairableDerivedFabricServerWithMissingBundledJar()

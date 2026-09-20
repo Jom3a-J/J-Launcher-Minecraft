@@ -96,6 +96,12 @@ class HostScheduler : public QObject {
     static constexpr qint64 MinCooldownMs = 1000;
     /// Upper bound for any cooldown, including one derived from Retry-After.
     static constexpr qint64 MaxCooldownMs = 60 * 1000;
+    /*! Requests a burst must contain before it is worth reporting.
+     *
+     *  Idle metadata polling goes through the scheduler too; without a floor the log would fill
+     *  with two line reports that measure nothing.
+     */
+    static constexpr int StatsReportThreshold = 50;
 
     /// Opaque handle for a granted permit.
     using Permit = quint64;
@@ -174,6 +180,17 @@ class HostScheduler : public QObject {
      */
     void migratePermit(Permit permit, const QUrl& url);
 
+    /*! A human readable summary of what the last burst of downloading did, per host.
+     *
+     *  Only measurement: granted and denied admissions, how long requests actually took, and
+     *  how often a host rate limited us. It is what tells apart "thousands of tiny files each
+     *  costing a round trip" from "a few big files on a slow link" from "queued behind our own
+     *  concurrency limit", which are three different problems with three different fixes.
+     */
+    QString statsReport() const;
+    /// Forgets the collected measurements without touching adaptive state.
+    void resetStats();
+
     /// Drops all adaptive state and accounting. Intended for tests.
     void reset();
     /// Replaces the millisecond clock used for cooldowns. Intended for tests.
@@ -199,6 +216,16 @@ class HostScheduler : public QObject {
     struct PermitState {
         QString host;
         bool latencyCritical = false;
+        qint64 acquiredAt = 0;
+    };
+
+    /// Pure measurement; nothing here feeds back into admission decisions.
+    struct HostStats {
+        int granted = 0;
+        int denied = 0;
+        int rateLimited = 0;
+        qint64 serviceMsTotal = 0;
+        qint64 serviceMsMax = 0;
     };
 
     HostState& stateFor(const QString& key, HostClass hostClass);
@@ -207,9 +234,14 @@ class HostScheduler : public QObject {
     void applyOutcome(HostState& state, HostOutcome outcome, qint64 retryAfterSeconds);
     void scheduleWakeup();
     void onWakeup();
+    /// Logs statsReport() once the last request of a large enough burst has drained.
+    void maybeReportStats();
 
     QHash<QString, HostState> m_hosts;
     QHash<Permit, PermitState> m_permits;
+    QHash<QString, HostStats> m_stats;
+    int m_stats_granted = 0;
+    qint64 m_stats_started_at = 0;
 
     Permit m_next_permit = 0;
     int m_global_in_flight = 0;

@@ -18,6 +18,8 @@
 #include "net/HostScheduler.h"
 
 #include <QDateTime>
+#include <QDebug>
+#include <algorithm>
 #include <utility>
 
 #include "BuildConfig.h"
@@ -274,27 +276,44 @@ HostScheduler::Permit HostScheduler::tryAcquire(const QUrl& url, bool latencyCri
 {
     const HostClass hostClass = classify(url);
     const bool api = latencyCritical || isLatencyCritical(hostClass);
-
-    if (m_global_in_flight >= GlobalCap)
-        return InvalidPermit;
-    if (!api && m_bulk_in_flight >= BulkCap)
-        return InvalidPermit;
-
     const QString key = hostKey(url);
+
+    // Every refusal is counted against the host that was asked for, whichever limit turned it
+    // away, so a queue starved by the global cap is distinguishable from one the host itself
+    // is throttling.
+    if (m_global_in_flight >= GlobalCap) {
+        m_stats[key].denied++;
+        return InvalidPermit;
+    }
+    if (!api && m_bulk_in_flight >= BulkCap) {
+        m_stats[key].denied++;
+        return InvalidPermit;
+    }
+
     HostState& state = stateFor(key, hostClass);
 
-    if (state.cooldownUntil > m_clock())
+    if (state.cooldownUntil > m_clock()) {
+        m_stats[key].denied++;
         return InvalidPermit;
-    if (state.inFlight >= effectiveLimit(state))
+    }
+    if (state.inFlight >= effectiveLimit(state)) {
+        m_stats[key].denied++;
         return InvalidPermit;
+    }
 
     state.inFlight++;
     m_global_in_flight++;
     if (!api)
         m_bulk_in_flight++;
 
+    const qint64 now = m_clock();
+    if (m_stats_granted == 0)
+        m_stats_started_at = now;
+    m_stats[key].granted++;
+    m_stats_granted++;
+
     const Permit permit = ++m_next_permit;
-    m_permits.insert(permit, PermitState{ key, api });
+    m_permits.insert(permit, PermitState{ key, api, now });
     return permit;
 }
 
@@ -319,12 +338,70 @@ void HostScheduler::release(Permit permit, HostOutcome outcome)
         applyOutcome(*hostIt, outcome, -1);
     }
 
+    const qint64 serviceMs = std::max<qint64>(0, m_clock() - info.acquiredAt);
+    auto& stats = m_stats[info.host];
+    stats.serviceMsTotal += serviceMs;
+    stats.serviceMsMax = std::max(stats.serviceMsMax, serviceMs);
+    maybeReportStats();
+
     emit capacityAvailable();
+}
+
+void HostScheduler::maybeReportStats()
+{
+    // Report once the whole burst has drained, so the numbers cover a complete install rather
+    // than an arbitrary moment inside one.
+    if (m_global_in_flight > 0 || !m_permits.isEmpty())
+        return;
+    if (m_stats_granted < StatsReportThreshold) {
+        resetStats();
+        return;
+    }
+    qInfo().noquote() << statsReport();
+    resetStats();
+}
+
+QString HostScheduler::statsReport() const
+{
+    const qint64 wallMs = std::max<qint64>(0, m_clock() - m_stats_started_at);
+    QStringList lines;
+    lines.append(QStringLiteral("Download report: %1 requests in %2 s")
+                     .arg(m_stats_granted)
+                     .arg(wallMs / 1000.0, 0, 'f', 1));
+
+    QList<QString> hosts = m_stats.keys();
+    std::sort(hosts.begin(), hosts.end(), [this](const QString& a, const QString& b) {
+        return m_stats.value(a).serviceMsTotal > m_stats.value(b).serviceMsTotal;
+    });
+    for (const QString& host : hosts) {
+        const HostStats& stats = m_stats.value(host);
+        if (stats.granted == 0 && stats.denied == 0)
+            continue;
+        lines.append(QStringLiteral("  %1: %2 granted, %3 refused, %4 rate limited, "
+                                    "avg %5 ms, max %6 ms, %7 s of transfer")
+                         .arg(host)
+                         .arg(stats.granted)
+                         .arg(stats.denied)
+                         .arg(stats.rateLimited)
+                         .arg(stats.granted > 0 ? stats.serviceMsTotal / stats.granted : 0)
+                         .arg(stats.serviceMsMax)
+                         .arg(stats.serviceMsTotal / 1000.0, 0, 'f', 1));
+    }
+    return lines.join(QLatin1Char('\n'));
+}
+
+void HostScheduler::resetStats()
+{
+    m_stats.clear();
+    m_stats_granted = 0;
+    m_stats_started_at = 0;
 }
 
 void HostScheduler::reportRateLimited(const QUrl& url, qint64 retryAfterSeconds)
 {
-    HostState& state = stateFor(hostKey(url), classify(url));
+    const QString key = hostKey(url);
+    m_stats[key].rateLimited++;
+    HostState& state = stateFor(key, classify(url));
     applyOutcome(state, HostOutcome::RateLimited, retryAfterSeconds);
 }
 
@@ -430,6 +507,7 @@ void HostScheduler::reset()
     m_global_in_flight = 0;
     m_bulk_in_flight = 0;
     m_normal_level = DefaultNormalLevel;
+    resetStats();
 }
 
 void HostScheduler::setClock(std::function<qint64()> clock)
