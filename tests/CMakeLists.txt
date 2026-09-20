@@ -140,5 +140,17 @@ ecm_add_test(NetJobScheduling_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERS
     TEST_NAME NetJobScheduling)
 set_tests_properties(NetJobScheduling PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+ecm_add_test(PartFile_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME PartFile)
+set_tests_properties(PartFile PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+ecm_add_test(SegmentedDownload_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME SegmentedDownload)
+set_tests_properties(SegmentedDownload PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen" TIMEOUT 600)
+
+ecm_add_test(ModrinthDownloadPolicy_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME ModrinthDownloadPolicy)
+set_tests_properties(ModrinthDownloadPolicy PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 ecm_add_test(GameUpdateTaskGraph_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME GameUpdateTaskGraph)

@@ -76,6 +76,7 @@
 #include "net/ApiDownload.h"
 #include "logs/Privacy.h"
 #include "net/ChecksumValidator.h"
+#include "net/SegmentedDownload.h"
 #include "ui/dialogs/UntrustedModsDialog.h"
 #include "ui/pages/modplatform/OptionalModDialog.h"
 
@@ -713,11 +714,16 @@ void FlameCreationTask::setupDownloadJob()
 
     if (shouldCreateServerPair() && !m_serverPackDownloadUrl.isEmpty()) {
         m_serverPackArchivePath = FS::PathCombine(m_stagingPath, "server-pack", "published-server-pack.zip");
-        auto serverPackDownload = Net::ApiDownload::makeFile(m_serverPackDownloadUrl, m_serverPackArchivePath);
+        // Published server packs are the one file in a CurseForge install that is big enough for a
+        // single connection to dominate the whole download, so this one is allowed to use several.
+        // It falls back to an ordinary single stream download whenever the CDN will not cooperate.
+        auto serverPackDownload = Net::SegmentedDownload::makeApiFile(
+            m_serverPackDownloadUrl, m_serverPackArchivePath, APPLICATION->network(), m_filesJob->scheduler(),
+            APPLICATION->settings()->get("SegmentedDownloadSegments").toInt());
         if (auto* validator = Flame::createCurseForgeChecksumValidator(m_serverPackHashType, m_serverPackHash)) {
             serverPackDownload->addValidator(validator);
         }
-        m_filesJob->addNetAction(serverPackDownload);
+        m_filesJob->addTask(serverPackDownload);
     }
 
     connect(m_filesJob.get(), &NetJob::finished, this, [this]() {
