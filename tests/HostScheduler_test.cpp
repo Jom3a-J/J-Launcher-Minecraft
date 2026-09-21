@@ -110,8 +110,8 @@ class HostSchedulerTest : public QObject {
     {
         QCOMPARE(HostScheduler::hardCeiling(HostClass::MinecraftResources), 16);
         QCOMPARE(HostScheduler::hardCeiling(HostClass::MinecraftLibraries), 12);
-        QCOMPARE(HostScheduler::hardCeiling(HostClass::FlameCdn), 8);
-        QCOMPARE(HostScheduler::hardCeiling(HostClass::ModrinthCdn), 8);
+        QCOMPARE(HostScheduler::hardCeiling(HostClass::FlameCdn), 16);
+        QCOMPARE(HostScheduler::hardCeiling(HostClass::ModrinthCdn), 16);
         QCOMPARE(HostScheduler::hardCeiling(HostClass::FlameApi), 4);
         QCOMPARE(HostScheduler::hardCeiling(HostClass::ModrinthApi), 4);
         QCOMPARE(HostScheduler::hardCeiling(HostClass::LauncherMeta), 4);
@@ -197,7 +197,7 @@ class HostSchedulerTest : public QObject {
         // The default normal level reproduces the published ceilings exactly.
         QCOMPARE(scheduler.ceilingFor(resourcesUrl()), 16);
         QCOMPARE(scheduler.ceilingFor(unknownUrl()), 6);
-        QCOMPARE(scheduler.ceilingFor(flameCdnUrl()), 8);
+        QCOMPARE(scheduler.ceilingFor(flameCdnUrl()), 16);
 
         // Asking for far more than any provider allows changes nothing.
         scheduler.setNormalPerHostLevel(HostScheduler::GlobalCap);
