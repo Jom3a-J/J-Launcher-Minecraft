@@ -140,6 +140,10 @@ ecm_add_test(NetJobScheduling_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERS
     TEST_NAME NetJobScheduling)
 set_tests_properties(NetJobScheduling PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+ecm_add_test(FlameDownloadCompletion_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME FlameDownloadCompletion)
+set_tests_properties(FlameDownloadCompletion PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 ecm_add_test(PartFile_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME PartFile)
 set_tests_properties(PartFile PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
