@@ -276,7 +276,10 @@ auto NetJob::abort() -> bool
     m_queue.clear();
 
     if (m_doing.isEmpty()) {
-        // no downloads to abort, NetJob is not running
+        // The queue may have held all remaining work; close the job instead of leaving it running
+        // with its queue cleared and no active task left to report completion.
+        if (isRunning())
+            emitAborted();
         return true;
     }
 

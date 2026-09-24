@@ -67,6 +67,7 @@
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QPointer>
 #include <utility>
 
 #include "HardwareInfo.h"
@@ -97,6 +98,27 @@ void connectDownloadJobCompletion(NetJob* job,
                              onAborted();
                          }
                      });
+}
+
+void abortDownloadJobOnTaskFailure(NetJob* job,
+                                   Task* watchedTask,
+                                   QObject* context,
+                                   std::function<void(QString)> onFailure)
+{
+    QPointer<NetJob> guardedJob(job);
+    QPointer<Task> guardedTask(watchedTask);
+    QObject::connect(watchedTask, &Task::finished, context,
+                     [guardedJob, guardedTask, onFailure = std::move(onFailure)]() mutable {
+                         if (!guardedJob || !guardedTask || !guardedJob->isRunning()
+                             || guardedTask->getState() != Task::State::Failed) {
+                             return;
+                         }
+
+                         onFailure(guardedTask->failReason());
+                         if (guardedJob && guardedJob->isRunning())
+                             guardedJob->abort();
+                     },
+                     Qt::DirectConnection);
 }
 }  // namespace Flame::Internal
 
@@ -643,6 +665,7 @@ void FlameCreationTask::idResolverSucceeded()
 void FlameCreationTask::setupDownloadJob()
 {
     m_filesJob.reset(new NetJob(tr("Mod Download Flame"), APPLICATION->network()));
+    m_serverPackFailureHandled = false;
     auto results = m_modIdResolver->getResults().files;
 
     QFile clientOnlyFile;
@@ -743,6 +766,13 @@ void FlameCreationTask::setupDownloadJob()
         if (auto* validator = Flame::createCurseForgeChecksumValidator(m_serverPackHashType, m_serverPackHash)) {
             serverPackDownload->addValidator(validator);
         }
+        Flame::Internal::abortDownloadJobOnTaskFailure(
+            m_filesJob.get(), serverPackDownload.get(), this, [this](QString reason) {
+                if (m_serverPackFailureHandled || !isRunning())
+                    return;
+                m_serverPackFailureHandled = true;
+                emitFailed(std::move(reason));
+            });
         m_filesJob->addTask(serverPackDownload);
     }
 
@@ -757,6 +787,8 @@ void FlameCreationTask::setupDownloadJob()
         },
         [this](QString reason) {
             m_filesJob.reset();
+            if (m_serverPackFailureHandled)
+                return;
             emitFailed(std::move(reason));
         },
         [this]() {

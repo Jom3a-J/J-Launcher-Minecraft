@@ -132,6 +132,20 @@ class Harness {
     QList<QPair<qint64, qint64>> m_progress;
 };
 
+/*! Ensures a task's deferred deletes are drained even if a QtTest assertion returns early. */
+class TaskSettler {
+   public:
+    TaskSettler(Harness& harness, SegmentedDownload::Ptr& task) : m_harness(harness), m_task(task) {}
+    ~TaskSettler() { m_harness.settle(m_task); }
+
+    TaskSettler(const TaskSettler&) = delete;
+    TaskSettler& operator=(const TaskSettler&) = delete;
+
+   private:
+    Harness& m_harness;
+    SegmentedDownload::Ptr& m_task;
+};
+
 /*! Proves the served ranges tile [0, size) exactly - no gap, no overlap, nothing extra. */
 bool rangesTileExactly(QList<QPair<qint64, qint64>> ranges, qint64 size, QString* why)
 {
@@ -766,6 +780,69 @@ class SegmentedDownloadTest final : public QObject {
         QCOMPARE(readAll(harness.target(longName)), body);
         QCOMPARE(server.rangeRequestCount(), 0);
         harness.settle(task);
+    }
+
+    /*! A CDN may refuse Range at its edge host but serve the ordinary GET after redirect. */
+    void rangedForbiddenOrMissingRetriesUnrangedAndValidates()
+    {
+        const QByteArray body = makeBody(MediumSize, 0x43434343u);
+        RangeHttpServer server;
+        QVERIFY(server.start());
+
+        Harness harness;
+        QVERIFY(harness.valid());
+        for (const int status : { 403, 404 }) {
+            const int firstRequest = server.requests().size();
+            const QString route = QStringLiteral("/range-%1.zip").arg(status);
+            auto resource = simpleResource(body);
+            resource.rangeStatus = status;
+            server.serve(route.toUtf8(), resource);
+
+            const QString targetName = QStringLiteral("range-%1.zip").arg(status);
+            auto task = harness.create(server.url(route.toUtf8()), 4, targetName);
+            [[maybe_unused]] TaskSettler settleTask(harness, task);
+            task->addValidator(new Net::ChecksumValidator(QCryptographicHash::Sha1, sha1Of(body)));
+            QVERIFY2(harness.run(task), qPrintable(task->failReason()));
+            QVERIFY2(task->wasSuccessful(), qPrintable(task->failReason()));
+            QCOMPARE(readAll(harness.target(targetName)), body);
+            QVERIFY(!QFileInfo::exists(Net::PartFile::partPathFor(harness.target(targetName))));
+
+            const auto requests = server.requests();
+            QCOMPARE(requests.size() - firstRequest, 2);
+            QCOMPARE(requests.at(firstRequest).status, status);
+            QVERIFY(requests.at(firstRequest).range.startsWith("bytes="));
+            QCOMPARE(requests.at(firstRequest + 1).status, 200);
+            QVERIFY(requests.at(firstRequest + 1).range.isEmpty());
+            QCOMPARE(harness.scheduler()->outstandingPermits(), 0);
+        }
+    }
+
+    /*! An unranged retry still reports a truly missing file and never promotes the part. */
+    void rangedNotFoundAndUnrangedNotFoundFails()
+    {
+        RangeHttpServer server;
+        QVERIFY(server.start());
+        auto resource = simpleResource(makeBody(MediumSize, 0x44444444u));
+        resource.rangeStatus = 404;
+        resource.forcedStatus = 404;
+        server.serve("/missing.zip", resource);
+
+        Harness harness;
+        QVERIFY(harness.valid());
+        auto task = harness.create(server.url("/missing.zip"));
+        [[maybe_unused]] TaskSettler settleTask(harness, task);
+
+        QVERIFY(harness.run(task));
+        QVERIFY(!task->wasSuccessful());
+        const auto requests = server.requests();
+        QCOMPARE(requests.size(), 2);
+        QCOMPARE(requests.first().status, 404);
+        QVERIFY(requests.first().range.startsWith("bytes="));
+        QCOMPARE(requests.last().status, 404);
+        QVERIFY(requests.last().range.isEmpty());
+        QVERIFY(!QFileInfo::exists(harness.target()));
+        QVERIFY(!QFileInfo::exists(Net::PartFile::partPathFor(harness.target())));
+        QCOMPARE(harness.scheduler()->outstandingPermits(), 0);
     }
 
     /*! 416 means the range was refused outright; the file still has to arrive. */

@@ -64,8 +64,10 @@ struct ModrinthDownloadMeta;
  *
  *  Anything the server does that we cannot verify - an unparsable Content-Range, an unknown
  *  total, a content coding that would make byte offsets meaningless, a 416, or the entity
- *  changing under us - either degrades to a single unranged stream or fails closed. It never
- *  promotes a partially correct file.
+ *  changing under us - either degrades to a single unranged stream or fails closed. A 403 or 404
+ *  during Discovery also retries once without Range because some CDNs reject ranged URLs at their
+ *  edge host; the ordinary request still decides whether the file is available. It never promotes
+ *  a partially correct file.
  */
 class SegmentedDownload : public Task {
     Q_OBJECT

@@ -54,6 +54,8 @@ class RangeHttpServer {
         bool multipart = false;
         //! Answer with this status and an empty body instead of anything else.
         int forcedStatus = 0;
+        //! Answer ranged requests with this status, while unranged requests still serve the file.
+        int rangeStatus = 0;
         //! Close the connection after this many body bytes, for the next dropCount requests.
         //! The response still promises the full Content-Length, so the client sees a truncated
         //! transfer rather than a body that simply ended.
@@ -209,6 +211,8 @@ class RangeHttpServer {
                 return "Partial Content";
             case 302:
                 return "Found";
+            case 403:
+                return "Forbidden";
             case 404:
                 return "Not Found";
             case 416:
@@ -239,6 +243,13 @@ class RangeHttpServer {
             return;
         }
         Resource& resource = *it;
+
+        if (!record.range.isEmpty() && resource.rangeStatus != 0) {
+            record.status = resource.rangeStatus;
+            m_requests.append(record);
+            writeSimple(socket, resource.rangeStatus, {});
+            return;
+        }
 
         if (resource.forcedStatus == 302) {
             record.status = 302;
