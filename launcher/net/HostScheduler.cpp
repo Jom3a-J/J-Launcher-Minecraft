@@ -431,14 +431,21 @@ void HostScheduler::migratePermit(Permit permit, const QUrl& url)
         return;
 
     const QString newKey = hostKey(url);
-    if (permitIt->host == newKey)
-        return;
-
+    const HostClass destinationClass = classify(url);
     auto previousIt = m_hosts.find(permitIt->host);
+    const bool sameFlameCdnClass =
+        previousIt != m_hosts.end() && previousIt->hostClass == HostClass::FlameCdn
+        && destinationClass == HostClass::FlameCdn;
+    if (permitIt->host == newKey || sameFlameCdnClass) {
+        // Keep CurseForge file CDN redirects charged to the admitting host so edge can ramp from
+        // its completions while direct segment requests to mediafilez retain their own capacity.
+        return;
+    }
+
     if (previousIt != m_hosts.end() && previousIt->inFlight > 0)
         previousIt->inFlight--;
 
-    HostState& destination = stateFor(newKey, classify(url));
+    HostState& destination = stateFor(newKey, destinationClass);
     destination.inFlight++;
     permitIt->host = newKey;
 

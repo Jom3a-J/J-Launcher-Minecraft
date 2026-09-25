@@ -181,7 +181,9 @@ class HostScheduler : public QObject {
      *
      *  Used when a request follows a redirect to a different host. The transfer is already open,
      *  so it is counted against the new host rather than blocked - which can briefly put that
-     *  host above its limit, but new requests still respect the ceiling until it drains.
+     *  host above its limit, but new requests still respect the ceiling until it drains. Redirects
+     *  between FlameCdn hosts keep their original charge so each host's adaptive state remains
+     *  separate and direct requests to the destination retain its admission capacity.
      */
     void migratePermit(Permit permit, const QUrl& url);
 
