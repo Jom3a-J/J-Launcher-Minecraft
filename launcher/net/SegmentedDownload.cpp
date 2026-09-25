@@ -655,6 +655,10 @@ void SegmentedDownload::onDiscoveryHeaders(QNetworkReply& reply)
         m_discovery->accepted = false;
         if (status == 416) {
             restartUnranged(QStringLiteral("the server rejected the requested range"));
+        } else if (status == 403 || status == 404) {
+            // Some CDNs reject any ranged URL at this hostname while redirecting ordinary GETs
+            // to a working file host. The unranged retry still decides whether the file exists.
+            restartUnranged(tr("the server refused a ranged request with HTTP %1").arg(status));
         }
         return;
     }

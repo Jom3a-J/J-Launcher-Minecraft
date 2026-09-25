@@ -55,6 +55,11 @@ void connectDownloadJobCompletion(NetJob* job,
                                   std::function<void()> onSucceeded,
                                   std::function<void(QString)> onFailed,
                                   std::function<void()> onAborted);
+/*! Fails fast on a watchedTask failure, then aborts the rest of a job before queued work refills. */
+void abortDownloadJobOnTaskFailure(NetJob* job,
+                                   Task* watchedTask,
+                                   QObject* context,
+                                   std::function<void(QString)> onFailure);
 }
 
 class FlameCreationTask final : public InstanceTask {
@@ -101,6 +106,7 @@ class FlameCreationTask final : public InstanceTask {
    private:
     QWidget* m_parent = nullptr;
     bool m_trustedSource;
+    bool m_serverPackFailureHandled = false;
 
     shared_qobject_ptr<Flame::FileResolvingTask> m_modIdResolver;
     Flame::Manifest m_pack;
