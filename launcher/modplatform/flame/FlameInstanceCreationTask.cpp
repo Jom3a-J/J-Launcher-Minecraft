@@ -80,6 +80,26 @@
 #include "ui/dialogs/UntrustedModsDialog.h"
 #include "ui/pages/modplatform/OptionalModDialog.h"
 
+namespace Flame::Internal {
+void connectDownloadJobCompletion(NetJob* job,
+                                  QObject* context,
+                                  std::function<void()> onSucceeded,
+                                  std::function<void(QString)> onFailed,
+                                  std::function<void()> onAborted)
+{
+    // Task::emitFailed() emits failed and then finished too, so the latter must not run success work.
+    QObject::connect(job, &NetJob::failed, context, std::move(onFailed));
+    QObject::connect(job, &NetJob::finished, context,
+                     [job, onSucceeded = std::move(onSucceeded), onAborted = std::move(onAborted)]() mutable {
+                         if (job->wasSuccessful()) {
+                             onSucceeded();
+                         } else if (job->getState() == Task::State::AbortedByUser) {
+                             onAborted();
+                         }
+                     });
+}
+}  // namespace Flame::Internal
+
 bool FlameCreationTask::abort()
 {
     if (!canAbort()) {
@@ -726,17 +746,22 @@ void FlameCreationTask::setupDownloadJob()
         m_filesJob->addTask(serverPackDownload);
     }
 
-    connect(m_filesJob.get(), &NetJob::finished, this, [this]() {
-        m_filesJob.reset();
-        if (!extractServerPack()) {
-            return;
-        }
-        validateOtherResources();
-    });
-    connect(m_filesJob.get(), &NetJob::failed, this, [this](QString reason) {
-        m_filesJob.reset();
-        emitFailed(std::move(reason));
-    });
+    Flame::Internal::connectDownloadJobCompletion(
+        m_filesJob.get(), this,
+        [this]() {
+            m_filesJob.reset();
+            if (!extractServerPack()) {
+                return;
+            }
+            validateOtherResources();
+        },
+        [this](QString reason) {
+            m_filesJob.reset();
+            emitFailed(std::move(reason));
+        },
+        [this]() {
+            m_filesJob.reset();
+        });
     connect(m_filesJob.get(), &NetJob::progress, this, [this](qint64 current, qint64 total) {
         setDetails(tr("%1 out of %2 complete").arg(current).arg(total));
         setProgress(current, total);

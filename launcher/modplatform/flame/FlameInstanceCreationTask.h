@@ -35,6 +35,7 @@
 
 #pragma once
 
+#include <functional>
 #include <memory>
 #include <optional>
 
@@ -46,6 +47,15 @@
 #include "net/NetJob.h"
 
 #include "ui/dialogs/BlockedModsDialog.h"
+
+namespace Flame::Internal {
+/*! Connects terminal outcomes separately; never treats Task::finished as success. */
+void connectDownloadJobCompletion(NetJob* job,
+                                  QObject* context,
+                                  std::function<void()> onSucceeded,
+                                  std::function<void(QString)> onFailed,
+                                  std::function<void()> onAborted);
+}
 
 class FlameCreationTask final : public InstanceTask {
     Q_OBJECT
