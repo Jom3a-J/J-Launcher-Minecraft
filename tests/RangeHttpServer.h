@@ -26,7 +26,7 @@
 #include <QUrl>
 #include <memory>
 
-/*! A loopback HTTP server that understands Range, and can be told to misbehave.
+/*! A loopback HTTP server that understands Range, accepts proxy absolute-URI targets, and can be told to misbehave.
  *
  *  Modelled on the LoopbackHttpServer in NetRequest_test.cpp and kept just as small: it reads a
  *  whole request, answers it, and closes. Everything a segmented download has to survive is a
@@ -68,6 +68,7 @@ class RangeHttpServer {
 
     struct RequestRecord {
         QByteArray target;
+        QByteArray host;
         QByteArray range;
         QByteArray ifRange;
         QByteArray acceptEncoding;
@@ -225,10 +226,15 @@ class RangeHttpServer {
     void respond(QTcpSocket* socket, const QByteArray& request)
     {
         const QByteArray firstLine = request.left(request.indexOf("\r\n"));
-        const QByteArray target = firstLine.split(' ').value(1);
+        const QByteArray requestTarget = firstLine.split(' ').value(1);
+        const QUrl absoluteTarget = QUrl::fromEncoded(requestTarget);
+        const bool proxyRequest = absoluteTarget.isValid() && !absoluteTarget.scheme().isEmpty()
+                               && !absoluteTarget.host().isEmpty();
+        const QByteArray target = proxyRequest ? absoluteTarget.path(QUrl::FullyEncoded).toUtf8() : requestTarget;
 
         RequestRecord record;
         record.target = target;
+        record.host = proxyRequest ? absoluteTarget.host().toUtf8() : headerValue(request, "Host");
         record.range = headerValue(request, "Range");
         record.ifRange = headerValue(request, "If-Range");
         record.acceptEncoding = headerValue(request, "Accept-Encoding");

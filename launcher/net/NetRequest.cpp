@@ -114,11 +114,8 @@ bool applyCdnHttp1TransportPolicy(QNetworkRequest& request, bool enabled)
     if (!enabled)
         return false;
 
-    const QString host = request.url().host().toLower();
-    // Keep this exact allowlist narrow: forgecdn.net is a shared domain and only these
-    // confirmed CurseForge file endpoints should change transport behavior.
-    if (host != QStringLiteral("edge.forgecdn.net") && host != QStringLiteral("mediafilez.forgecdn.net")
-        && host != QStringLiteral("media.forgecdn.net")) {
+    // Host classification is an exact allowlist; do not broaden this to a forgecdn.net suffix.
+    if (HostScheduler::classify(request.url()) != HostClass::FlameCdn) {
         return false;
     }
 
@@ -224,6 +221,12 @@ void NetRequest::executeTask()
     if (rep == nullptr)  // it failed
         return;
     m_reply.reset(rep);
+    if (m_cdnHttp1PolicyApplied) {
+        connect(rep, &QNetworkReply::redirected, this, [this](const QUrl& redirectedUrl) {
+            if (m_url.host().compare(redirectedUrl.host(), Qt::CaseInsensitive) != 0)
+                emit redirectedToNewHost(redirectedUrl);
+        });
+    }
     connect(rep, &QNetworkReply::uploadProgress, this, &NetRequest::onProgress);
     connect(rep, &QNetworkReply::downloadProgress, this, &NetRequest::onProgress);
     connect(rep, &QNetworkReply::finished, this, &NetRequest::downloadFinished);

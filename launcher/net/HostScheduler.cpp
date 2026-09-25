@@ -49,7 +49,14 @@ const QHash<QString, HostClass>& exactHostTable()
 
         add(hostOf(BuildConfig.DEFAULT_RESOURCE_BASE), HostClass::MinecraftResources);
         add(hostOf(BuildConfig.LIBRARY_BASE), HostClass::MinecraftLibraries);
-        add(BuildConfig.FLAME_DOWNLOAD_HOST, HostClass::FlameCdn);
+        // The edge endpoint redirects file bytes to these CDN hosts; they share the same file policy.
+        const QStringList flameCdnHosts = {
+            BuildConfig.FLAME_DOWNLOAD_HOST,
+            QStringLiteral("mediafilez.forgecdn.net"),
+            QStringLiteral("media.forgecdn.net"),
+        };
+        for (const auto& host : flameCdnHosts)
+            add(host, HostClass::FlameCdn);
         add(BuildConfig.MODRINTH_DOWNLOAD_HOST, HostClass::ModrinthCdn);
         add(hostOf(BuildConfig.FLAME_BASE_URL), HostClass::FlameApi);
         add(hostOf(BuildConfig.MODRINTH_PROD_URL), HostClass::ModrinthApi);

@@ -38,8 +38,8 @@ class CdnTransportPolicyTest final : public QObject {
     {
         const QList<std::tuple<QString, HostClass, int>> hosts = {
             { QStringLiteral("edge.forgecdn.net"), HostClass::FlameCdn, 16 },
-            { QStringLiteral("mediafilez.forgecdn.net"), HostClass::Unknown, HostScheduler::UnknownHostCeiling },
-            { QStringLiteral("media.forgecdn.net"), HostClass::Unknown, HostScheduler::UnknownHostCeiling },
+            { QStringLiteral("mediafilez.forgecdn.net"), HostClass::FlameCdn, 16 },
+            { QStringLiteral("media.forgecdn.net"), HostClass::FlameCdn, 16 },
         };
 
         for (const auto& [host, expectedClass, expectedLimit] : hosts) {

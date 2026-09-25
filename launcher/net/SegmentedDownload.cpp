@@ -367,7 +367,8 @@ SegmentedDownload::SegmentedDownload(QUrl url,
                                      HostScheduler* scheduler,
                                      int maxSegments)
     : Task()
-    , m_url(std::move(url))
+    , m_url(url)
+    , m_originalUrl(std::move(url))
     , m_targetPath(std::move(path))
     , m_network(network)
     , m_scheduler(scheduler ? scheduler : HostScheduler::global())
@@ -445,21 +446,31 @@ bool SegmentedDownload::ranUnsegmented() const
 
 int SegmentedDownload::allowedSegments() const
 {
+    return allowedSegments(m_url);
+}
+
+int SegmentedDownload::allowedSegments(const QUrl& url) const
+{
     const int wanted = qBound(0, m_maxSegments, MaxSegments);
     if (wanted < 2)
         return 1;
     // Never take more than half of what the host is allowed to run at once, so the ordinary
     // files queued next to this one keep a share of the pool.
-    const int ceiling = m_scheduler ? m_scheduler->ceilingFor(m_url) : HostScheduler::UnknownHostCeiling;
+    const int ceiling = m_scheduler ? m_scheduler->ceilingFor(url) : HostScheduler::UnknownHostCeiling;
     return qMin(wanted, qMax(1, ceiling / 2));
 }
 
 int SegmentedDownload::segmentCountFor(qint64 total) const
 {
+    return segmentCountFor(total, m_url);
+}
+
+int SegmentedDownload::segmentCountFor(qint64 total, const QUrl& url) const
+{
     if (total < MinSegmentedSize)
         return 1;
     const qint64 byMinimumSize = total / MinSegmentSize;
-    return static_cast<int>(qBound<qint64>(1, byMinimumSize, static_cast<qint64>(allowedSegments())));
+    return static_cast<int>(qBound<qint64>(1, byMinimumSize, static_cast<qint64>(allowedSegments(url))));
 }
 
 void SegmentedDownload::resetForRestart()
@@ -475,6 +486,7 @@ void SegmentedDownload::resetForRestart()
         m_part->discard();
         m_part.reset();
     }
+    m_url = m_originalUrl;
     m_states.clear();
     m_discovery.reset();
     m_mode = Mode::Idle;
@@ -483,6 +495,8 @@ void SegmentedDownload::resetForRestart()
     m_rangesUsable = false;
     m_restartPending = false;
     m_restarted = false;
+    m_discoveryRangeRefused = false;
+    m_redirectRangeRetried = false;
     m_aborting = false;
     m_segmentsUsed = 0;
     m_lastProgress = 0;
@@ -658,6 +672,7 @@ void SegmentedDownload::onDiscoveryHeaders(QNetworkReply& reply)
         if (status == 416) {
             restartUnranged(QStringLiteral("the server rejected the requested range"));
         } else if (status == 403 || status == 404) {
+            m_discoveryRangeRefused = true;
             // Some CDNs reject any ranged URL at this hostname while redirecting ordinary GETs
             // to a working file host. The unranged retry still decides whether the file exists.
             restartUnranged(tr("the server refused a ranged request with HTTP %1").arg(status));
@@ -705,6 +720,22 @@ void SegmentedDownload::onSegmentHeaders(const std::shared_ptr<SegmentState>& st
         return;
 
     if (m_mode == Mode::Plain) {
+        if (state == m_discovery && m_discoveryRangeRefused && !m_redirectRangeRetried && status == 200) {
+            const QUrl resolvedUrl = reply.url();
+            bool hasUsableLength = false;
+            const qint64 total = reply.header(QNetworkRequest::ContentLengthHeader).toLongLong(&hasUsableLength);
+            const bool advertisesByteRanges = reply.rawHeader("Accept-Ranges").trimmed().toLower() == "bytes";
+            const bool wasRedirected = resolvedUrl.isValid() && resolvedUrl != m_url;
+
+            if (wasRedirected && hasUsableLength && total > 0 && advertisesByteRanges
+                && !hasTransformingContentEncoding(reply)
+                && HostScheduler::classify(m_originalUrl) == HostClass::FlameCdn
+                && segmentCountFor(total, resolvedUrl) > 1) {
+                restartDiscoveryAtResolvedUrl(resolvedUrl);
+                return;
+            }
+        }
+
         // No Range was sent, so any successful response is the whole entity, from byte zero.
         state->headersSeen = true;
         state->accepted = status >= 200 && status < 300;
@@ -800,6 +831,50 @@ void SegmentedDownload::restartUnranged(const QString& why)
             m_job->addNetAction(makeSegmentRequest(m_discovery, false));
             connectJob();
             m_job->start();
+        },
+        Qt::QueuedConnection);
+}
+
+void SegmentedDownload::restartDiscoveryAtResolvedUrl(const QUrl& url)
+{
+    if (m_restartPending || m_aborting || m_redirectRangeRetried || !m_part || !isRunning())
+        return;
+
+    qCDebug(taskDownloadLogC) << getUid().toString() << "Restarting ranged discovery at redirected URL"
+                              << Privacy::sanitizeUrl(url);
+    m_restartPending = true;
+    m_redirectRangeRetried = true;
+    for (const auto& state : m_states)
+        state->dropWrites = true;
+
+    // Stop the full-file retry after the response headers have identified a range-capable target.
+    QMetaObject::invokeMethod(
+        this,
+        [this, url] {
+            m_restartPending = false;
+            if (!isRunning() || m_aborting)
+                return;
+
+            retireJob();
+
+            QString error;
+            if (!m_part->truncateAll(&error)) {
+                failWith(error);
+                return;
+            }
+
+            m_url = url;
+            m_total = -1;
+            m_entityValidator.clear();
+            m_rangesUsable = false;
+            m_segmentsUsed = 0;
+            m_states.clear();
+            m_discovery.reset();
+            // The edge-to-target handoff used the first unranged restart. Allow one more plain
+            // stream if the resolved host's own Discovery refuses Range; the separate redirect
+            // guard remains set, so that fallback cannot start another split attempt.
+            m_restarted = false;
+            startDiscovery();
         },
         Qt::QueuedConnection);
 }
