@@ -451,9 +451,13 @@ int SegmentedDownload::allowedSegments() const
 
 int SegmentedDownload::allowedSegments(const QUrl& url) const
 {
-    const int wanted = qBound(0, m_maxSegments, MaxSegments);
+    int wanted = qBound(0, m_maxSegments, MaxSegments);
     if (wanted < 2)
         return 1;
+    // CurseForge files benefit from filling the Flame CDN's eight-connection cold start; other
+    // hosts continue to use the caller's configured segment count.
+    if (HostScheduler::classify(url) == HostClass::FlameCdn)
+        wanted = MaxSegments;
     // Never take more than half of what the host is allowed to run at once, so the ordinary
     // files queued next to this one keep a share of the pool.
     const int ceiling = m_scheduler ? m_scheduler->ceilingFor(url) : HostScheduler::UnknownHostCeiling;

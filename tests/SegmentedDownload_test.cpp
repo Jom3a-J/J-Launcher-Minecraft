@@ -47,6 +47,9 @@ namespace {
  *  discovery chunk still gives every segment more than MinSegmentSize (8 MiB).
  */
 constexpr qint64 LargeSize = 33LL * 1024 * 1024;
+/// Leaves eight full minimum-size segments after Discovery has consumed its first 1 MiB chunk.
+constexpr qint64 EightSegmentSize = SegmentedDownload::MaxSegments * SegmentedDownload::MinSegmentSize
+    + SegmentedDownload::DiscoveryChunk;
 /// Below the threshold, and below the discovery chunk, so it arrives in a single request.
 constexpr qint64 TinySize = 64LL * 1024;
 /// Above the discovery chunk but below the threshold: fetched, but never split.
@@ -822,7 +825,7 @@ class SegmentedDownloadTest final : public QObject {
     /*! A ranged refusal at edge can split after the plain retry reveals a range-capable redirect. */
     void redirectedRangeCapableTargetIsSplitAndValidated()
     {
-        const QByteArray body = makeBody(LargeSize, 0x45454545u);
+        const QByteArray body = makeBody(EightSegmentSize, 0x45454545u);
         RangeHttpServer server;
         QVERIFY(server.start());
 
@@ -846,7 +849,7 @@ class SegmentedDownloadTest final : public QObject {
 
         QVERIFY2(harness.run(task, 120000), qPrintable(task->failReason()));
         QVERIFY2(task->wasSuccessful(), qPrintable(task->failReason()));
-        QVERIFY2(task->segmentsUsed() > 1, "the redirected large file was not split");
+        QCOMPARE(task->segmentsUsed(), SegmentedDownload::MaxSegments);
         QCOMPARE(readAll(harness.target()), body);
         QVERIFY(!QFileInfo::exists(Net::PartFile::partPathFor(harness.target())));
 
@@ -881,7 +884,7 @@ class SegmentedDownloadTest final : public QObject {
                 QCOMPARE(targetRequests.at(i).ifRange, QByteArrayLiteral("\"v1\""));
         }
         QString why;
-        QVERIFY2(rangesTileExactly(server.servedRanges(), LargeSize, &why), qPrintable(why));
+        QVERIFY2(rangesTileExactly(server.servedRanges(), EightSegmentSize, &why), qPrintable(why));
         QCOMPARE(harness.scheduler()->outstandingPermits(), 0);
     }
 

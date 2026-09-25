@@ -250,8 +250,13 @@ HostScheduler::HostState& HostScheduler::stateFor(const QString& key, HostClass 
 
     HostState fresh;
     fresh.hostClass = hostClass;
-    fresh.limit = isPinned(hostClass) ? 1 : qMin(ColdStartLevel, scaledCeiling(hostClass));
+    fresh.limit = isPinned(hostClass) ? 1 : qMin(coldStartLevelFor(hostClass), scaledCeiling(hostClass));
     return *m_hosts.insert(key, fresh);
+}
+
+int HostScheduler::coldStartLevelFor(HostClass hostClass)
+{
+    return hostClass == HostClass::FlameCdn ? FlameCdnColdStartLevel : ColdStartLevel;
 }
 
 int HostScheduler::ceilingFor(const QUrl& url) const
@@ -264,7 +269,7 @@ int HostScheduler::limitFor(const QUrl& url) const
     const auto it = m_hosts.constFind(hostKey(url));
     if (it == m_hosts.constEnd()) {
         const HostClass hostClass = classify(url);
-        return isPinned(hostClass) ? 1 : qMin(ColdStartLevel, scaledCeiling(hostClass));
+        return isPinned(hostClass) ? 1 : qMin(coldStartLevelFor(hostClass), scaledCeiling(hostClass));
     }
     return effectiveLimit(*it);
 }

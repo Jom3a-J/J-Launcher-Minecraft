@@ -86,6 +86,8 @@ class HostScheduler : public QObject {
     static constexpr int BulkCap = GlobalCap - ApiReserve;
     /// Level every adaptive host starts at, clamped by its ceiling.
     static constexpr int ColdStartLevel = 4;
+    /// Default Flame CDN cold start, clamped by the scaled per-host ceiling.
+    static constexpr int FlameCdnColdStartLevel = 8;
     /*! Clean completions required before a host is allowed one more concurrent request.
      *
      *  A modpack is a few hundred files, so a slow ramp is most of the job: at ten per step a
@@ -238,6 +240,7 @@ class HostScheduler : public QObject {
     };
 
     HostState& stateFor(const QString& key, HostClass hostClass);
+    static int coldStartLevelFor(HostClass hostClass);
     int scaledCeiling(HostClass hostClass) const;
     int effectiveLimit(const HostState& state) const;
     void applyOutcome(HostState& state, HostOutcome outcome, qint64 retryAfterSeconds);
