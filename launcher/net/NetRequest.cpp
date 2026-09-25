@@ -41,12 +41,13 @@
 
 #include <QDateTime>
 #include <QFileInfo>
+#include <QHttp1Configuration>
 #include <QLocale>
 #include <QNetworkReply>
 #include <QUrl>
+#include <array>
 #include <cstdint>
 #include <memory>
-#include <array>
 
 #if defined(LAUNCHER_APPLICATION)
 #include "Application.h"
@@ -56,6 +57,7 @@
 
 #include "MMCTime.h"
 #include "StringUtils.h"
+#include "net/HostScheduler.h"
 #include "logs/Privacy.h"
 #include "net/NetUtils.h"
 
@@ -107,6 +109,27 @@ bool containsCredentials(const QNetworkRequest& request)
 }
 }  // namespace
 
+bool applyCdnHttp1TransportPolicy(QNetworkRequest& request, bool enabled)
+{
+    if (!enabled)
+        return false;
+
+    const QString host = request.url().host().toLower();
+    // Keep this exact allowlist narrow: forgecdn.net is a shared domain and only these
+    // confirmed CurseForge file endpoints should change transport behavior.
+    if (host != QStringLiteral("edge.forgecdn.net") && host != QStringLiteral("mediafilez.forgecdn.net")
+        && host != QStringLiteral("media.forgecdn.net")) {
+        return false;
+    }
+
+    const int connectionCount = HostScheduler::hardCeiling(HostScheduler::classify(request.url()));
+    auto http1 = request.http1Configuration();
+    http1.setNumberOfConnectionsPerHost(connectionCount);
+    request.setHttp1Configuration(http1);
+    request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+    return true;
+}
+
 NetRequest::NetRequest() : Task()
 {
     connect(&m_retryTimer, &QTimer::timeout, this, &NetRequest::executeTask);
@@ -128,6 +151,7 @@ void NetRequest::addValidator(Validator* v)
 
 void NetRequest::executeTask()
 {
+    m_cdnHttp1PolicyApplied = false;
     setStatus(tr("Requesting %1").arg(Privacy::sanitizeUrl(m_url, 80)));
 
     if (getState() == Task::State::AbortedByUser) {
@@ -161,6 +185,11 @@ void NetRequest::executeTask()
             emit finished();
             return;
     }
+
+#if defined(LAUNCHER_APPLICATION)
+    m_cdnHttp1PolicyApplied =
+        applyCdnHttp1TransportPolicy(request, APPLICATION->settings()->get("CdnHttp1Connections").toBool());
+#endif
 
 #if defined(LAUNCHER_APPLICATION)
     auto user_agent = APPLICATION->getUserAgent();

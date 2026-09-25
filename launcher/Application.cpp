@@ -666,6 +666,8 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
         m_settings->registerSetting("NumberOfConcurrentDownloads", 6);
         m_settings->registerSetting("NumberOfManualRetries", 1);
         m_settings->registerSetting("RequestTimeout", 60);
+        // Use separate HTTP/1 connections for known CurseForge file CDNs; keep this hidden for A/B testing.
+        m_settings->registerSetting("CdnHttp1Connections", true);
         // How many parallel HTTP ranges one large file may be split into. 0 or 1 turns the
         // behaviour off entirely and every download runs as a single stream.
         m_settings->registerSetting("SegmentedDownloadSegments", Net::SegmentedDownload::DefaultSegments);

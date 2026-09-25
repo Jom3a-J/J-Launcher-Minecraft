@@ -85,6 +85,8 @@ class SegmentedDownload : public Task {
     static constexpr qint64 DiscoveryChunk = 1LL * 1024 * 1024;
     /// Per reply read buffer, so N segments cannot queue an unbounded amount of memory.
     static constexpr qint64 ReadBufferBytes = 1LL * 1024 * 1024;
+    /// Larger buffer for opted-in HTTP/1 CDN replies, where a small buffer can stall the socket.
+    static constexpr qint64 CdnHttp1ReadBufferBytes = 4LL * 1024 * 1024;
     /// Chunk size of the final validator replay.
     static constexpr qint64 ValidationChunkBytes = 1LL * 1024 * 1024;
     /// The default of the "SegmentedDownloadSegments" setting.

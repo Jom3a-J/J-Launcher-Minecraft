@@ -242,9 +242,11 @@ class SegmentRequest final : public Download {
         auto* reply = Download::getReply(request);
         if (!reply)
             return nullptr;
-        // Bounds how much Qt may buffer for this reply, so N segments cannot queue an unbounded
-        // amount of memory between event loop turns.
-        reply->setReadBufferSize(SegmentedDownload::ReadBufferBytes);
+        // Bound per-reply buffering; the opted-in HTTP/1 CDN path needs more room if the GUI
+        // thread misses an event-loop turn, while other requests keep the existing 1 MiB cap.
+        const qint64 readBufferBytes = m_cdnHttp1PolicyApplied ? SegmentedDownload::CdnHttp1ReadBufferBytes
+                                                              : SegmentedDownload::ReadBufferBytes;
+        reply->setReadBufferSize(readBufferBytes);
         QObject::connect(reply, &QNetworkReply::metaDataChanged, this, [this, reply]() {
             if (m_onHeaders)
                 m_onHeaders(*reply);
