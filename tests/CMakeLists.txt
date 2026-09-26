@@ -111,6 +111,8 @@ ecm_add_test(TranslationMetadata_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_V
     TEST_NAME TranslationMetadata)
 ecm_add_test(ModpackServerSupport_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME ModpackServerSupport)
+ecm_add_test(LegacyFTBServerPack_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME LegacyFTBServerPack)
 ecm_add_test(TranslationsModel_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME TranslationsModel)
 

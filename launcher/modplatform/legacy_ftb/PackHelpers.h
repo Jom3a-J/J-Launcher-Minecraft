@@ -5,6 +5,8 @@
 #include <QString>
 #include <QStringList>
 
+#include "modplatform/ServerSupport.h"
+
 namespace LegacyFTB {
 
 // Header for structs etc...
@@ -23,6 +25,7 @@ struct Modpack {
     // Technical data
     QString dir;
     QString file;  //<- Url in the xml, but doesn't make much sense
+    QString serverPack;
 
     bool bugged = false;
     bool broken = false;

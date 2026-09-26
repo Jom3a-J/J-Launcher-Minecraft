@@ -4,6 +4,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QJsonValue>
+#include <QString>
 #include <QUrl>
 
 namespace ModPlatform {
@@ -43,6 +44,28 @@ inline ServerSupport technicServerSupport(const QUrl& url)
         return ServerSupport::Official;
     }
     return ServerSupport::Website;
+}
+
+inline ServerSupport legacyFtbServerSupport(const QString& serverPack)
+{
+    return serverPack.isEmpty() ? ServerSupport::ClientDerived : ServerSupport::Official;
+}
+
+inline QString legacyFtbPackVersionFolder(QString version)
+{
+    return version.replace(QLatin1Char('.'), QLatin1Char('_'));
+}
+
+inline QUrl legacyFtbPackUrl(const QString& baseUrl, bool privatePack, const QString& directory,
+                             const QString& version, const QString& file)
+{
+    const QString root = privatePack ? QStringLiteral("privatepacks") : QStringLiteral("modpacks");
+    return QUrl(QStringLiteral("%1%2/%3/%4/%5")
+                    .arg(baseUrl)
+                    .arg(root)
+                    .arg(directory)
+                    .arg(legacyFtbPackVersionFolder(version))
+                    .arg(file));
 }
 
 }  // namespace ModPlatform
