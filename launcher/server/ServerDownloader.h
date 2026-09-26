@@ -135,6 +135,10 @@ private:
     void fetchForgeVersions();
     void onForgeVersionsFetched(const QByteArray &data);
     void downloadForgeInstaller(const QString &forgeVersion);
+    void onForgeInstallerMetadataFetched(const QByteArray &data);
+    QString resolveForgeMavenVersion(const QByteArray &data, const QString &forgeVersion) const;
+    void prepareForgeInstaller(const QString &forgeVersion, const QString &mavenVersion);
+    void beginForgeInstallerDownload(const QString &forgeVersion, const QString &mavenVersion);
     void onForgeInstallerDownloaded();
 
     // NeoForge
@@ -178,7 +182,9 @@ private:
         FetchingPurpurBuilds,
         // Forge
         FetchingForgeVersions,
+        ResolvingForgeInstallerMetadata,
         DownloadingForgeInstaller,
+        DownloadingLegacyForgeServerJar,
         // NeoForge
         FetchingNeoForgeVersions,
         DownloadingNeoForgeInstaller,
@@ -199,6 +205,11 @@ private:
     QString m_buildsType;
     QString m_buildsVersion;
     QString m_fabricInstallerVer; // cached for Fabric two-step
+    QString m_pendingForgeVersion;
+    QString m_pendingForgeMavenVersion;
+    QString m_legacyForgeServerJarPath;
+    bool m_fetchingLegacyForgeServerJar = false;
+    bool m_downloadingLegacyForgeServerJar = false;
 
     QNetworkAccessManager *m_network = nullptr; //!< Private manager retained for metadata requests.
     QNetworkAccessManager *m_downloadNetwork = nullptr; //!< Shared app manager, or app-owned fallback for downloads.
