@@ -14,6 +14,9 @@
 #include <QTemporaryDir>
 #include <QTest>
 
+#include <algorithm>
+#include <utility>
+
 #include <archive/ArchiveWriter.h>
 #include <server/ServerDownloader.h>
 #include <server/ServerContentUpdater.h>
@@ -24,6 +27,11 @@
 #include <java/JavaUtils.h>
 #include <server/ServerManager.h>
 #include <server/ServerProperties.h>
+#include <net/HostScheduler.h>
+#include <net/PartFile.h>
+#include <net/SegmentedDownload.h>
+
+#include "RangeHttpServer.h"
 
 namespace {
 bool writeFile(const QString& path, const QByteArray& contents)
@@ -121,6 +129,44 @@ QUrl directoryUrl(const QString& path)
 {
     return QUrl::fromLocalFile(
         QDir::fromNativeSeparators(QDir(path).absolutePath()) + '/');
+}
+
+RangeHttpServer::Resource httpResource(QByteArray body)
+{
+    RangeHttpServer::Resource resource;
+    resource.body = std::move(body);
+    resource.etag = QByteArrayLiteral("\"server-v1\"");
+    return resource;
+}
+
+void addVanillaHttpFixture(RangeHttpServer& server, const QByteArray& jar,
+                           const QString& expectedSha1, qint64 stallAfter = -1)
+{
+    const QString versionJsonPath = QStringLiteral("/version.json");
+    const QString jarPath = QStringLiteral("/server.jar");
+    server.serve("/manifest.json", httpResource(QJsonDocument(QJsonObject{
+        { "versions", QJsonArray{ QJsonObject{
+            { "id", "1.21.8" },
+            { "type", "release" },
+            { "url", server.url(versionJsonPath.toUtf8()).toString() },
+        } } },
+    }).toJson(QJsonDocument::Compact)));
+    server.serve(versionJsonPath.toUtf8(), httpResource(QJsonDocument(QJsonObject{
+        { "downloads", QJsonObject{ { "server", QJsonObject{
+            { "url", server.url(jarPath.toUtf8()).toString() },
+            { "sha1", expectedSha1 },
+        } } } },
+    }).toJson(QJsonDocument::Compact)));
+    auto jarResource = httpResource(jar);
+    jarResource.stallAfter = stallAfter;
+    server.serve(jarPath.toUtf8(), std::move(jarResource));
+}
+
+ServerProviderEndpoints vanillaHttpEndpoints(const RangeHttpServer& server)
+{
+    auto endpoints = ServerProviderEndpoints::production();
+    endpoints.vanillaManifest = server.url("/manifest.json");
+    return endpoints;
 }
 
 class FixtureHttpServer
@@ -1496,7 +1542,153 @@ class ArgumentProbe {
                      qPrintable(provider.at(0) + ": "
                                 + finished.last().at(1).toString()));
             QCOMPARE(downloader.resolvedLoaderVersion(), provider.at(2));
+            if (provider.at(0) == QStringLiteral("forge")
+                || provider.at(0) == QStringLiteral("neoforge")) {
+                QVERIFY(!QFileInfo::exists(
+                    serverLoaderInstallIncompleteMarkerPath(destination)));
+            }
         }
+    }
+
+    void failedForgeInstallerMarksTheServerUnlaunchable()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString destination = root.filePath("failed-forge");
+        const QString loaderJar = QDir(destination).filePath(
+            "forge-26.3-66.0.4-shim.jar");
+        QVERIFY(writeFile(
+            root.filePath(
+                "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/"
+                "forge-1.21.1-52.0.1-installer.jar"),
+            "synthetic forge installer"));
+
+        ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
+        endpoints.forgeMavenBase = directoryUrl(root.filePath("forge-maven"));
+        ServerInstance server("failed-forge", "Failed Forge", endpoints);
+        server.setServerDirectory(destination);
+        server.setVersion("1.21.1");
+        server.setLoaderType("forge");
+        server.setLoaderVersion("52.0.1");
+        server.setJavaPath(fakeMinecraftServerPath());
+        QSignalSpy finished(&server, &ServerInstance::serverSoftwareDownloadFinished);
+        ScopedEnvironmentVariable fakeLoaderJar(
+            "JLAUNCHER_TEST_INSTALLER_LOADER_JAR", loaderJar.toLocal8Bit());
+        const QString countPath = root.filePath("installer-count");
+        ScopedEnvironmentVariable installerCount(
+            "JLAUNCHER_TEST_INSTALLER_COUNT_FILE", countPath.toLocal8Bit());
+
+        {
+            ScopedEnvironmentVariable exitCode("JLAUNCHER_TEST_INSTALLER_EXIT_CODE", "7");
+            QVERIFY(server.prepareServerSoftware());
+            QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 10000);
+            QVERIFY(!finished.constFirst().at(1).toBool());
+        }
+
+        QVERIFY(QFileInfo::exists(loaderJar));
+        QVERIFY(QFileInfo::exists(
+            serverLoaderInstallIncompleteMarkerPath(destination)));
+        QCOMPARE(server.serverJarPath(), QFileInfo(loaderJar).absoluteFilePath());
+        QVERIFY(!server.hasInstalledLaunchTarget());
+        QCOMPARE(readFile(countPath), QByteArray("1"));
+
+        {
+            ScopedEnvironmentVariable exitCode("JLAUNCHER_TEST_INSTALLER_EXIT_CODE", "0");
+            QVERIFY(server.prepareServerSoftware());
+            QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 2, 10000);
+            QVERIFY(finished.at(1).at(1).toBool());
+        }
+        QCOMPARE(readFile(countPath), QByteArray("2"));
+        QVERIFY(!QFileInfo::exists(
+            serverLoaderInstallIncompleteMarkerPath(destination)));
+    }
+
+    void cancellingForgeInstallerStopsItAndPrepareRetries()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString destination = root.filePath("cancelled-forge");
+        const QString loaderJar = QDir(destination).filePath(
+            "forge-26.3-66.0.4-shim.jar");
+        const QString installerPath = QDir(destination).filePath("forge-installer.jar");
+        const QString installerLogPath = installerPath + QStringLiteral(".log");
+        const QString readyPath = root.filePath("installer-ready");
+        const QString completedPath = root.filePath("installer-completed");
+        const QString countPath = root.filePath("installer-count");
+        QVERIFY(writeFile(
+            root.filePath(
+                "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/"
+                "forge-1.21.1-52.0.1-installer.jar"),
+            "synthetic forge installer"));
+
+        ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
+        endpoints.forgeMavenBase = directoryUrl(root.filePath("forge-maven"));
+        ServerInstance server("cancelled-forge", "Cancelled Forge", endpoints);
+        server.setServerDirectory(destination);
+        server.setVersion("1.21.1");
+        server.setLoaderType("forge");
+        server.setLoaderVersion("52.0.1");
+        server.setJavaPath(fakeMinecraftServerPath());
+        QSignalSpy finished(&server, &ServerInstance::serverSoftwareDownloadFinished);
+        ScopedEnvironmentVariable fakeLoaderJar(
+            "JLAUNCHER_TEST_INSTALLER_LOADER_JAR", loaderJar.toLocal8Bit());
+        ScopedEnvironmentVariable installerCount(
+            "JLAUNCHER_TEST_INSTALLER_COUNT_FILE", countPath.toLocal8Bit());
+        {
+            ScopedEnvironmentVariable delay("JLAUNCHER_TEST_INSTALLER_DELAY_MS", "2000");
+            ScopedEnvironmentVariable ready(
+                "JLAUNCHER_TEST_INSTALLER_READY_FILE", readyPath.toLocal8Bit());
+            ScopedEnvironmentVariable completed(
+                "JLAUNCHER_TEST_INSTALLER_COMPLETED_FILE", completedPath.toLocal8Bit());
+            ScopedEnvironmentVariable createLog("JLAUNCHER_TEST_INSTALLER_CREATE_LOG", "1");
+
+            QVERIFY(server.prepareServerSoftware());
+            QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(readyPath), 10000);
+            QVERIFY(QFileInfo::exists(installerLogPath));
+            QVERIFY(server.cancelDownload());
+            QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 5000);
+            QCOMPARE(finished.constFirst().at(1).toBool(), false);
+            QCOMPARE(finished.constFirst().at(2).toBool(), true);
+        }
+
+        QTest::qWait(2200);
+        QVERIFY(!QFileInfo::exists(completedPath));
+        QVERIFY(QFileInfo::exists(
+            serverLoaderInstallIncompleteMarkerPath(destination)));
+        QVERIFY(!QFileInfo::exists(installerPath));
+        QVERIFY(!QFileInfo::exists(installerLogPath));
+        QVERIFY(QFileInfo::exists(loaderJar));
+        QCOMPARE(server.serverJarPath(), QFileInfo(loaderJar).absoluteFilePath());
+        QCOMPARE(readFile(countPath), QByteArray("1"));
+
+        QVERIFY(!server.hasInstalledLaunchTarget());
+        QVERIFY(server.prepareServerSoftware());
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 2, 10000);
+        QCOMPARE(finished.at(1).at(1).toBool(), true);
+        QCOMPARE(readFile(countPath), QByteArray("2"));
+        QVERIFY(!QFileInfo::exists(
+            serverLoaderInstallIncompleteMarkerPath(destination)));
+        QVERIFY(server.hasInstalledLaunchTarget());
+    }
+
+    void existingForgeJarWithoutIncompleteMarkerRemainsReady()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QString destination = temporaryRoot.filePath("existing-forge");
+        const QString loaderJar = QDir(destination).filePath(
+            "forge-1.21.1-52.0.1-shim.jar");
+        QVERIFY(writeFile(loaderJar, "existing forge server jar"));
+
+        ServerInstance server("existing-forge", "Existing Forge");
+        server.setServerDirectory(destination);
+        server.setLoaderType("forge");
+        QVERIFY(!QFileInfo::exists(
+            serverLoaderInstallIncompleteMarkerPath(destination)));
+        QVERIFY(server.hasInstalledLaunchTarget());
+        QVERIFY(server.prepareServerSoftware());
     }
 
     void rejectsForgeInstallWhenMinecraftServerPayloadIsMissing()
@@ -1524,10 +1716,14 @@ class ArgumentProbe {
         QVERIFY(!finished.last().at(0).toBool());
         QVERIFY(finished.last().at(1).toString().contains(
             "did not download the Minecraft server files"));
+        QVERIFY(QFileInfo::exists(
+            serverLoaderInstallIncompleteMarkerPath(destination)));
+        QVERIFY(QFileInfo::exists(
+            serverLoaderInstallIncompleteMarkerPath(destination)));
 #ifdef Q_OS_WIN
-        QVERIFY(!QFileInfo::exists(QDir(destination).filePath("run.bat")));
+        QVERIFY(QFileInfo::exists(QDir(destination).filePath("run.bat")));
 #else
-        QVERIFY(!QFileInfo::exists(QDir(destination).filePath("run.sh")));
+        QVERIFY(QFileInfo::exists(QDir(destination).filePath("run.sh")));
 #endif
     }
 
@@ -1768,6 +1964,150 @@ class ArgumentProbe {
         QFile preserved(installedJar);
         QVERIFY(preserved.open(QIODevice::ReadOnly));
         QCOMPARE(preserved.readAll(), workingJar);
+    }
+
+    void serverJarNetworkDownloadsVerifyBothHashAlgorithms()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        RangeHttpServer server;
+        QVERIFY(server.start());
+
+        const QByteArray vanillaJar("verified vanilla jar from the local server");
+        const QString vanillaSha1 = QString::fromLatin1(
+            QCryptographicHash::hash(vanillaJar, QCryptographicHash::Sha1).toHex()).toUpper();
+        addVanillaHttpFixture(server, vanillaJar, vanillaSha1);
+
+        const QByteArray paperJar("verified Paper jar from the local server");
+        const QString paperSha256 = QString::fromLatin1(
+            QCryptographicHash::hash(paperJar, QCryptographicHash::Sha256).toHex());
+        server.serve("/paper/projects/paper/versions/1.21.8/builds",
+                     httpResource(QJsonDocument(QJsonArray{ QJsonObject{
+                         { "id", 130 }, { "channel", "STABLE" },
+                         { "downloads", QJsonObject{{ "server:default", QJsonObject{
+                             { "url", server.url("/paper-server.jar").toString() },
+                             { "checksums", QJsonObject{{ "sha256", paperSha256 }} },
+                         } }} },
+                     } }).toJson(QJsonDocument::Compact)));
+        server.serve("/paper-server.jar", httpResource(paperJar));
+
+        ServerProviderEndpoints endpoints = vanillaHttpEndpoints(server);
+        endpoints.paperApiBase = server.url("/paper/");
+
+        {
+            ServerDownloader downloader(endpoints);
+            QSignalSpy finished(&downloader, &ServerDownloader::finished);
+            const QString destination = temporaryRoot.filePath("vanilla");
+            downloader.startDownload("1.21.8", "vanilla", destination);
+
+            QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 10000);
+            QVERIFY2(finished.constFirst().at(0).toBool(),
+                     qPrintable(finished.constFirst().at(1).toString()));
+            QCOMPARE(readFile(QDir(destination).filePath("server.jar")), vanillaJar);
+        }
+
+        {
+            ServerDownloader downloader(endpoints);
+            QSignalSpy finished(&downloader, &ServerDownloader::finished);
+            const QString destination = temporaryRoot.filePath("paper");
+            downloader.startDownload("1.21.8", "paper", destination);
+
+            QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 10000);
+            QVERIFY2(finished.constFirst().at(0).toBool(),
+                     qPrintable(finished.constFirst().at(1).toString()));
+            QCOMPARE(readFile(QDir(destination).filePath("server.jar")), paperJar);
+        }
+    }
+
+    void serverJarHashMismatchLeavesNoFile()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        RangeHttpServer server;
+        QVERIFY(server.start());
+        const QByteArray jar("corrupt server jar");
+        addVanillaHttpFixture(server, jar, QString(40, '0'));
+
+        ServerDownloader downloader(vanillaHttpEndpoints(server));
+        QSignalSpy finished(&downloader, &ServerDownloader::finished);
+        const QString destination = temporaryRoot.filePath("bad-hash");
+        const QString serverJar = QDir(destination).filePath("server.jar");
+        downloader.startDownload("1.21.8", "vanilla", destination);
+
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 10000);
+        QVERIFY(!finished.constFirst().at(0).toBool());
+        QVERIFY(finished.constFirst().at(1).toString().contains(
+            "Download verification failed: the server file hash did not match"));
+        QVERIFY(!QFileInfo::exists(serverJar));
+        QVERIFY(!QFileInfo::exists(Net::PartFile::partPathFor(serverJar)));
+        QCOMPARE(QDir(destination).entryList(QDir::Files | QDir::Hidden | QDir::System).size(), 0);
+    }
+
+    void largeServerJarUsesRangedSegments()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        RangeHttpServer server;
+        QVERIFY(server.start());
+        const QByteArray jar(40 * 1024 * 1024, 's');
+        const QString sha1 = QString::fromLatin1(
+            QCryptographicHash::hash(jar, QCryptographicHash::Sha1).toHex());
+        addVanillaHttpFixture(server, jar, sha1);
+
+        ServerDownloader downloader(vanillaHttpEndpoints(server));
+        QSignalSpy finished(&downloader, &ServerDownloader::finished);
+        const QString destination = temporaryRoot.filePath("large-server");
+        const QString serverJar = QDir(destination).filePath("server.jar");
+        downloader.startDownload("1.21.8", "vanilla", destination);
+
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 30000);
+        QVERIFY2(finished.constFirst().at(0).toBool(),
+                 qPrintable(finished.constFirst().at(1).toString()));
+        QVERIFY(server.rangeRequestCount() > 1);
+        QVERIFY(server.peakConcurrency() > 1);
+        QCOMPARE(readFile(serverJar), jar);
+        QVERIFY(!QFileInfo::exists(Net::PartFile::partPathFor(serverJar)));
+        QCOMPARE(Net::HostScheduler::global()->outstandingPermits(), 0);
+    }
+
+    void cancellingServerJarDownloadRemovesPartialFilesAndFinishesOnce()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        RangeHttpServer server;
+        QVERIFY(server.start());
+        const QByteArray jar(40 * 1024 * 1024, 'c');
+        const QString sha1 = QString::fromLatin1(
+            QCryptographicHash::hash(jar, QCryptographicHash::Sha1).toHex());
+        addVanillaHttpFixture(server, jar, sha1, 2 * 1024 * 1024);
+
+        ServerDownloader downloader(vanillaHttpEndpoints(server));
+        QSignalSpy finished(&downloader, &ServerDownloader::finished);
+        QSignalSpy progress(&downloader, &ServerDownloader::progress);
+        const QString destination = temporaryRoot.filePath("cancelled-server");
+        const QString serverJar = QDir(destination).filePath("server.jar");
+        downloader.startDownload("1.21.8", "vanilla", destination);
+
+        QTRY_VERIFY_WITH_TIMEOUT(server.rangeRequestCount() > 1, 10000);
+        const auto hasProgress = [&progress]() {
+            for (const auto& item : progress) {
+                if (item.constFirst().toInt() > 0)
+                    return true;
+            }
+            return false;
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(hasProgress(), 10000);
+        downloader.cancel();
+
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 5000);
+        QCOMPARE(finished.constFirst().at(0).toBool(), false);
+        QCOMPARE(finished.constFirst().at(1).toString(), QStringLiteral("Download cancelled."));
+        QTest::qWait(100);
+        QCOMPARE(finished.size(), 1);
+        QVERIFY(!QFileInfo::exists(serverJar));
+        QVERIFY(!QFileInfo::exists(Net::PartFile::partPathFor(serverJar)));
+        QCOMPARE(QDir(destination).entryList(QDir::Files | QDir::Hidden | QDir::System).size(), 0);
+        QCOMPARE(Net::HostScheduler::global()->outstandingPermits(), 0);
     }
 
     void preparesMissingServerSoftwareWithoutStartingMinecraft()

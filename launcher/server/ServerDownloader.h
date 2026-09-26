@@ -19,11 +19,13 @@
 #include <QString>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
-#include <QSaveFile>
 #include <QCryptographicHash>
 #include <QStringList>
 #include <QUrl>
-#include <memory>
+
+#include "net/NetJob.h"
+
+class QProcess;
 
 struct ServerProviderEndpoints
 {
@@ -38,6 +40,8 @@ struct ServerProviderEndpoints
 
     static ServerProviderEndpoints production();
 };
+
+QString serverLoaderInstallIncompleteMarkerPath(const QString &serverDirectory);
 
 class ServerDownloader : public QObject
 {
@@ -90,8 +94,16 @@ private:
     void downloadFile(const QString &url, const QString &outputPath,
                       const QByteArray &expectedHash = QByteArray(),
                       QCryptographicHash::Algorithm hashAlgorithm = QCryptographicHash::Sha256);
-    bool appendDownloadData(const QByteArray &data);
-    bool finalizeDownloadedFile(QString *errorMessage);
+    void startFileDownload(const QUrl &url, const QString &outputPath,
+                           const QByteArray &expectedHash,
+                           QCryptographicHash::Algorithm hashAlgorithm,
+                           bool mayBeLarge);
+    void onFileDownloadSucceeded();
+    void onFileDownloadFailed(const QString &reason);
+    void finishDownload(bool success, const QString &errorMessage = QString());
+    void retireFileDownloadJob(bool abort);
+    bool writeLoaderInstallIncompleteMarker(QString *errorMessage) const;
+    void stopInstallerProcess();
     bool validateLoaderInstallation(const QString &loaderName,
                                     QString *errorMessage) const;
     void cleanUp();
@@ -188,11 +200,14 @@ private:
     QString m_buildsVersion;
     QString m_fabricInstallerVer; // cached for Fabric two-step
 
-    QNetworkAccessManager *m_network = nullptr;
+    QNetworkAccessManager *m_network = nullptr; //!< Private manager retained for metadata requests.
+    QNetworkAccessManager *m_downloadNetwork = nullptr; //!< Shared app manager, or app-owned fallback for downloads.
     QNetworkReply *m_currentReply = nullptr;
-    std::unique_ptr<QSaveFile> m_outputFile;
-    std::unique_ptr<QCryptographicHash> m_downloadHash;
-    QByteArray m_expectedHash;
-    bool m_fileWriteFailed = false;
+    QProcess *m_installerProcess = nullptr;
+    QString m_activeInstallerPath;
+    NetJob::Ptr m_fileDownloadJob;
+    QList<NetJob::Ptr> m_retiredJobs;
+    QString m_fileDownloadPath;
     ServerProviderEndpoints m_endpoints;
+    bool m_finishedEmitted = false;
 };

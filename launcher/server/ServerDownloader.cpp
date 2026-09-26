@@ -15,6 +15,8 @@
 
 #include "ServerDownloader.h"
 #include "BuildConfig.h"
+#include <QCoreApplication>
+#include <QFile>
 #include <QNetworkRequest>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -29,7 +31,16 @@
 #include <QSet>
 #include <QVersionNumber>
 #include <QXmlStreamReader>
+#include "net/ChecksumValidator.h"
+#include "net/Download.h"
+#include "net/PartFile.h"
+#include "net/SegmentedDownload.h"
 #include <algorithm>
+
+#if defined(LAUNCHER_APPLICATION)
+#include "Application.h"
+#include "settings/SettingsObject.h"
+#endif
 
 namespace {
 QString platformLoaderScriptName()
@@ -92,6 +103,12 @@ ServerProviderEndpoints ServerProviderEndpoints::production()
     };
 }
 
+QString serverLoaderInstallIncompleteMarkerPath(const QString &serverDirectory)
+{
+    return QDir(serverDirectory).filePath(
+        QStringLiteral(".jlauncher-loader-install-incomplete"));
+}
+
 ServerDownloader::ServerDownloader(QObject *parent)
     : ServerDownloader(ServerProviderEndpoints::production(), parent)
 {
@@ -108,6 +125,16 @@ ServerDownloader::ServerDownloader(const ServerProviderEndpoints &endpoints, QOb
     , m_endpoints(endpoints)
 {
     m_network = new QNetworkAccessManager(this);
+    m_downloadNetwork = m_network;
+#if defined(LAUNCHER_APPLICATION)
+    if (auto *application = APPLICATION_DYN; application && application->network()) {
+        m_downloadNetwork = application->network();
+    }
+#endif
+    if (m_downloadNetwork == m_network) {
+        if (auto *application = QCoreApplication::instance())
+            m_downloadNetwork = new QNetworkAccessManager(application);
+    }
 }
 
 ServerDownloader::~ServerDownloader()
@@ -155,6 +182,7 @@ QNetworkRequest ServerDownloader::createRequest(const QUrl &url)
 void ServerDownloader::startDownload(const QString &version, const QString &type, const QString &destinationDir,
                                      const QString &javaPath, const QString &loaderVersion)
 {
+    m_finishedEmitted = false;
     m_version = version;
     m_type = type.toLower();
     m_destinationDir = destinationDir;
@@ -188,8 +216,17 @@ void ServerDownloader::startDownload(const QString &version, const QString &type
             downloadNeoForgeInstaller(m_loaderVersion);
         }
     } else {
-        emit finished(false, tr("Unsupported server type: %1").arg(type));
+        finishDownload(false, tr("Unsupported server type: %1").arg(type));
     }
+}
+
+void ServerDownloader::finishDownload(bool success, const QString &errorMessage)
+{
+    if (m_finishedEmitted)
+        return;
+    m_finishedEmitted = true;
+    m_step = Step::Idle;
+    emit finished(success, errorMessage);
 }
 
 void ServerDownloader::fetchAvailableVersions(const QString &type)
@@ -286,34 +323,83 @@ void ServerDownloader::cancel()
     if (m_step == Step::Idle) {
         return;
     }
+    const QString cancelledServerJarPath = m_step == Step::DownloadingJar ? m_fileDownloadPath : QString();
     const bool versionRequest = isVersionListStep();
     const bool buildRequest = isBuildListStep();
     cleanUp();
+    if (!cancelledServerJarPath.isEmpty())
+        QFile::remove(Net::PartFile::partPathFor(cancelledServerJarPath));
     m_step = Step::Idle;
     if (versionRequest) {
         emit versionsFailed(tr("Version request cancelled."));
     } else if (buildRequest) {
         emit buildsFailed(tr("Build request cancelled."));
     } else {
-        emit finished(false, tr("Download cancelled."));
+        finishDownload(false, tr("Download cancelled."));
     }
 }
 
 void ServerDownloader::cleanUp()
 {
+    stopInstallerProcess();
     if (m_currentReply) {
         m_currentReply->disconnect(this);
         m_currentReply->abort();
         m_currentReply->deleteLater();
         m_currentReply = nullptr;
     }
-    if (m_outputFile && m_outputFile->isOpen()) {
-        m_outputFile->cancelWriting();
+    retireFileDownloadJob(true);
+}
+
+void ServerDownloader::stopInstallerProcess()
+{
+    if (!m_installerProcess)
+        return;
+
+    QProcess *installer = m_installerProcess;
+    m_installerProcess = nullptr;
+    disconnect(installer, nullptr, this, nullptr);
+    if (installer->state() != QProcess::NotRunning) {
+        installer->kill();
+        installer->waitForFinished(-1);
     }
-    m_outputFile.reset();
-    m_downloadHash.reset();
-    m_expectedHash.clear();
-    m_fileWriteFailed = false;
+    installer->deleteLater();
+
+    if (!m_activeInstallerPath.isEmpty()) {
+        QFile::remove(m_activeInstallerPath);
+        QFile::remove(m_activeInstallerPath + QStringLiteral(".log"));
+        m_activeInstallerPath.clear();
+    }
+}
+
+bool ServerDownloader::writeLoaderInstallIncompleteMarker(QString *errorMessage) const
+{
+    QFile marker(serverLoaderInstallIncompleteMarkerPath(m_destinationDir));
+    if (!marker.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        *errorMessage = tr("Could not mark the loader installation as incomplete: %1")
+                            .arg(marker.errorString());
+        return false;
+    }
+    if (marker.write(QByteArrayLiteral("J Launcher loader installation in progress\n")) < 0
+        || !marker.flush()) {
+        *errorMessage = tr("Could not write the incomplete loader installation marker: %1")
+                            .arg(marker.errorString());
+        return false;
+    }
+    return true;
+}
+
+void ServerDownloader::retireFileDownloadJob(bool abort)
+{
+    if (!m_fileDownloadJob)
+        return;
+
+    auto job = m_fileDownloadJob;
+    m_fileDownloadJob.reset();
+    disconnect(job.get(), nullptr, this, nullptr);
+    m_retiredJobs.append(job);
+    if (abort && job->isRunning())
+        job->abort();
 }
 
 void ServerDownloader::handleReply(QNetworkReply *reply)
@@ -334,19 +420,6 @@ void ServerDownloader::handleReply(QNetworkReply *reply)
 
     QByteArray responseData = reply->readAll();
     reply->deleteLater();
-
-    // readyRead normally drains the reply as it arrives, but a small response
-    // can arrive only with finished. Preserve those final bytes so server JARs
-    // and installers are never written as empty or truncated files.
-    if ((m_step == Step::DownloadingJar || m_step == Step::DownloadingForgeInstaller ||
-         m_step == Step::DownloadingNeoForgeInstaller) &&
-        m_outputFile && m_outputFile->isOpen() && !responseData.isEmpty()) {
-        if (!appendDownloadData(responseData)) {
-            emit finished(false, tr("Failed to write the downloaded server file."));
-            m_step = Step::Idle;
-            return;
-        }
-    }
 
     switch (m_step) {
         case Step::FetchingVersionManifest:
@@ -385,43 +458,8 @@ void ServerDownloader::handleReply(QNetworkReply *reply)
         case Step::FetchingForgeVersions:
             onForgeVersionsFetched(responseData);
             break;
-        case Step::DownloadingForgeInstaller: {
-            QString errorMessage;
-            if (!finalizeDownloadedFile(&errorMessage)) {
-                emit finished(false, errorMessage);
-                m_step = Step::Idle;
-                break;
-            }
-            onForgeInstallerDownloaded();
-            break;
-        }
         case Step::FetchingNeoForgeVersions:
             onNeoForgeVersionsFetched(responseData);
-            break;
-        case Step::DownloadingNeoForgeInstaller: {
-            QString errorMessage;
-            if (!finalizeDownloadedFile(&errorMessage)) {
-                emit finished(false, errorMessage);
-                m_step = Step::Idle;
-                break;
-            }
-            onNeoForgeInstallerDownloaded();
-            break;
-        }
-        case Step::DownloadingJar:
-        {
-            QString errorMessage;
-            if (!finalizeDownloadedFile(&errorMessage)) {
-                emit finished(false, errorMessage);
-                m_step = Step::Idle;
-                break;
-            }
-        }
-            // Data already written by readyRead lambda — just close
-            emit statusMessage(tr("Download complete!"));
-            emit progress(100);
-            emit finished(true);
-            m_step = Step::Idle;
             break;
         default:
             break;
@@ -433,77 +471,97 @@ void ServerDownloader::downloadFile(const QString &url, const QString &outputPat
                                     QCryptographicHash::Algorithm hashAlgorithm)
 {
     cleanUp();
-
-    m_outputFile.reset(new QSaveFile(outputPath));
-    if (!m_outputFile->open(QIODevice::WriteOnly)) {
-        emit finished(false, tr("Failed to open destination file for writing: %1").arg(outputPath));
-        m_outputFile.reset();
-        return;
-    }
-
     m_step = Step::DownloadingJar;
-    m_expectedHash = expectedHash;
-    m_fileWriteFailed = false;
-    if (!m_expectedHash.isEmpty()) {
-        m_downloadHash.reset(new QCryptographicHash(hashAlgorithm));
-    }
     emit statusMessage(tr("Downloading server jar..."));
-
-    QNetworkRequest request = createRequest(QUrl(url));
-    m_currentReply = m_network->get(request);
-
-    connect(m_currentReply, &QNetworkReply::finished, this, [this]() {
-        handleReply(m_currentReply);
-    });
-    connect(m_currentReply, &QNetworkReply::downloadProgress, this, [this](qint64 bytesReceived, qint64 bytesTotal) {
-        if (m_step == Step::DownloadingJar && bytesTotal > 0) {
-            int pct = static_cast<int>((bytesReceived * 100) / bytesTotal);
-            emit progress(pct);
-        }
-    });
-    connect(m_currentReply, &QNetworkReply::readyRead, this, [this]() {
-        if (m_currentReply && m_outputFile && m_outputFile->isOpen()) {
-            appendDownloadData(m_currentReply->readAll());
-        }
-    });
+    startFileDownload(QUrl(url), outputPath, expectedHash, hashAlgorithm, true);
 }
 
-bool ServerDownloader::appendDownloadData(const QByteArray &data)
+void ServerDownloader::startFileDownload(const QUrl &url, const QString &outputPath,
+                                         const QByteArray &expectedHash,
+                                         QCryptographicHash::Algorithm hashAlgorithm,
+                                         bool mayBeLarge)
 {
-    if (data.isEmpty()) {
-        return true;
+#if defined(LAUNCHER_APPLICATION)
+    if (auto *application = APPLICATION_DYN; application && application->network())
+        m_downloadNetwork = application->network();
+#endif
+    auto job = NetJob::Ptr(new NetJob(tr("Server file download"), m_downloadNetwork));
+    job->setAskRetry(false);
+    m_fileDownloadPath = outputPath;
+
+    if (mayBeLarge && (url.scheme() == QStringLiteral("http") || url.scheme() == QStringLiteral("https"))) {
+        int segments = Net::SegmentedDownload::DefaultSegments;
+#if defined(LAUNCHER_APPLICATION)
+        if (auto *application = APPLICATION_DYN)
+            segments = application->settings()->get("SegmentedDownloadSegments").toInt();
+#endif
+        auto segmented = Net::SegmentedDownload::makeFile(
+            url, outputPath, m_downloadNetwork, job->scheduler(), segments);
+        if (!expectedHash.isEmpty())
+            segmented->addValidator(
+                new Net::ChecksumValidator(hashAlgorithm, QString::fromLatin1(expectedHash).toLower()));
+        job->addTask(segmented);
+    } else {
+        auto download = Net::Download::makeFile(url, outputPath);
+        if (!expectedHash.isEmpty())
+            download->addValidator(
+                new Net::ChecksumValidator(hashAlgorithm, QString::fromLatin1(expectedHash).toLower()));
+        job->addNetAction(download);
     }
-    if (!m_outputFile || m_outputFile->write(data) != data.size()) {
-        m_fileWriteFailed = true;
-        return false;
-    }
-    if (m_downloadHash) {
-        m_downloadHash->addData(data);
-    }
-    return true;
+
+    const int progressMaximum = m_step == Step::DownloadingJar ? 100 : 50;
+    connect(job.get(), &Task::progress, this, [this, progressMaximum](qint64 current, qint64 total) {
+        if (total <= 0)
+            return;
+        const int percentage = qBound(0, static_cast<int>(current * progressMaximum / total), progressMaximum);
+        emit progress(percentage);
+    });
+    connect(job.get(), &Task::succeeded, this, &ServerDownloader::onFileDownloadSucceeded);
+    connect(job.get(), &Task::failed, this, &ServerDownloader::onFileDownloadFailed);
+    connect(job.get(), &Task::aborted, this, [this]() {
+        onFileDownloadFailed(tr("Download cancelled."));
+    });
+
+    m_fileDownloadJob = job;
+    job->start();
 }
 
-bool ServerDownloader::finalizeDownloadedFile(QString *errorMessage)
+void ServerDownloader::onFileDownloadSucceeded()
 {
-    if (!m_outputFile) {
-        *errorMessage = tr("The downloaded server file was not available for verification.");
-        return false;
+    retireFileDownloadJob(false);
+
+    switch (m_step) {
+        case Step::DownloadingForgeInstaller:
+            emit progress(50);
+            onForgeInstallerDownloaded();
+            return;
+        case Step::DownloadingNeoForgeInstaller:
+            emit progress(50);
+            onNeoForgeInstallerDownloaded();
+            return;
+        case Step::DownloadingJar:
+            emit statusMessage(tr("Download complete!"));
+            emit progress(100);
+            finishDownload(true);
+            return;
+        default:
+            return;
     }
-    if (m_fileWriteFailed) {
-        m_outputFile->cancelWriting();
-        *errorMessage = tr("Failed to write the downloaded server file.");
-        return false;
+}
+
+void ServerDownloader::onFileDownloadFailed(const QString &reason)
+{
+    retireFileDownloadJob(false);
+
+    if (reason == tr("Download cancelled.")) {
+        finishDownload(false, reason);
+    } else if (reason == QStringLiteral("Failed to finalize validators")
+               || reason == QCoreApplication::translate("Net::SegmentedDownload", "Failed to finalize validators")) {
+        finishDownload(false,
+                       tr("Download verification failed: the server file hash did not match the provider's value."));
+    } else {
+        failCurrentRequest(tr("Network error: %1").arg(reason));
     }
-    if (m_downloadHash && m_downloadHash->result().toHex().compare(m_expectedHash, Qt::CaseInsensitive) != 0) {
-        m_outputFile->cancelWriting();
-        *errorMessage = tr("Download verification failed: the server file hash did not match the provider's value.");
-        return false;
-    }
-    if (!m_outputFile->commit()) {
-        *errorMessage = tr("Failed to finalize the downloaded server file.");
-        return false;
-    }
-    return true;
 }
 
 bool ServerDownloader::validateLoaderInstallation(const QString &loaderName,
@@ -678,8 +736,7 @@ void ServerDownloader::failCurrentRequest(const QString &message)
         m_step = Step::Idle;
         emit buildsFailed(contextualMessage);
     } else {
-        m_step = Step::Idle;
-        emit finished(false, contextualMessage);
+        finishDownload(false, contextualMessage);
     }
 }
 
@@ -958,7 +1015,7 @@ void ServerDownloader::onVanillaManifestFetched(const QByteArray &data)
 {
     QJsonDocument doc = QJsonDocument::fromJson(data);
     if (doc.isNull()) {
-        emit finished(false, tr("Failed to parse version manifest."));
+        finishDownload(false, tr("Failed to parse version manifest."));
         return;
     }
 
@@ -974,7 +1031,7 @@ void ServerDownloader::onVanillaManifestFetched(const QByteArray &data)
     }
 
     if (versionUrl.isEmpty()) {
-        emit finished(false, tr("Version '%1' not found in manifest.").arg(m_version));
+        finishDownload(false, tr("Version '%1' not found in manifest.").arg(m_version));
         return;
     }
 
@@ -997,7 +1054,7 @@ void ServerDownloader::onVanillaVersionJsonFetched(const QByteArray &data)
 {
     QJsonDocument doc = QJsonDocument::fromJson(data);
     if (doc.isNull()) {
-        emit finished(false, tr("Failed to parse version details."));
+        finishDownload(false, tr("Failed to parse version details."));
         return;
     }
 
@@ -1007,7 +1064,7 @@ void ServerDownloader::onVanillaVersionJsonFetched(const QByteArray &data)
     QByteArray sha1 = server["sha1"].toString().toLatin1();
 
     if (jarUrl.isEmpty() || sha1.isEmpty()) {
-        emit finished(false, tr("No server download URL found for this version."));
+        finishDownload(false, tr("No server download URL found for this version."));
         return;
     }
 
@@ -1035,7 +1092,7 @@ void ServerDownloader::onPaperBuildsFetched(const QByteArray &data)
 {
     QJsonDocument doc = QJsonDocument::fromJson(data);
     if (doc.isNull()) {
-        emit finished(false, tr("Failed to parse Paper builds response."));
+        finishDownload(false, tr("Failed to parse Paper builds response."));
         return;
     }
 
@@ -1044,7 +1101,7 @@ void ServerDownloader::onPaperBuildsFetched(const QByteArray &data)
     QJsonArray builds = doc.isArray() ? doc.array() : doc.object()["builds"].toArray();
     if (builds.isEmpty()) {
         const QString apiMessage = doc.isObject() ? doc.object()["message"].toString() : QString();
-        emit finished(false, apiMessage.isEmpty()
+        finishDownload(false, apiMessage.isEmpty()
                                ? tr("No Paper builds found for version %1.").arg(m_version)
                                : tr("Paper download service: %1").arg(apiMessage));
         return;
@@ -1078,7 +1135,7 @@ void ServerDownloader::onPaperBuildsFetched(const QByteArray &data)
         }
     }
     if (selectedBuild.isEmpty()) {
-        emit finished(false, tr("Paper build %1 is not published for Minecraft %2.")
+        finishDownload(false, tr("Paper build %1 is not published for Minecraft %2.")
                                  .arg(m_loaderVersion, m_version));
         return;
     }
@@ -1104,7 +1161,7 @@ void ServerDownloader::onPaperBuildsFetched(const QByteArray &data)
     }
 
     if (downloadUrl.isEmpty() || sha256.isEmpty()) {
-        emit finished(false, tr("Paper build %1 does not provide a server download.").arg(buildNumber));
+        finishDownload(false, tr("Paper build %1 does not provide a server download.").arg(buildNumber));
         return;
     }
 
@@ -1134,13 +1191,13 @@ void ServerDownloader::onFabricInstallerFetched(const QByteArray &data)
 {
     QJsonDocument doc = QJsonDocument::fromJson(data);
     if (doc.isNull()) {
-        emit finished(false, tr("Failed to parse Fabric installer list."));
+        finishDownload(false, tr("Failed to parse Fabric installer list."));
         return;
     }
 
     QJsonArray array = doc.array();
     if (array.isEmpty()) {
-        emit finished(false, tr("Fabric installer list is empty."));
+        finishDownload(false, tr("Fabric installer list is empty."));
         return;
     }
 
@@ -1180,13 +1237,13 @@ void ServerDownloader::onFabricLoaderFetched(const QString &installerVer, const 
 {
     QJsonDocument doc = QJsonDocument::fromJson(data);
     if (doc.isNull()) {
-        emit finished(false, tr("Failed to parse Fabric loader list."));
+        finishDownload(false, tr("Failed to parse Fabric loader list."));
         return;
     }
 
     QJsonArray array = doc.array();
     if (array.isEmpty()) {
-        emit finished(false, tr("No Fabric loader found for version %1.").arg(m_version));
+        finishDownload(false, tr("No Fabric loader found for version %1.").arg(m_version));
         return;
     }
 
@@ -1200,7 +1257,7 @@ void ServerDownloader::onFabricLoaderFetched(const QString &installerVer, const 
         }
     }
     if (loaderVer.isEmpty()) {
-        emit finished(false, tr("Fabric loader %1 is not published for Minecraft %2.")
+        finishDownload(false, tr("Fabric loader %1 is not published for Minecraft %2.")
                                  .arg(m_loaderVersion, m_version));
         return;
     }
@@ -1235,7 +1292,7 @@ void ServerDownloader::onPurpurBuildsFetched(const QByteArray &data)
 {
     QJsonDocument doc = QJsonDocument::fromJson(data);
     if (doc.isNull()) {
-        emit finished(false, tr("Failed to parse Purpur builds."));
+        finishDownload(false, tr("Failed to parse Purpur builds."));
         return;
     }
 
@@ -1254,14 +1311,14 @@ void ServerDownloader::onPurpurBuildsFetched(const QByteArray &data)
             }
         }
         if (!published) {
-            emit finished(false, tr("Purpur build %1 is not published for Minecraft %2.")
+            finishDownload(false, tr("Purpur build %1 is not published for Minecraft %2.")
                                      .arg(m_loaderVersion, m_version));
             return;
         }
     }
 
     if (latestBuild.isEmpty()) {
-        emit finished(false, tr("No Purpur builds found for version %1.").arg(m_version));
+        finishDownload(false, tr("No Purpur builds found for version %1.").arg(m_version));
         return;
     }
     m_resolvedLoaderVersion = latestBuild;
@@ -1300,7 +1357,7 @@ void ServerDownloader::onForgeVersionsFetched(const QByteArray &data)
             QStringLiteral("forge"), m_version, data, &error);
         if (builds.isEmpty()) {
             m_step = Step::Idle;
-            emit finished(false, error.isEmpty()
+            finishDownload(false, error.isEmpty()
                 ? tr("No Forge version found for Minecraft %1.").arg(m_version)
                 : error);
             return;
@@ -1312,7 +1369,7 @@ void ServerDownloader::onForgeVersionsFetched(const QByteArray &data)
     QJsonDocument doc = QJsonDocument::fromJson(data);
     if (doc.isNull()) {
         m_step = Step::Idle;
-        emit finished(false, tr("Failed to parse Forge promotions."));
+        finishDownload(false, tr("Failed to parse Forge promotions."));
         return;
     }
 
@@ -1331,7 +1388,7 @@ void ServerDownloader::onForgeVersionsFetched(const QByteArray &data)
 
     if (forgeVersion.isEmpty()) {
         m_step = Step::Idle;
-        emit finished(false, tr("No Forge version found for Minecraft %1.").arg(m_version));
+        finishDownload(false, tr("No Forge version found for Minecraft %1.").arg(m_version));
         return;
     }
 
@@ -1351,33 +1408,8 @@ void ServerDownloader::downloadForgeInstaller(const QString &forgeVersion)
     m_step = Step::DownloadingForgeInstaller;
     emit statusMessage(tr("Downloading Forge %1 installer...").arg(forgeVersion));
 
-    // Download installer to disk
     cleanUp();
-    m_outputFile.reset(new QSaveFile(installerPath));
-    m_fileWriteFailed = false;
-    if (!m_outputFile->open(QIODevice::WriteOnly)) {
-        emit finished(false, tr("Failed to open installer file for writing."));
-        m_outputFile.reset();
-        return;
-    }
-
-    QNetworkRequest request = createRequest(installerUrl);
-    m_currentReply = m_network->get(request);
-
-    connect(m_currentReply, &QNetworkReply::finished, this, [this]() {
-        handleReply(m_currentReply);
-    });
-    connect(m_currentReply, &QNetworkReply::downloadProgress, this, [this](qint64 bytesReceived, qint64 bytesTotal) {
-        if (bytesTotal > 0) {
-            int pct = static_cast<int>((bytesReceived * 50) / bytesTotal); // 0-50% for download
-            emit progress(pct);
-        }
-    });
-    connect(m_currentReply, &QNetworkReply::readyRead, this, [this]() {
-        if (m_currentReply && m_outputFile && m_outputFile->isOpen()) {
-            appendDownloadData(m_currentReply->readAll());
-        }
-    });
+    startFileDownload(installerUrl, installerPath, {}, QCryptographicHash::Sha256, false);
 }
 
 void ServerDownloader::onForgeInstallerDownloaded()
@@ -1388,6 +1420,8 @@ void ServerDownloader::onForgeInstallerDownloaded()
 
     // Run the installer in --installServer mode
     QProcess *installer = new QProcess(this);
+    m_installerProcess = installer;
+    m_activeInstallerPath = installerPath;
     installer->setWorkingDirectory(m_destinationDir);
 
     auto completed = std::make_shared<bool>(false);
@@ -1397,11 +1431,14 @@ void ServerDownloader::onForgeInstallerDownloaded()
             return;
         }
         *completed = true;
+        if (m_installerProcess == installer)
+            m_installerProcess = nullptr;
+        m_activeInstallerPath.clear();
         const QString processError = installer->errorString();
         QFile::remove(installerPath);
         installer->deleteLater();
         m_step = Step::Idle;
-        emit finished(false, tr("Forge installer could not start: %1").arg(processError));
+        finishDownload(false, tr("Forge installer could not start: %1").arg(processError));
     });
     connect(installer, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, [this, installer, installerPath, completed](int exitCode, QProcess::ExitStatus exitStatus) {
@@ -1409,6 +1446,9 @@ void ServerDownloader::onForgeInstallerDownloaded()
             return;
         }
         *completed = true;
+        if (m_installerProcess == installer)
+            m_installerProcess = nullptr;
+        m_activeInstallerPath.clear();
         installer->deleteLater();
 
         // Clean up installer
@@ -1416,27 +1456,39 @@ void ServerDownloader::onForgeInstallerDownloaded()
 
         if (exitStatus != QProcess::NormalExit || exitCode != 0) {
             m_step = Step::Idle;
-            emit finished(false, tr("Forge installer failed with exit code %1.").arg(exitCode));
+            finishDownload(false, tr("Forge installer failed with exit code %1.").arg(exitCode));
             return;
         }
 
         QString validationError;
         if (!validateLoaderInstallation(QStringLiteral("Forge"), &validationError)) {
-            if (!m_loaderScriptExistedBeforeInstall) {
-                QFile::remove(QDir(m_destinationDir).filePath(platformLoaderScriptName()));
-            }
             m_step = Step::Idle;
-            emit finished(false, validationError);
+            finishDownload(false, validationError);
+            return;
+        }
+
+        const QString markerPath = serverLoaderInstallIncompleteMarkerPath(m_destinationDir);
+        if (!QFile::remove(markerPath) && QFileInfo::exists(markerPath)) {
+            m_step = Step::Idle;
+            finishDownload(false, tr("Could not clear the incomplete loader installation marker."));
             return;
         }
 
         emit statusMessage(tr("Forge installation complete!"));
         emit progress(100);
-        m_step = Step::Idle;
-        emit finished(true);
+        finishDownload(true);
     });
 
     // Find Java
+    QString markerError;
+    if (!writeLoaderInstallIncompleteMarker(&markerError)) {
+        m_installerProcess = nullptr;
+        m_activeInstallerPath.clear();
+        installer->deleteLater();
+        m_step = Step::Idle;
+        finishDownload(false, markerError);
+        return;
+    }
     installer->start(m_javaPath.isEmpty() ? "java" : m_javaPath,
                      QStringList() << "-jar" << installerPath << "--installServer");
 }
@@ -1467,7 +1519,7 @@ void ServerDownloader::onNeoForgeVersionsFetched(const QByteArray &data)
             QStringLiteral("neoforge"), m_version, data, &error);
         if (builds.isEmpty()) {
             m_step = Step::Idle;
-            emit finished(false, error.isEmpty()
+            finishDownload(false, error.isEmpty()
                 ? tr("No NeoForge version found for Minecraft %1.").arg(m_version)
                 : error);
             return;
@@ -1479,7 +1531,7 @@ void ServerDownloader::onNeoForgeVersionsFetched(const QByteArray &data)
     QJsonDocument doc = QJsonDocument::fromJson(data);
     if (doc.isNull()) {
         m_step = Step::Idle;
-        emit finished(false, tr("Failed to parse NeoForge version list."));
+        finishDownload(false, tr("Failed to parse NeoForge version list."));
         return;
     }
 
@@ -1488,7 +1540,7 @@ void ServerDownloader::onNeoForgeVersionsFetched(const QByteArray &data)
         QStringLiteral("neoforge"), m_version, data, &error);
     if (builds.isEmpty()) {
         m_step = Step::Idle;
-        emit finished(false, error.isEmpty()
+        finishDownload(false, error.isEmpty()
             ? tr("No NeoForge version found for Minecraft %1.").arg(m_version)
             : error);
         return;
@@ -1518,31 +1570,7 @@ void ServerDownloader::downloadNeoForgeInstaller(const QString &neoforgeVersion)
     emit statusMessage(tr("Downloading NeoForge %1 installer...").arg(neoforgeVersion));
 
     cleanUp();
-    m_outputFile.reset(new QSaveFile(installerPath));
-    m_fileWriteFailed = false;
-    if (!m_outputFile->open(QIODevice::WriteOnly)) {
-        emit finished(false, tr("Failed to open installer file for writing."));
-        m_outputFile.reset();
-        return;
-    }
-
-    QNetworkRequest request = createRequest(installerUrl);
-    m_currentReply = m_network->get(request);
-
-    connect(m_currentReply, &QNetworkReply::finished, this, [this]() {
-        handleReply(m_currentReply);
-    });
-    connect(m_currentReply, &QNetworkReply::downloadProgress, this, [this](qint64 bytesReceived, qint64 bytesTotal) {
-        if (bytesTotal > 0) {
-            int pct = static_cast<int>((bytesReceived * 50) / bytesTotal);
-            emit progress(pct);
-        }
-    });
-    connect(m_currentReply, &QNetworkReply::readyRead, this, [this]() {
-        if (m_currentReply && m_outputFile && m_outputFile->isOpen()) {
-            appendDownloadData(m_currentReply->readAll());
-        }
-    });
+    startFileDownload(installerUrl, installerPath, {}, QCryptographicHash::Sha256, false);
 }
 
 void ServerDownloader::onNeoForgeInstallerDownloaded()
@@ -1552,6 +1580,8 @@ void ServerDownloader::onNeoForgeInstallerDownloaded()
     emit progress(55);
 
     QProcess *installer = new QProcess(this);
+    m_installerProcess = installer;
+    m_activeInstallerPath = installerPath;
     installer->setWorkingDirectory(m_destinationDir);
 
     auto completed = std::make_shared<bool>(false);
@@ -1561,11 +1591,14 @@ void ServerDownloader::onNeoForgeInstallerDownloaded()
             return;
         }
         *completed = true;
+        if (m_installerProcess == installer)
+            m_installerProcess = nullptr;
+        m_activeInstallerPath.clear();
         const QString processError = installer->errorString();
         QFile::remove(installerPath);
         installer->deleteLater();
         m_step = Step::Idle;
-        emit finished(false, tr("NeoForge installer could not start: %1").arg(processError));
+        finishDownload(false, tr("NeoForge installer could not start: %1").arg(processError));
     });
     connect(installer, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, [this, installer, installerPath, completed](int exitCode, QProcess::ExitStatus exitStatus) {
@@ -1573,31 +1606,46 @@ void ServerDownloader::onNeoForgeInstallerDownloaded()
             return;
         }
         *completed = true;
+        if (m_installerProcess == installer)
+            m_installerProcess = nullptr;
+        m_activeInstallerPath.clear();
         installer->deleteLater();
         QFile::remove(installerPath);
 
         if (exitStatus != QProcess::NormalExit || exitCode != 0) {
             m_step = Step::Idle;
-            emit finished(false, tr("NeoForge installer failed with exit code %1.").arg(exitCode));
+            finishDownload(false, tr("NeoForge installer failed with exit code %1.").arg(exitCode));
             return;
         }
 
         QString validationError;
         if (!validateLoaderInstallation(QStringLiteral("NeoForge"), &validationError)) {
-            if (!m_loaderScriptExistedBeforeInstall) {
-                QFile::remove(QDir(m_destinationDir).filePath(platformLoaderScriptName()));
-            }
             m_step = Step::Idle;
-            emit finished(false, validationError);
+            finishDownload(false, validationError);
+            return;
+        }
+
+        const QString markerPath = serverLoaderInstallIncompleteMarkerPath(m_destinationDir);
+        if (!QFile::remove(markerPath) && QFileInfo::exists(markerPath)) {
+            m_step = Step::Idle;
+            finishDownload(false, tr("Could not clear the incomplete loader installation marker."));
             return;
         }
 
         emit statusMessage(tr("NeoForge installation complete!"));
         emit progress(100);
-        m_step = Step::Idle;
-        emit finished(true);
+        finishDownload(true);
     });
 
+    QString markerError;
+    if (!writeLoaderInstallIncompleteMarker(&markerError)) {
+        m_installerProcess = nullptr;
+        m_activeInstallerPath.clear();
+        installer->deleteLater();
+        m_step = Step::Idle;
+        finishDownload(false, markerError);
+        return;
+    }
     installer->start(m_javaPath.isEmpty() ? "java" : m_javaPath,
                      QStringList() << "-jar" << installerPath << "--installServer");
 }

@@ -678,6 +678,10 @@ QString ServerInstance::contentDirectory() const
 
 bool ServerInstance::hasLaunchTarget() const
 {
+    if (QFileInfo::exists(serverLoaderInstallIncompleteMarkerPath(m_serverDirectory))) {
+        return false;
+    }
+
     const QString loader = m_loaderType.trimmed().toLower();
     if ((loader == QStringLiteral("forge") || loader == QStringLiteral("neoforge")) &&
         QFileInfo(loaderScriptPath()).isFile()) {
