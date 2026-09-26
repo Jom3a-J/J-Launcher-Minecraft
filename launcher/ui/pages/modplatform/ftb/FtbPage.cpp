@@ -39,13 +39,13 @@
 #include "ui_FtbPage.h"
 
 #include <QKeyEvent>
-#include <QNetworkReply>
 #include <algorithm>
 
 #include "modplatform/ftb/FTBPackInstallTask.h"
 #include "ui/dialogs/NewInstanceDialog.h"
 
 #include "Markdown.h"
+#include "ui/widgets/ProjectItem.h"
 
 FtbPage::FtbPage(NewInstanceDialog* dialog, QWidget* parent) : QWidget(parent), m_ui(new Ui::FtbPage), m_dialog(dialog)
 {
@@ -56,8 +56,10 @@ FtbPage::FtbPage(NewInstanceDialog* dialog, QWidget* parent) : QWidget(parent), 
 
     m_filterModel = new Ftb::FilterModel(this);
     m_listModel = new Ftb::ListModel(this);
+    m_listModel->setShowServerBadges(m_dialog->isServerModpackMode());
     m_filterModel->setSourceModel(m_listModel);
     m_ui->packView->setModel(m_filterModel);
+    m_ui->packView->setItemDelegate(new ProjectItemDelegate(this));
     m_ui->packView->setSortingEnabled(true);
     m_ui->packView->header()->hide();
     m_ui->packView->setIndentation(0);
@@ -110,6 +112,7 @@ void FtbPage::retranslate()
 
 void FtbPage::openedImpl()
 {
+    m_listModel->setShowServerBadges(m_dialog->isServerModpackMode());
     if (!m_initialised || m_listModel->wasAborted()) {
         m_listModel->request();
         m_initialised = true;
@@ -121,10 +124,8 @@ void FtbPage::openedImpl()
 void FtbPage::closedImpl()
 {
     ++m_serverProbeSerial;
-    if (m_serverPackProbe) {
-        m_serverPackProbe->abort();
-        m_serverPackProbe = nullptr;
-    }
+    FTB::cancelDedicatedServerPackRequests(this);
+    m_listModel->setShowServerBadges(false);
     if (m_listModel->isMakingRequest())
         m_listModel->abortRequest();
 }
@@ -143,11 +144,7 @@ void FtbPage::suggestCurrent()
     }
 
     if (m_dialog->isServerModpackMode()) {
-        if (m_serverPackProbe) {
-            disconnect(m_serverPackProbe, nullptr, this, nullptr);
-            m_serverPackProbe->abort();
-            m_serverPackProbe = nullptr;
-        }
+        FTB::cancelDedicatedServerPackRequests(this);
         ++m_serverProbeSerial;
         const int serial = m_serverProbeSerial;
         const auto version = std::find_if(m_selected.versions.cbegin(), m_selected.versions.cend(),
@@ -158,10 +155,9 @@ void FtbPage::suggestCurrent()
         if (version != m_selected.versions.cend()) {
             const int packId = m_selected.id;
             const int versionId = version->id;
-            m_serverPackProbe = FTB::probeDedicatedServerPack(APPLICATION->network(), packId, versionId, this,
+            FTB::probeDedicatedServerPack(APPLICATION->network(), packId, versionId, this,
                 [this, packId, versionId, serial](ModPlatform::ServerSupport support) {
                     if (!isOpened || serial != m_serverProbeSerial || m_selected.id != packId || m_selectedVersion.isEmpty()) return;
-                    m_serverPackProbe = nullptr;
                     const auto selected = std::find_if(m_selected.versions.cbegin(), m_selected.versions.cend(),
                         [this, versionId](const FTB::VersionInfo& item) { return item.id == versionId && item.name == m_selectedVersion; });
                     if (selected == m_selected.versions.cend()) return;
@@ -211,11 +207,7 @@ void FtbPage::onSelectionChanged(QModelIndex first, QModelIndex /*second*/)
 
     if (!first.isValid()) {
         ++m_serverProbeSerial;
-        if (m_serverPackProbe) {
-            disconnect(m_serverPackProbe, nullptr, this, nullptr);
-            m_serverPackProbe->abort();
-            m_serverPackProbe = nullptr;
-        }
+        FTB::cancelDedicatedServerPackRequests(this);
         m_ui->serverCompatibilityLabel->clear();
         m_dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "ftb");
         m_dialog->setServerSupportChecking(false);
@@ -242,11 +234,7 @@ void FtbPage::onVersionSelectionChanged(QString selected)
 {
     if (selected.isNull() || selected.isEmpty()) {
         ++m_serverProbeSerial;
-        if (m_serverPackProbe) {
-            disconnect(m_serverPackProbe, nullptr, this, nullptr);
-            m_serverPackProbe->abort();
-            m_serverPackProbe = nullptr;
-        }
+        FTB::cancelDedicatedServerPackRequests(this);
         m_selectedVersion = "";
         m_ui->serverCompatibilityLabel->clear();
         m_dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "ftb");

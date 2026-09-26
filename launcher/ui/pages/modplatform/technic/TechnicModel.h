@@ -40,9 +40,20 @@
 #include "TechnicData.h"
 #include "net/NetJob.h"
 
+#include <QJsonObject>
+#include <functional>
+#include <optional>
+
+class QNetworkAccessManager;
+
 namespace Technic {
 
+inline constexpr int PackDetailsConcurrency = 4;
 using LogoCallback = std::function<void(QString)>;
+using PackDetailsCallback = std::function<void(std::optional<QJsonObject>)>;
+void requestPackDetails(QNetworkAccessManager* network, const QString& slug, QObject* owner, PackDetailsCallback callback);
+void cachePackDetails(const QString& slug, const QJsonObject& details);
+void cancelPackDetailsRequests(QObject* owner);
 
 class ListModel : public QAbstractListModel {
     Q_OBJECT
@@ -57,6 +68,9 @@ class ListModel : public QAbstractListModel {
 
     void getLogo(const QString& logo, const QString& logoUrl, LogoCallback callback);
     void searchWithTerm(const QString& term);
+    void setShowServerBadges(bool show);
+    void refreshServerBadges();
+    void cancelServerBadgeRequests();
 
     bool hasActiveSearchJob() const { return jobPtr && jobPtr->isRunning(); }
     Task::Ptr activeSearchJob() { return hasActiveSearchJob() ? jobPtr : nullptr; }
@@ -71,6 +85,7 @@ class ListModel : public QAbstractListModel {
    private:
     void performSearch();
     void requestLogo(QString logo, QString url);
+    void requestServerBadge(const QString& slug);
 
    private:
     QList<Modpack> modpacks;
@@ -86,6 +101,8 @@ class ListModel : public QAbstractListModel {
         Single,
     } searchMode = List;
     NetJob::Ptr jobPtr;
+    bool m_showServerBadges = false;
+    int m_serverBadgeGeneration = 0;
 };
 
 }  // namespace Technic

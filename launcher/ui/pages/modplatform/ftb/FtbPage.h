@@ -39,7 +39,6 @@
 #include "FtbListModel.h"
 
 #include <QWidget>
-#include <QPointer>
 
 #include "Application.h"
 #include "tasks/Task.h"
@@ -51,7 +50,6 @@ class FtbPage;
 }
 
 class NewInstanceDialog;
-class QNetworkReply;
 
 class FtbPage : public QWidget, public ModpackProviderBasePage {
     Q_OBJECT
@@ -94,7 +92,6 @@ class FtbPage : public QWidget, public ModpackProviderBasePage {
 
     FTB::Modpack m_selected;
     QString m_selectedVersion;
-    QPointer<QNetworkReply> m_serverPackProbe;
     int m_serverProbeSerial = 0;
 
     bool m_initialised{ false };

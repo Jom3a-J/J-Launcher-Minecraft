@@ -38,6 +38,7 @@
 #include <QList>
 #include <QMetaType>
 #include <QString>
+#include "modplatform/ServerSupport.h"
 
 namespace Technic {
 struct Modpack {
@@ -55,6 +56,7 @@ struct Modpack {
     QString minecraftVersion;
 
     bool metadataLoaded = false;
+    ModPlatform::ServerSupport serverSupport = ModPlatform::ServerSupport::Unknown;
     QString websiteUrl;
     QString author;
     QString description;

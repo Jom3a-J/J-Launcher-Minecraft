@@ -48,7 +48,6 @@
 
 #include <QWidget>
 #include <functional>
-#include <QPointer>
 #include <QSet>
 #include <memory>
 
@@ -58,10 +57,11 @@ class QProcess;
 
 namespace FTB {
 
+inline constexpr int ServerPackProbeConcurrency = 1;
 ModPlatform::ServerSupport serverPackSupportFromHttpStatus(int status, bool networkError);
-QPointer<QNetworkReply> probeDedicatedServerPack(QNetworkAccessManager* network, int packId, int versionId,
-                                                  QObject* context,
-                                                  std::function<void(ModPlatform::ServerSupport)> callback);
+void probeDedicatedServerPack(QNetworkAccessManager* network, int packId, int versionId, QObject* owner,
+                              std::function<void(ModPlatform::ServerSupport)> callback);
+void cancelDedicatedServerPackRequests(QObject* owner);
 
 class PackInstallTask final : public InstanceTask {
     Q_OBJECT
@@ -98,7 +98,6 @@ class PackInstallTask final : public InstanceTask {
    private:
     NetJob::Ptr m_net_job = nullptr;
     shared_qobject_ptr<Flame::FileResolvingTask> m_modIdResolverTask = nullptr;
-    QPointer<QNetworkReply> m_serverPackProbe;
     std::unique_ptr<QProcess> m_serverInstallerProcess;
 
     QList<int> m_fileIds;

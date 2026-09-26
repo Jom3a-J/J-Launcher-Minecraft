@@ -41,15 +41,72 @@
 #include "settings/SettingsObject.h"
 
 #include "net/ApiDownload.h"
+#include "modplatform/ServerSupportRequestQueue.h"
 #include "ui/widgets/ProjectItem.h"
 
 #include <QFileInfo>
 #include <QIcon>
 #include <QUrl>
+#include <utility>
+#include <memory>
+
+namespace Technic {
+namespace {
+ModPlatform::ServerSupportRequestQueue<QJsonObject>& packDetailsQueue()
+{
+    static ModPlatform::ServerSupportRequestQueue<QJsonObject> queue(PackDetailsConcurrency);
+    return queue;
+}
+}
+
+void requestPackDetails(QNetworkAccessManager* network, const QString& slug, QObject* owner, PackDetailsCallback callback)
+{
+    using Queue = ModPlatform::ServerSupportRequestQueue<QJsonObject>;
+    const QString key = slug;
+    auto starter = [network, slug](Queue::Completion complete) -> Queue::Cancel {
+        auto job = makeShared<NetJob>(QString("Technic::PackMeta(%1)").arg(slug), network);
+        const QUrl url(QString("%1modpack/%2?build=%3")
+                           .arg(BuildConfig.TECHNIC_API_BASE_URL, slug, BuildConfig.TECHNIC_API_BUILD));
+        auto [action, response] = Net::ApiDownload::makeByteArray(url);
+        job->addNetAction(action);
+        auto completion = std::make_shared<Queue::Completion>(std::move(complete));
+        QObject::connect(job.get(), &NetJob::succeeded, job.get(), [response, completion] {
+            const QByteArray body = std::move(*response);
+            QJsonParseError parseError{};
+            const auto document = QJsonDocument::fromJson(body, &parseError);
+            if (parseError.error != QJsonParseError::NoError || !document.isObject()
+                || document.object().contains(QStringLiteral("error"))) {
+                (*completion)(Queue::Result{});
+                return;
+            }
+            (*completion)(document.object());
+        });
+        QObject::connect(job.get(), &NetJob::failed, job.get(), [completion](const QString&) {
+            (*completion)(Queue::Result{});
+        });
+        job->start();
+        return [job] { job->abort(); };
+    };
+    packDetailsQueue().request(key, owner, std::move(starter), std::move(callback));
+}
+
+void cancelPackDetailsRequests(QObject* owner)
+{
+    packDetailsQueue().cancelOwner(owner);
+}
+
+void cachePackDetails(const QString& slug, const QJsonObject& details)
+{
+    packDetailsQueue().cacheValue(slug, details);
+}
+}  // namespace Technic
 
 Technic::ListModel::ListModel(QObject* parent) : QAbstractListModel(parent) {}
 
-Technic::ListModel::~ListModel() {}
+Technic::ListModel::~ListModel()
+{
+    cancelServerBadgeRequests();
+}
 
 QVariant Technic::ListModel::data(const QModelIndex& index, int role) const
 {
@@ -93,6 +150,19 @@ QVariant Technic::ListModel::data(const QModelIndex& index, int role) const
             return pack.description;
         case UserDataTypes::INSTALLED:
             return false;
+        case UserDataTypes::BADGE_TEXT:
+            if (!m_showServerBadges) return QString();
+            if (pack.serverSupport == ModPlatform::ServerSupport::Official) return tr("Official server pack");
+            if (pack.serverSupport == ModPlatform::ServerSupport::Website) return tr("Server files on website");
+            if (pack.serverSupport == ModPlatform::ServerSupport::ClientDerived) return tr("No official server pack");
+            return QString();
+        case UserDataTypes::BADGE_TONE:
+            return pack.serverSupport == ModPlatform::ServerSupport::Official ? 1 : 0;
+        case Qt::AccessibleTextRole:
+            if (!m_showServerBadges || pack.serverSupport == ModPlatform::ServerSupport::Unknown) return pack.name;
+            if (pack.serverSupport == ModPlatform::ServerSupport::Official) return tr("%1. Official server pack.").arg(pack.name);
+            if (pack.serverSupport == ModPlatform::ServerSupport::Website) return tr("%1. Server files on website.").arg(pack.name);
+            return tr("%1. No official server pack.").arg(pack.name);
         default:
             break;
     }
@@ -115,6 +185,7 @@ void Technic::ListModel::searchWithTerm(const QString& term)
     if (currentSearchTerm == term && currentSearchTerm.isNull() == term.isNull()) {
         return;
     }
+    cancelServerBadgeRequests();
     currentSearchTerm = term;
     if (hasActiveSearchJob()) {
         jobPtr->abort();
@@ -218,6 +289,7 @@ void Technic::ListModel::searchRequestFinished(QByteArray* responsePtr)
                 Modpack pack;
                 pack.name = Json::requireString(root, "displayName");
                 pack.slug = Json::requireString(root, "name");
+                Technic::cachePackDetails(pack.slug, root);
 
                 if (root.contains("icon")) {
                     auto iconObj = Json::requireObject(root, "icon");
@@ -248,6 +320,55 @@ void Technic::ListModel::searchRequestFinished(QByteArray* responsePtr)
     beginInsertRows(QModelIndex(), modpacks.size(), modpacks.size() + newList.size() - 1);
     modpacks.append(newList);
     endInsertRows();
+    if (m_showServerBadges) {
+        for (const auto& pack : newList) requestServerBadge(pack.slug);
+    }
+}
+
+void Technic::ListModel::setShowServerBadges(bool show)
+{
+    if (m_showServerBadges == show) return;
+    m_showServerBadges = show;
+    if (!show) {
+        cancelServerBadgeRequests();
+    } else {
+        refreshServerBadges();
+    }
+    if (!modpacks.isEmpty()) {
+        emit dataChanged(index(0, 0), index(modpacks.size() - 1, 0),
+                         { UserDataTypes::BADGE_TEXT, UserDataTypes::BADGE_TONE, Qt::AccessibleTextRole });
+    }
+}
+
+void Technic::ListModel::refreshServerBadges()
+{
+    if (!m_showServerBadges) return;
+    for (const auto& pack : modpacks) {
+        if (pack.serverSupport == ModPlatform::ServerSupport::Unknown) requestServerBadge(pack.slug);
+    }
+}
+
+void Technic::ListModel::cancelServerBadgeRequests()
+{
+    ++m_serverBadgeGeneration;
+    Technic::cancelPackDetailsRequests(this);
+}
+
+void Technic::ListModel::requestServerBadge(const QString& slug)
+{
+    const int generation = m_serverBadgeGeneration;
+    Technic::requestPackDetails(APPLICATION->network(), slug, this,
+        [this, slug, generation](std::optional<QJsonObject> details) {
+            if (!m_showServerBadges || generation != m_serverBadgeGeneration || !details.has_value()) return;
+            const auto support = ModPlatform::technicServerSupport(QUrl(details->value("serverPackUrl").toString()));
+            for (int row = 0; row < modpacks.size(); ++row) {
+                if (modpacks.at(row).slug != slug) continue;
+                modpacks[row].serverSupport = support;
+                emit dataChanged(index(row, 0), index(row, 0),
+                                 { UserDataTypes::BADGE_TEXT, UserDataTypes::BADGE_TONE, Qt::AccessibleTextRole });
+                break;
+            }
+        });
 }
 
 void Technic::ListModel::getLogo(const QString& logo, const QString& logoUrl, Technic::LogoCallback callback)
