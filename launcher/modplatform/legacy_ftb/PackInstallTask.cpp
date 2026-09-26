@@ -49,6 +49,8 @@
 
 #include "Application.h"
 #include "BuildConfig.h"
+#include "logs/Privacy.h"
+#include "modplatform/ServerSupport.h"
 
 #include "net/ApiDownload.h"
 
@@ -69,20 +71,18 @@ void PackInstallTask::downloadPack()
     setProgress(1, 4);
     setAbortable(false);
 
-    auto path = QString("%1/%2/%3").arg(m_pack.dir, m_version.replace(".", "_"), m_pack.file);
+    const QString versionFolder = ModPlatform::legacyFtbPackVersionFolder(m_version);
+    const QString path = QString("%1/%2/%3").arg(m_pack.dir, versionFolder, m_pack.file);
     auto entry = APPLICATION->metacache()->resolveEntry("FTBPacks", path);
     entry->setStale(true);
     m_archivePath = entry->getFullPath();
     m_netJobContainer.reset(new NetJob("Download FTB Pack", m_network));
-    QString url;
-    if (m_pack.type == PackType::Private) {
-        url = QString(BuildConfig.LEGACY_FTB_CDN_BASE_URL + "privatepacks/%1").arg(path);
-    } else {
-        url = QString(BuildConfig.LEGACY_FTB_CDN_BASE_URL + "modpacks/%1").arg(path);
-    }
-    m_netJobContainer->addNetAction(Net::ApiDownload::makeCached(url, entry));
+    const bool privatePack = m_pack.type == PackType::Private;
+    const QUrl clientUrl = ModPlatform::legacyFtbPackUrl(BuildConfig.LEGACY_FTB_CDN_BASE_URL, privatePack,
+                                                         m_pack.dir, m_version, m_pack.file);
+    m_netJobContainer->addNetAction(Net::ApiDownload::makeCached(clientUrl, entry));
 
-    connect(m_netJobContainer.get(), &NetJob::succeeded, this, &PackInstallTask::unzip);
+    connect(m_netJobContainer.get(), &NetJob::succeeded, this, &PackInstallTask::onClientDownloadSucceeded);
     connect(m_netJobContainer.get(), &NetJob::failed, this, &PackInstallTask::emitFailed);
     connect(m_netJobContainer.get(), &NetJob::stepProgress, this, &PackInstallTask::propagateStepProgress);
     connect(m_netJobContainer.get(), &NetJob::aborted, this, &PackInstallTask::emitAborted);
@@ -93,6 +93,54 @@ void PackInstallTask::downloadPack()
     progress(1, 4);
 }
 
+void PackInstallTask::onClientDownloadSucceeded()
+{
+    m_netJobContainer.reset();
+    if (!shouldCreateServerPair() || ModPlatform::legacyFtbServerSupport(m_pack.serverPack) != ModPlatform::ServerSupport::Official) {
+        unzip();
+        return;
+    }
+
+    const bool privatePack = m_pack.type == PackType::Private;
+    m_serverPackUrl = ModPlatform::legacyFtbPackUrl(BuildConfig.LEGACY_FTB_CDN_BASE_URL, privatePack,
+                                                    m_pack.dir, m_version, m_pack.serverPack);
+    m_serverArchivePath = FS::PathCombine(m_stagingPath, "server-pack", "legacy-server-pack.zip");
+    FS::ensureFilePathExists(m_serverArchivePath);
+
+    setStatus(tr("Downloading the official legacy FTB server pack"));
+    auto job = makeShared<NetJob>(tr("Legacy FTB server pack download"), m_network);
+    job->setAskRetry(false);
+    job->addNetAction(Net::ApiDownload::makeFile(m_serverPackUrl, m_serverArchivePath));
+    connect(job.get(), &NetJob::succeeded, this, &PackInstallTask::onServerPackDownloadSucceeded);
+    connect(job.get(), &NetJob::failed, this, &PackInstallTask::onServerPackDownloadFailed);
+    connect(job.get(), &NetJob::aborted, this, &PackInstallTask::onServerPackDownloadAborted);
+    m_netJobContainer = job;
+    setAbortable(true);
+    job->start();
+}
+
+void PackInstallTask::onServerPackDownloadSucceeded()
+{
+    m_netJobContainer.reset();
+    m_serverPackDownloaded = true;
+    unzip();
+}
+
+void PackInstallTask::onServerPackDownloadFailed(QString reason)
+{
+    m_netJobContainer.reset();
+    m_serverPackDownloaded = false;
+    logWarning(tr("The published legacy FTB server pack could not be downloaded from %1 (%2). J Launcher will build the server from client files instead.")
+                   .arg(Privacy::sanitizeUrl(m_serverPackUrl), Privacy::sanitizeText(reason)));
+    unzip();
+}
+
+void PackInstallTask::onServerPackDownloadAborted()
+{
+    m_netJobContainer.reset();
+    emitAborted();
+}
+
 void PackInstallTask::unzip()
 {
     setStatus(tr("Extracting modpack"));
@@ -101,15 +149,43 @@ void PackInstallTask::unzip()
 
     QDir extractDir(m_stagingPath);
 
-    m_extractFuture = QtConcurrent::run(QThreadPool::globalInstance(), QOverload<QString, QString>::of(MMCZip::extractDir), m_archivePath,
-                                        extractDir.absolutePath() + "/unzip");
-    connect(&m_extractFutureWatcher, &QFutureWatcher<QStringList>::finished, this, &PackInstallTask::onUnzipFinished);
-    connect(&m_extractFutureWatcher, &QFutureWatcher<QStringList>::canceled, this, &PackInstallTask::onUnzipCanceled);
+    const QString clientExtractPath = extractDir.absolutePath() + "/unzip";
+    const QString serverArchivePath = m_serverPackDownloaded ? m_serverArchivePath : QString();
+    const QString serverFilesPath = FS::PathCombine(m_stagingPath, "server-pack", "server-files");
+    m_extractFuture = QtConcurrent::run(QThreadPool::globalInstance(),
+        [archivePath = m_archivePath, clientExtractPath, serverArchivePath, serverFilesPath]() {
+            ExtractionResult result;
+            result.clientFiles = MMCZip::extractDir(archivePath, clientExtractPath);
+            if (!result.clientFiles || serverArchivePath.isEmpty()) return result;
+
+            QString failedEntry;
+            if (!MMCZip::validateArchive(serverArchivePath, &failedEntry)) {
+                qWarning() << "The published legacy FTB server pack failed archive validation at" << failedEntry
+                           << "; falling back to client files.";
+                return result;
+            }
+            if (!MMCZip::extractDir(serverArchivePath, serverFilesPath)) {
+                qWarning() << "The published legacy FTB server pack could not be extracted; falling back to client files.";
+                FS::deletePath(serverFilesPath);
+                return result;
+            }
+            result.publishedServerPackExtracted = true;
+            return result;
+        });
+    connect(&m_extractFutureWatcher, &QFutureWatcher<ExtractionResult>::finished, this, &PackInstallTask::onUnzipFinished);
+    connect(&m_extractFutureWatcher, &QFutureWatcher<ExtractionResult>::canceled, this, &PackInstallTask::onUnzipCanceled);
     m_extractFutureWatcher.setFuture(m_extractFuture);
 }
 
 void PackInstallTask::onUnzipFinished()
 {
+    const auto result = m_extractFuture.result();
+    if (!m_serverArchivePath.isEmpty()) FS::deletePath(m_serverArchivePath);
+    if (!result.clientFiles) {
+        emitFailed(tr("Failed to extract the legacy FTB modpack archive."));
+        return;
+    }
+    m_serverPackExtracted = result.publishedServerPackExtracted;
     install();
 }
 
@@ -215,6 +291,14 @@ void PackInstallTask::install()
             || providerMarker.write("ftb-legacy\n") != 11) {
             emitFailed(tr("Could not record the legacy FTB compatibility metadata."));
             return;
+        }
+        if (m_serverPackExtracted) {
+            QFile publishedMarker(FS::PathCombine(m_stagingPath, "server-pack", "published-server-pack.txt"));
+            if (!publishedMarker.open(QIODevice::WriteOnly | QIODevice::Text)
+                || publishedMarker.write("ftb-legacy\n") != 11) {
+                emitFailed(tr("Could not record the downloaded legacy FTB server pack."));
+                return;
+            }
         }
     }
 

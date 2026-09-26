@@ -92,6 +92,7 @@ class FtbPage : public QWidget, public ModpackProviderBasePage {
 
     FTB::Modpack m_selected;
     QString m_selectedVersion;
+    int m_serverProbeSerial = 0;
 
     bool m_initialised{ false };
 };

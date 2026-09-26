@@ -45,6 +45,7 @@ class ListModel : public QAbstractListModel {
     QStringList m_loadingLogos;
     FTBLogoMap m_logoMap;
     QMap<QString, LogoCallback> waitingCallbacks;
+    bool m_showServerBadges = false;
 
     void requestLogo(QString file);
     QString translatePackType(PackType type) const;
@@ -68,6 +69,7 @@ class ListModel : public QAbstractListModel {
 
     Modpack at(int row);
     void getLogo(const QString& logo, LogoCallback callback);
+    void setShowServerBadges(bool show) { m_showServerBadges = show; }
 };
 
 }  // namespace LegacyFTB

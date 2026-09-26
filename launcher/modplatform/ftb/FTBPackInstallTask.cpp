@@ -52,12 +52,15 @@
 
 #include "Application.h"
 #include "BuildConfig.h"
+#include "modplatform/ServerSupportRequestQueue.h"
 #include "ui/dialogs/BlockedModsDialog.h"
 
 #include <QFile>
+#include <QCoreApplication>
 #include <QDirIterator>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QTimer>
 #include <QProcess>
 
 #ifdef Q_OS_WIN
@@ -69,6 +72,12 @@
 namespace FTB {
 
 namespace {
+ModPlatform::ServerSupportRequestQueue<ModPlatform::ServerSupport>& serverPackProbeQueue()
+{
+    static ModPlatform::ServerSupportRequestQueue<ModPlatform::ServerSupport> queue(ServerPackProbeConcurrency);
+    return queue;
+}
+
 QString dedicatedServerInstallerUrl(int packId, int versionId)
 {
     return QString(BuildConfig.FTB_API_BASE_URL
@@ -121,6 +130,55 @@ bool verifyTrustedWindowsExecutable(const QString& path, QString* error)
 #endif
 }
 }
+
+ModPlatform::ServerSupport serverPackSupportFromHttpStatus(int status, bool networkError)
+{
+    if (status == 200) return ModPlatform::ServerSupport::Official;
+    if (status == 404) return ModPlatform::ServerSupport::ClientDerived;
+    Q_UNUSED(networkError)
+    return ModPlatform::ServerSupport::Unknown;
+}
+
+void probeDedicatedServerPack(QNetworkAccessManager* network, int packId, int versionId, QObject* owner,
+                              std::function<void(ModPlatform::ServerSupport)> callback)
+{
+    const auto key = QStringLiteral("%1/%2").arg(packId).arg(versionId);
+    using Queue = ModPlatform::ServerSupportRequestQueue<ModPlatform::ServerSupport>;
+    auto starter = [network, packId, versionId](Queue::Completion complete) -> Queue::Cancel {
+#ifdef Q_OS_WIN
+        QNetworkRequest request(QUrl(dedicatedServerInstallerUrl(packId, versionId)));
+        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        auto* reply = network->head(request);
+        QObject::connect(reply, &QNetworkReply::finished, reply, [reply, complete = std::move(complete)]() mutable {
+            const auto status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            const auto support = serverPackSupportFromHttpStatus(status, reply->error() != QNetworkReply::NoError);
+            complete(support == ModPlatform::ServerSupport::Unknown
+                         ? Queue::Result{}
+                         : Queue::Result{ support });
+            reply->deleteLater();
+        });
+        return [reply] { reply->abort(); };
+#else
+        Q_UNUSED(network)
+        Q_UNUSED(packId)
+        Q_UNUSED(versionId)
+        QTimer::singleShot(0, QCoreApplication::instance(), [complete = std::move(complete)]() mutable {
+            complete(ModPlatform::ServerSupport::ClientDerived);
+        });
+        return {};
+#endif
+    };
+    serverPackProbeQueue().request(key, owner, std::move(starter),
+        [callback = std::move(callback)](Queue::Result result) mutable {
+            callback(result.value_or(ModPlatform::ServerSupport::Unknown));
+        });
+}
+
+void cancelDedicatedServerPackRequests(QObject* owner)
+{
+    serverPackProbeQueue().cancelOwner(owner);
+}
+
 PackInstallTask::PackInstallTask(Modpack pack, QString version, QWidget* parent)
     : m_pack(std::move(pack)), m_versionName(std::move(version)), m_parent(parent)
 {}
@@ -141,12 +199,7 @@ bool PackInstallTask::abort()
     if (m_modIdResolverTask) {
         aborted &= m_modIdResolverTask->abort();
     }
-    if (m_serverPackProbe) {
-        disconnect(m_serverPackProbe, nullptr, this, nullptr);
-        m_serverPackProbe->abort();
-        m_serverPackProbe->deleteLater();
-        m_serverPackProbe = nullptr;
-    }
+    cancelDedicatedServerPackRequests(this);
     if (m_serverInstallerProcess
         && m_serverInstallerProcess->state() != QProcess::NotRunning) {
         disconnect(m_serverInstallerProcess.get(), nullptr, this, nullptr);
@@ -225,46 +278,18 @@ void PackInstallTask::onManifestDownloadSucceeded(QByteArray* responsePtr)
 
 void PackInstallTask::probeDedicatedServerPack()
 {
-#ifdef Q_OS_WIN
     setStatus(tr("Checking for the official FTB server installer..."));
     setAbortable(true);
-    QNetworkRequest request(
-        QUrl(dedicatedServerInstallerUrl(m_pack.id, m_version.id)));
-    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
-                         QNetworkRequest::NoLessSafeRedirectPolicy);
-    m_serverPackProbe = APPLICATION->network()->head(request);
-    connect(m_serverPackProbe, &QNetworkReply::finished, this, [this]() {
-        if (!m_serverPackProbe) {
+    FTB::probeDedicatedServerPack(
+        APPLICATION->network(), m_pack.id, m_version.id, this,
+        [this](ModPlatform::ServerSupport support) {
+        if (support == ModPlatform::ServerSupport::Unknown) {
+            emitFailed(tr("J Launcher could not determine whether this FTB pack has an official server version. Check the connection and try again."));
             return;
         }
-        const int status = m_serverPackProbe
-                               ->attribute(QNetworkRequest::HttpStatusCodeAttribute)
-                               .toInt();
-        const auto networkError = m_serverPackProbe->error();
-        m_serverPackProbe->deleteLater();
-        m_serverPackProbe = nullptr;
-        if (status == 200) {
-            m_hasDedicatedServerPack = true;
-        } else if (status == 404) {
-            m_hasDedicatedServerPack = false;
-        } else if (networkError != QNetworkReply::NoError) {
-            emitFailed(tr(
-                "J Launcher could not determine whether this FTB pack has an official "
-                "server version. Check the connection and try again."));
-            return;
-        } else {
-            emitFailed(tr(
-                "The FTB service returned an unexpected response (%1) while checking "
-                "for a server version.")
-                           .arg(status));
-            return;
-        }
+        m_hasDedicatedServerPack = support == ModPlatform::ServerSupport::Official;
         resolveMods();
     });
-#else
-    m_hasDedicatedServerPack = false;
-    resolveMods();
-#endif
 }
 
 void PackInstallTask::resolveMods()

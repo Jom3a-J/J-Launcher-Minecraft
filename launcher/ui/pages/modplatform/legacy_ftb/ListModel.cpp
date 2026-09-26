@@ -50,6 +50,7 @@
 #include <RWStorage.h>
 
 #include <BuildConfig.h>
+#include "modplatform/ServerSupport.h"
 
 namespace LegacyFTB {
 
@@ -205,6 +206,17 @@ QVariant ListModel::data(const QModelIndex& index, int role) const
             return pack.description;
         case UserDataTypes::INSTALLED:
             return false;
+        case UserDataTypes::BADGE_TEXT:
+            if (!m_showServerBadges) return QString();
+            return ModPlatform::legacyFtbServerSupport(pack.serverPack) == ModPlatform::ServerSupport::Official
+                ? tr("Official server pack") : tr("No official server pack");
+        case UserDataTypes::BADGE_TONE:
+            return ModPlatform::legacyFtbServerSupport(pack.serverPack) == ModPlatform::ServerSupport::Official ? 1 : 0;
+        case Qt::AccessibleTextRole:
+            if (!m_showServerBadges) return pack.name;
+            return tr("%1. %2.").arg(pack.name,
+                ModPlatform::legacyFtbServerSupport(pack.serverPack) == ModPlatform::ServerSupport::Official
+                    ? tr("Official server pack") : tr("No official server pack"));
         default:
             break;
     }

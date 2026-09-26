@@ -39,22 +39,27 @@
 #include "ui_FtbPage.h"
 
 #include <QKeyEvent>
+#include <algorithm>
 
 #include "modplatform/ftb/FTBPackInstallTask.h"
 #include "ui/dialogs/NewInstanceDialog.h"
 
 #include "Markdown.h"
+#include "ui/widgets/ProjectItem.h"
 
 FtbPage::FtbPage(NewInstanceDialog* dialog, QWidget* parent) : QWidget(parent), m_ui(new Ui::FtbPage), m_dialog(dialog)
 {
     m_ui->setupUi(this);
+    m_ui->serverCompatibilityLabel->setWordWrap(true);
     m_ui->serverCompatibilityLabel->setVisible(
         m_dialog->isServerModpackMode());
 
     m_filterModel = new Ftb::FilterModel(this);
     m_listModel = new Ftb::ListModel(this);
+    m_listModel->setShowServerBadges(m_dialog->isServerModpackMode());
     m_filterModel->setSourceModel(m_listModel);
     m_ui->packView->setModel(m_filterModel);
+    m_ui->packView->setItemDelegate(new ProjectItemDelegate(this));
     m_ui->packView->setSortingEnabled(true);
     m_ui->packView->header()->hide();
     m_ui->packView->setIndentation(0);
@@ -107,6 +112,7 @@ void FtbPage::retranslate()
 
 void FtbPage::openedImpl()
 {
+    m_listModel->setShowServerBadges(m_dialog->isServerModpackMode());
     if (!m_initialised || m_listModel->wasAborted()) {
         m_listModel->request();
         m_initialised = true;
@@ -117,6 +123,9 @@ void FtbPage::openedImpl()
 
 void FtbPage::closedImpl()
 {
+    ++m_serverProbeSerial;
+    FTB::cancelDedicatedServerPackRequests(this);
+    m_listModel->setShowServerBadges(false);
     if (m_listModel->isMakingRequest())
         m_listModel->abortRequest();
 }
@@ -129,14 +138,46 @@ void FtbPage::suggestCurrent()
 
     if (m_selectedVersion.isEmpty()) {
         m_ui->serverCompatibilityLabel->clear();
+        m_dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "ftb");
         m_dialog->setSuggestedPack();
         return;
     }
 
     if (m_dialog->isServerModpackMode()) {
-        m_ui->serverCompatibilityLabel->setText(tr("Server compatible"));
-        m_ui->serverCompatibilityLabel->setToolTip(
-            tr("FTB supplies client/server file metadata. J Launcher checks for an official server installer during creation and otherwise derives the server."));
+        FTB::cancelDedicatedServerPackRequests(this);
+        ++m_serverProbeSerial;
+        const int serial = m_serverProbeSerial;
+        const auto version = std::find_if(m_selected.versions.cbegin(), m_selected.versions.cend(),
+            [this](const FTB::VersionInfo& candidate) { return candidate.name == m_selectedVersion; });
+        m_ui->serverCompatibilityLabel->setText(tr("Checking…"));
+        m_dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "ftb");
+        m_dialog->setServerSupportChecking(true);
+        if (version != m_selected.versions.cend()) {
+            const int packId = m_selected.id;
+            const int versionId = version->id;
+            FTB::probeDedicatedServerPack(APPLICATION->network(), packId, versionId, this,
+                [this, packId, versionId, serial](ModPlatform::ServerSupport support) {
+                    if (!isOpened || serial != m_serverProbeSerial || m_selected.id != packId || m_selectedVersion.isEmpty()) return;
+                    const auto selected = std::find_if(m_selected.versions.cbegin(), m_selected.versions.cend(),
+                        [this, versionId](const FTB::VersionInfo& item) { return item.id == versionId && item.name == m_selectedVersion; });
+                    if (selected == m_selected.versions.cend()) return;
+                    m_dialog->setServerSupport(support, {}, "ftb");
+                    m_dialog->setServerSupportChecking(false);
+                    switch (support) {
+                        case ModPlatform::ServerSupport::Official:
+                            m_ui->serverCompatibilityLabel->setText(tr("Official server pack"));
+                            break;
+                        case ModPlatform::ServerSupport::ClientDerived:
+                            m_ui->serverCompatibilityLabel->setText(tr("No official server pack — built from client files, may not work"));
+                            break;
+                        default:
+                            m_ui->serverCompatibilityLabel->setText(tr("Server support unknown"));
+                            break;
+                    }
+                });
+        } else {
+            m_dialog->setServerSupportChecking(false);
+        }
     }
 
     m_dialog->setSuggestedPack(m_selected.name, m_selectedVersion, new FTB::PackInstallTask(m_selected, m_selectedVersion, this));
@@ -165,7 +206,11 @@ void FtbPage::onSelectionChanged(QModelIndex first, QModelIndex /*second*/)
     m_ui->versionSelectionBox->clear();
 
     if (!first.isValid()) {
+        ++m_serverProbeSerial;
+        FTB::cancelDedicatedServerPackRequests(this);
         m_ui->serverCompatibilityLabel->clear();
+        m_dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "ftb");
+        m_dialog->setServerSupportChecking(false);
         if (isOpened) {
             m_dialog->setSuggestedPack();
         }
@@ -188,8 +233,12 @@ void FtbPage::onSelectionChanged(QModelIndex first, QModelIndex /*second*/)
 void FtbPage::onVersionSelectionChanged(QString selected)
 {
     if (selected.isNull() || selected.isEmpty()) {
+        ++m_serverProbeSerial;
+        FTB::cancelDedicatedServerPackRequests(this);
         m_selectedVersion = "";
         m_ui->serverCompatibilityLabel->clear();
+        m_dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "ftb");
+        m_dialog->setServerSupportChecking(false);
         return;
     }
 

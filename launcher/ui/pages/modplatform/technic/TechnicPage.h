@@ -67,6 +67,7 @@ class TechnicPage : public QWidget, public ModpackProviderBasePage {
     void retranslate() override;
 
     void openedImpl() override;
+    void closedImpl() override;
 
     bool eventFilter(QObject* watched, QEvent* event) override;
 

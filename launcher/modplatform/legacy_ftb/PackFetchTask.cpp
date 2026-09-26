@@ -185,6 +185,7 @@ bool PackFetchTask::parseAndAddPacks(QByteArray& data, PackType packType, Modpac
 
         modpack.dir = element.attribute("dir");
         modpack.file = element.attribute("url");
+        modpack.serverPack = element.attribute("serverPack");
 
         modpack.type = packType;
 

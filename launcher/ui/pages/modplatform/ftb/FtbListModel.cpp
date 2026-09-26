@@ -20,6 +20,9 @@
 #include "BuildConfig.h"
 #include "Json.h"
 #include "logs/Privacy.h"
+#include "modplatform/ftb/FTBPackInstallTask.h"
+#include "modplatform/ServerSupport.h"
+#include "ui/widgets/ProjectItem.h"
 
 #include <QPainter>
 
@@ -27,7 +30,10 @@ namespace Ftb {
 
 ListModel::ListModel(QObject* parent) : QAbstractListModel(parent) {}
 
-ListModel::~ListModel() {}
+ListModel::~ListModel()
+{
+    cancelServerBadgeRequests();
+}
 
 int ListModel::rowCount(const QModelIndex& parent) const
 {
@@ -49,6 +55,14 @@ QVariant ListModel::data(const QModelIndex& index, int role) const
     FTB::Modpack pack = m_modpacks.at(pos);
     if (role == Qt::DisplayRole) {
         return pack.name;
+    } else if (role == Qt::SizeHintRole) {
+        return QSize(0, 58);
+    } else if (role == UserDataTypes::TITLE) {
+        return pack.name;
+    } else if (role == UserDataTypes::DESCRIPTION) {
+        return pack.synopsis;
+    } else if (role == UserDataTypes::INSTALLED) {
+        return false;
     } else if (role == Qt::ToolTipRole) {
         return pack.synopsis;
     } else if (role == Qt::DecorationRole) {
@@ -73,6 +87,20 @@ QVariant ListModel::data(const QModelIndex& index, int role) const
         QVariant v;
         v.setValue(pack);
         return v;
+    } else if (role == UserDataTypes::BADGE_TEXT) {
+        if (!m_showServerBadges) return QString();
+        const auto support = m_serverSupport.value(pack.id, ModPlatform::ServerSupport::Unknown);
+        if (support == ModPlatform::ServerSupport::Official) return tr("Official server pack");
+        if (support == ModPlatform::ServerSupport::ClientDerived) return tr("No official server pack");
+        return QString();
+    } else if (role == UserDataTypes::BADGE_TONE) {
+        return m_serverSupport.value(pack.id) == ModPlatform::ServerSupport::Official ? 1 : 0;
+    } else if (role == Qt::AccessibleTextRole) {
+        const auto support = m_serverSupport.value(pack.id, ModPlatform::ServerSupport::Unknown);
+        return !m_showServerBadges || support == ModPlatform::ServerSupport::Unknown
+            ? pack.name
+            : tr("%1. %2.").arg(pack.name, support == ModPlatform::ServerSupport::Official
+                ? tr("Official server pack") : tr("No official server pack"));
     }
 
     return QVariant();
@@ -89,6 +117,8 @@ void ListModel::getLogo(const QString& logo, const QString& logoUrl, LogoCallbac
 
 void ListModel::request()
 {
+    cancelServerBadgeRequests();
+    m_serverSupport.clear();
     m_aborted = false;
 
     beginResetModel();
@@ -200,12 +230,64 @@ void ListModel::packRequestFinished(QByteArray* responsePtr)
         beginInsertRows(QModelIndex(), m_modpacks.size(), m_modpacks.size());
         m_modpacks.append(pack);
         endInsertRows();
+        if (m_showServerBadges) requestServerBadge(pack);
     }
 
     if (!m_remainingPacks.isEmpty()) {
         m_currentPack = m_remainingPacks.at(0);
         requestPack();
     }
+}
+
+void ListModel::setShowServerBadges(bool show)
+{
+    if (m_showServerBadges == show) return;
+    m_showServerBadges = show;
+    if (!show) {
+        cancelServerBadgeRequests();
+    } else {
+        refreshServerBadges();
+    }
+    if (!m_modpacks.isEmpty()) {
+        emit dataChanged(index(0, 0), index(m_modpacks.size() - 1, 0),
+                         { UserDataTypes::BADGE_TEXT, UserDataTypes::BADGE_TONE, Qt::AccessibleTextRole });
+    }
+}
+
+void ListModel::refreshServerBadges()
+{
+    if (!m_showServerBadges) return;
+    for (const auto& pack : m_modpacks) {
+        if (!m_serverSupport.contains(pack.id)) requestServerBadge(pack);
+    }
+}
+
+void ListModel::cancelServerBadgeRequests()
+{
+    ++m_serverBadgeGeneration;
+    FTB::cancelDedicatedServerPackRequests(this);
+}
+
+void ListModel::requestServerBadge(const FTB::Modpack& pack)
+{
+    if (pack.versions.isEmpty()) return;
+    const auto newest = pack.versions.constLast();
+    const int generation = m_serverBadgeGeneration;
+    FTB::probeDedicatedServerPack(APPLICATION->network(), pack.id, newest.id, this,
+        [this, packId = pack.id, versionId = newest.id, generation](ModPlatform::ServerSupport support) {
+            if (!m_showServerBadges || generation != m_serverBadgeGeneration) return;
+            if (support == ModPlatform::ServerSupport::Unknown) return;
+            m_serverSupport.insert(packId, support);
+            for (int row = 0; row < m_modpacks.size(); ++row) {
+                if (m_modpacks.at(row).id == packId
+                    && !m_modpacks.at(row).versions.isEmpty()
+                    && m_modpacks.at(row).versions.constLast().id == versionId) {
+                    emit dataChanged(index(row, 0), index(row, 0),
+                                     { UserDataTypes::BADGE_TEXT, UserDataTypes::BADGE_TONE, Qt::AccessibleTextRole });
+                    break;
+                }
+            }
+        });
 }
 
 void ListModel::packRequestFailed(QString)

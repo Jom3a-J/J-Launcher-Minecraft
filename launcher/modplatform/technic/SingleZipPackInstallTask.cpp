@@ -21,6 +21,7 @@
 #include "FileSystem.h"
 #include "MMCZip.h"
 #include "TechnicPackProcessor.h"
+#include "modplatform/ServerSupport.h"
 
 #include "Application.h"
 
@@ -54,8 +55,12 @@ void Technic::SingleZipPackInstallTask::executeTask()
             return;
         }
     }
-    if (shouldCreateServerPair() && (m_serverPackUrl.isEmpty() || !m_serverPackUrl.isValid())) {
+    const auto serverSupport = ModPlatform::technicServerSupport(m_serverPackUrl);
+    if (shouldCreateServerPair() && serverSupport == ModPlatform::ServerSupport::ClientDerived) {
         logWarning(tr("Technic does not publish a dedicated server pack for this modpack. The launcher will derive server content from the client pack."));
+    } else if (shouldCreateServerPair() && serverSupport == ModPlatform::ServerSupport::Website) {
+        logWarning(tr("Technic lists server files on its website (%1). The launcher is building server content from the client pack instead.")
+                       .arg(Privacy::sanitizeUrl(m_serverPackUrl)));
     }
     setStatus(tr("Downloading modpack:\n%1")
                   .arg(Privacy::sanitizeUrl(m_sourceUrl)));
@@ -66,7 +71,7 @@ void Technic::SingleZipPackInstallTask::executeTask()
     m_filesNetJob.reset(new NetJob(tr("Modpack download"), APPLICATION->network()));
     m_filesNetJob->addNetAction(Net::ApiDownload::makeCached(m_sourceUrl, entry));
     m_archivePath = entry->getFullPath();
-    if (shouldCreateServerPair() && m_serverPackUrl.isValid() && !m_serverPackUrl.isEmpty()) {
+    if (shouldCreateServerPair() && serverSupport == ModPlatform::ServerSupport::Official) {
         const QString serverPath = m_serverPackUrl.host() + '/' + m_serverPackUrl.path();
         auto serverEntry = APPLICATION->metacache()->resolveEntry("general", serverPath);
         serverEntry->setStale(true);

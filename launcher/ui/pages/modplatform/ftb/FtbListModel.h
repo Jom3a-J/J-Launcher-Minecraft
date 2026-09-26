@@ -17,10 +17,12 @@
 #pragma once
 
 #include <QAbstractListModel>
+#include <QHash>
 
 #include <QIcon>
 #include <memory>
 #include "modplatform/ftb/FTBPackManifest.h"
+#include "modplatform/ServerSupport.h"
 #include "net/NetJob.h"
 
 namespace Ftb {
@@ -48,6 +50,9 @@ class ListModel : public QAbstractListModel {
 
     void request();
     void abortRequest();
+    void setShowServerBadges(bool show);
+    void refreshServerBadges();
+    void cancelServerBadgeRequests();
 
     void getLogo(const QString& logo, const QString& logoUrl, LogoCallback callback);
 
@@ -67,6 +72,7 @@ class ListModel : public QAbstractListModel {
 
    private:
     void requestLogo(QString file, QString url);
+    void requestServerBadge(const FTB::Modpack& pack);
 
    private:
     bool m_aborted = false;
@@ -77,6 +83,9 @@ class ListModel : public QAbstractListModel {
     NetJob::Ptr m_jobPtr;
     int m_currentPack;
     QList<int> m_remainingPacks;
+    QHash<int, ModPlatform::ServerSupport> m_serverSupport;
+    bool m_showServerBadges = false;
+    int m_serverBadgeGeneration = 0;
 };
 
 }  // namespace Ftb

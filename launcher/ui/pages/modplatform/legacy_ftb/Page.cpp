@@ -59,10 +59,13 @@ Page::Page(NewInstanceDialog* dialog, QWidget* parent) : QWidget(parent), dialog
     ftbPrivatePacks.reset(new PrivatePackManager());
 
     ui->setupUi(this);
+    ui->serverCompatibilityLabel->setVisible(dialog->isServerModpackMode());
+    ui->serverCompatibilityLabel->setWordWrap(true);
 
     {
         publicFilterModel = new FilterModel(this);
         publicListModel = new ListModel(this);
+        publicListModel->setShowServerBadges(dialog->isServerModpackMode());
         publicFilterModel->setSourceModel(publicListModel);
 
         ui->publicPackList->setModel(publicFilterModel);
@@ -81,6 +84,7 @@ Page::Page(NewInstanceDialog* dialog, QWidget* parent) : QWidget(parent), dialog
     {
         thirdPartyFilterModel = new FilterModel(this);
         thirdPartyModel = new ListModel(this);
+        thirdPartyModel->setShowServerBadges(dialog->isServerModpackMode());
         thirdPartyFilterModel->setSourceModel(thirdPartyModel);
 
         ui->thirdPartyPackList->setModel(thirdPartyFilterModel);
@@ -95,6 +99,7 @@ Page::Page(NewInstanceDialog* dialog, QWidget* parent) : QWidget(parent), dialog
     {
         privateFilterModel = new FilterModel(this);
         privateListModel = new ListModel(this);
+        privateListModel->setShowServerBadges(dialog->isServerModpackMode());
         privateFilterModel->setSourceModel(privateListModel);
 
         ui->privatePackList->setModel(privateFilterModel);
@@ -174,9 +179,18 @@ void Page::suggestCurrent()
     }
 
     if (selected.broken || selectedVersion.isEmpty()) {
+        ui->serverCompatibilityLabel->clear();
+        dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "legacy_ftb");
         dialog->setSuggestedPack();
         return;
     }
+
+    const auto support = ModPlatform::legacyFtbServerSupport(selected.serverPack);
+    ui->serverCompatibilityLabel->setText(
+        support == ModPlatform::ServerSupport::Official
+            ? tr("Official server pack")
+            : tr("No official server pack — built from client files, may not work"));
+    dialog->setServerSupport(support, {}, "legacy_ftb");
 
     dialog->setSuggestedPack(selected.name, selectedVersion, new PackInstallTask(APPLICATION->network(), selected, selectedVersion));
     QString editedLogoName = selected.logo;
@@ -280,6 +294,8 @@ void Page::onPackSelectionChanged(Modpack* pack)
     } else {
         currentModpackInfo->setHtml("");
         ui->versionSelectionBox->clear();
+        ui->serverCompatibilityLabel->clear();
+        dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "legacy_ftb");
         if (isOpened) {
             dialog->setSuggestedPack();
         }
@@ -292,6 +308,8 @@ void Page::onVersionSelectionItemChanged(QString version)
 {
     if (version.isNull() || version.isEmpty()) {
         selectedVersion = "";
+        ui->serverCompatibilityLabel->clear();
+        dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "legacy_ftb");
         return;
     }
 

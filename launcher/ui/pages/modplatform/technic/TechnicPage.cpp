@@ -48,6 +48,7 @@
 #include "TechnicModel.h"
 #include "modplatform/technic/SingleZipPackInstallTask.h"
 #include "modplatform/technic/SolderPackInstallTask.h"
+#include "modplatform/ServerSupport.h"
 
 #include "Application.h"
 #include "modplatform/technic/SolderPackManifest.h"
@@ -59,11 +60,15 @@ TechnicPage::TechnicPage(NewInstanceDialog* dialog, QWidget* parent)
     : QWidget(parent), ui(new Ui::TechnicPage), dialog(dialog), m_fetch_progress(this, false)
 {
     ui->setupUi(this);
+    ui->serverCompatibilityLabel->setOpenExternalLinks(true);
+    ui->serverCompatibilityLabel->setWordWrap(true);
+    model = new Technic::ListModel(this);
+    model->setShowServerBadges(dialog->isServerModpackMode());
+    ui->packView->setModel(model);
+    ui->packView->setItemDelegate(new ProjectItemDelegate(this));
     ui->serverCompatibilityLabel->setVisible(
         dialog->isServerModpackMode());
     ui->searchEdit->installEventFilter(this);
-    model = new Technic::ListModel(this);
-    ui->packView->setModel(model);
     ui->versionSelectionBox->view()->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     ui->versionSelectionBox->view()->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
 
@@ -81,7 +86,6 @@ TechnicPage::TechnicPage(NewInstanceDialog* dialog, QWidget* parent)
     connect(ui->packView->selectionModel(), &QItemSelectionModel::currentChanged, this, &TechnicPage::onSelectionChanged);
     connect(ui->versionSelectionBox, &QComboBox::currentTextChanged, this, &TechnicPage::onVersionSelectionChanged);
 
-    ui->packView->setItemDelegate(new ProjectItemDelegate(this));
 }
 
 bool TechnicPage::eventFilter(QObject* watched, QEvent* event)
@@ -119,8 +123,15 @@ void TechnicPage::retranslate()
 
 void TechnicPage::openedImpl()
 {
+    model->setShowServerBadges(dialog->isServerModpackMode());
     suggestCurrent();
     triggerSearch();
+}
+
+void TechnicPage::closedImpl()
+{
+    Technic::cancelPackDetailsRequests(this);
+    model->setShowServerBadges(false);
 }
 
 void TechnicPage::triggerSearch()
@@ -144,6 +155,7 @@ void TechnicPage::onSelectionChanged(QModelIndex first, [[maybe_unused]] QModelI
     QVariant raw = model->data(first, Qt::UserRole);
     Q_ASSERT(raw.canConvert<Technic::Modpack>());
     current = raw.value<Technic::Modpack>();
+    dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "technic");
     suggestCurrent();
 }
 
@@ -166,30 +178,17 @@ void TechnicPage::suggestCurrent()
         return;
     }
 
-    auto netJob = makeShared<NetJob>(QString("Technic::PackMeta(%1)").arg(current.name), APPLICATION->network());
     QString slug = current.slug;
-    auto [action, responsePtr] = Net::ApiDownload::makeByteArray(
-        QString("%1modpack/%2?build=%3").arg(BuildConfig.TECHNIC_API_BASE_URL, slug, BuildConfig.TECHNIC_API_BUILD));
-    netJob->addNetAction(action);
-    connect(netJob.get(), &NetJob::succeeded, this, [this, responsePtr, slug] {
-        // NOTE(TheKodeToad): moving the response out to avoid it from being destroyed by jobPtr.reset()
-        QByteArray response = std::move(*responsePtr);
-        jobPtr.reset();
-
+    Technic::requestPackDetails(APPLICATION->network(), slug, this, [this, slug](std::optional<QJsonObject> details) {
+        if (!isOpened) return;
         if (current.slug != slug) {
             return;
         }
-
-        QJsonParseError parse_error{};
-        QJsonDocument doc = QJsonDocument::fromJson(response, &parse_error);
-        QJsonObject obj = doc.object();
-        if (parse_error.error != QJsonParseError::NoError) {
-            qWarning() << "Error while parsing JSON response from Technic at" << parse_error.offset
-                       << "reason:" << parse_error.errorString();
-            qWarning() << "Response body excerpt:"
-                       << Privacy::sanitizeResponseBody(response, 2048);
+        if (!details) {
+            CustomMessageBox::selectable(this, tr("Error"), tr("Could not load this Technic pack's details."), QMessageBox::Critical)->exec();
             return;
         }
+        QJsonObject obj = *details;
         if (!obj.contains("url")) {
             qWarning() << "Json doesn't contain an url key";
             return;
@@ -222,11 +221,6 @@ void TechnicPage::suggestCurrent()
 
         metadataLoaded();
     });
-    connect(jobPtr.get(), &NetJob::failed, this,
-            [this](QString reason) { CustomMessageBox::selectable(this, tr("Error"), reason, QMessageBox::Critical)->exec(); });
-
-    jobPtr = netJob;
-    jobPtr->start();
 }
 
 // expects current.metadataLoaded to be true
@@ -292,22 +286,23 @@ void TechnicPage::selectVersion()
     }
     if (current.broken) {
         ui->serverCompatibilityLabel->clear();
+        dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "technic");
         dialog->setSuggestedPack();
         return;
     }
 
     if (dialog->isServerModpackMode()) {
-        const bool hasOfficialServerPack =
-            selectedVersion == current.currentVersion
-            && QUrl(current.serverPackUrl).isValid()
-            && !current.serverPackUrl.isEmpty();
-        ui->serverCompatibilityLabel->setText(
-            hasOfficialServerPack ? tr("Official server pack")
-                                  : tr("Derived server"));
-        ui->serverCompatibilityLabel->setToolTip(
-            hasOfficialServerPack
-                ? tr("Technic publishes a dedicated server package for this version.")
-                : tr("No dedicated server package is published for this selection; J Launcher will attempt a derived server."));
+        const QUrl serverUrl = selectedVersion == current.currentVersion ? QUrl(current.serverPackUrl) : QUrl();
+        const auto support = ModPlatform::technicServerSupport(serverUrl);
+        dialog->setServerSupport(support, serverUrl.toString(), "technic");
+        if (support == ModPlatform::ServerSupport::Official) {
+            ui->serverCompatibilityLabel->setText(tr("Official server pack"));
+        } else if (support == ModPlatform::ServerSupport::Website) {
+            ui->serverCompatibilityLabel->setText(tr("<a href=\"%1\">%2</a>")
+                .arg(serverUrl.toString().toHtmlEscaped(), tr("Server files on the pack's website")));
+        } else {
+            ui->serverCompatibilityLabel->setText(tr("No official server pack — built from client files, may not work"));
+        }
     }
 
     if (!current.isSolder) {
@@ -371,6 +366,7 @@ void TechnicPage::onVersionSelectionChanged(QString version)
     if (version.isNull() || version.isEmpty()) {
         selectedVersion = "";
         ui->serverCompatibilityLabel->clear();
+        dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "technic");
         return;
     }
 

@@ -53,6 +53,7 @@
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QLayout>
+#include <QAbstractButton>
 #include <QLabel>
 #include <QPushButton>
 #include <QScreen>
@@ -228,6 +229,30 @@ void NewInstanceDialog::reject()
 
 void NewInstanceDialog::accept()
 {
+    if (isServerModpackMode() && m_serverSupportChecking) {
+        CustomMessageBox::selectable(this, tr("Checking server support"),
+                                     tr("Please wait for the server support check to finish before continuing."),
+                                     QMessageBox::Information)->exec();
+        return;
+    }
+    if (isServerModpackMode()
+        && m_serverSupportProviderId == m_activeProviderId
+        && (m_serverSupport == ModPlatform::ServerSupport::ClientDerived
+            || m_serverSupport == ModPlatform::ServerSupport::Website)) {
+        const QString detail = m_serverSupport == ModPlatform::ServerSupport::Website
+            ? tr("This pack lists server files on its website. Continue to build a server from the client files instead, which may not work. <a href=\"%1\">Open the pack website</a>")
+                  .arg(m_serverSupportWebsiteUrl.toHtmlEscaped())
+            : tr("No official server pack is available. J Launcher will build a server from client files, which may not work.");
+        auto* confirmation = CustomMessageBox::selectable(
+            this, tr("Server pack unavailable"), detail, QMessageBox::Warning);
+        confirmation->setStandardButtons(QMessageBox::Yes | QMessageBox::Cancel);
+        confirmation->setDefaultButton(QMessageBox::Cancel);
+        confirmation->button(QMessageBox::Yes)->setText(tr("Continue"));
+        if (confirmation->exec() != QMessageBox::Yes) {
+            return;
+        }
+    }
+
     auto chosenDir = instDir();
     if (!QDir(chosenDir).exists()) {
         CustomMessageBox::selectable(
@@ -246,6 +271,19 @@ void NewInstanceDialog::accept()
     m_container->prepareToClose();
 
     QDialog::accept();
+}
+
+void NewInstanceDialog::setServerSupport(ModPlatform::ServerSupport support, QString websiteUrl, QString providerId)
+{
+    m_serverSupport = support;
+    m_serverSupportChecking = false;
+    m_serverSupportWebsiteUrl = std::move(websiteUrl);
+    m_serverSupportProviderId = std::move(providerId);
+}
+
+void NewInstanceDialog::setServerSupportChecking(bool checking)
+{
+    m_serverSupportChecking = checking;
 }
 
 QList<BasePage*> NewInstanceDialog::getPages()
@@ -467,12 +505,19 @@ bool NewInstanceDialog::eventFilter(QObject* watched, QEvent* event)
 
 void NewInstanceDialog::selectedPageChanged(BasePage* previous, BasePage* selected)
 {
+    auto* nextPage = dynamic_cast<ModpackProviderBasePage*>(selected);
+    m_activeProviderId = nextPage ? nextPage->id() : QString();
+    m_serverSupportChecking = false;
+    if (m_serverSupportProviderId != m_activeProviderId) {
+        m_serverSupport = ModPlatform::ServerSupport::Unknown;
+        m_serverSupportWebsiteUrl.clear();
+        m_serverSupportProviderId.clear();
+    }
     auto* prevPage = dynamic_cast<ModpackProviderBasePage*>(previous);
     if (prevPage) {
         m_searchTerm = prevPage->getSerachTerm();
     }
 
-    auto* nextPage = dynamic_cast<ModpackProviderBasePage*>(selected);
     if (nextPage) {
         nextPage->setSearchTerm(m_searchTerm);
     }

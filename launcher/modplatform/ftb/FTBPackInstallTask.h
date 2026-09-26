@@ -42,18 +42,26 @@
 #include "InstanceTask.h"
 #include "QObjectPtr.h"
 #include "modplatform/flame/FileResolvingTask.h"
+#include "modplatform/ServerSupport.h"
 #include "net/NetJob.h"
 #include "ui/dialogs/BlockedModsDialog.h"
 
 #include <QWidget>
-#include <QPointer>
+#include <functional>
 #include <QSet>
 #include <memory>
 
 class QNetworkReply;
+class QNetworkAccessManager;
 class QProcess;
 
 namespace FTB {
+
+inline constexpr int ServerPackProbeConcurrency = 1;
+ModPlatform::ServerSupport serverPackSupportFromHttpStatus(int status, bool networkError);
+void probeDedicatedServerPack(QNetworkAccessManager* network, int packId, int versionId, QObject* owner,
+                              std::function<void(ModPlatform::ServerSupport)> callback);
+void cancelDedicatedServerPackRequests(QObject* owner);
 
 class PackInstallTask final : public InstanceTask {
     Q_OBJECT
@@ -90,7 +98,6 @@ class PackInstallTask final : public InstanceTask {
    private:
     NetJob::Ptr m_net_job = nullptr;
     shared_qobject_ptr<Flame::FileResolvingTask> m_modIdResolverTask = nullptr;
-    QPointer<QNetworkReply> m_serverPackProbe;
     std::unique_ptr<QProcess> m_serverInstallerProcess;
 
     QList<int> m_fileIds;
