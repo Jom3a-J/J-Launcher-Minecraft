@@ -41,12 +41,13 @@
 
 #include <QDateTime>
 #include <QFileInfo>
+#include <QHttp1Configuration>
 #include <QLocale>
 #include <QNetworkReply>
 #include <QUrl>
+#include <array>
 #include <cstdint>
 #include <memory>
-#include <array>
 
 #if defined(LAUNCHER_APPLICATION)
 #include "Application.h"
@@ -56,6 +57,7 @@
 
 #include "MMCTime.h"
 #include "StringUtils.h"
+#include "net/HostScheduler.h"
 #include "logs/Privacy.h"
 #include "net/NetUtils.h"
 
@@ -107,6 +109,24 @@ bool containsCredentials(const QNetworkRequest& request)
 }
 }  // namespace
 
+bool applyCdnHttp1TransportPolicy(QNetworkRequest& request, bool enabled)
+{
+    if (!enabled)
+        return false;
+
+    // Host classification is an exact allowlist; do not broaden this to a forgecdn.net suffix.
+    if (HostScheduler::classify(request.url()) != HostClass::FlameCdn) {
+        return false;
+    }
+
+    const int connectionCount = HostScheduler::hardCeiling(HostScheduler::classify(request.url()));
+    auto http1 = request.http1Configuration();
+    http1.setNumberOfConnectionsPerHost(connectionCount);
+    request.setHttp1Configuration(http1);
+    request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+    return true;
+}
+
 NetRequest::NetRequest() : Task()
 {
     connect(&m_retryTimer, &QTimer::timeout, this, &NetRequest::executeTask);
@@ -128,6 +148,7 @@ void NetRequest::addValidator(Validator* v)
 
 void NetRequest::executeTask()
 {
+    m_cdnHttp1PolicyApplied = false;
     setStatus(tr("Requesting %1").arg(Privacy::sanitizeUrl(m_url, 80)));
 
     if (getState() == Task::State::AbortedByUser) {
@@ -163,6 +184,11 @@ void NetRequest::executeTask()
     }
 
 #if defined(LAUNCHER_APPLICATION)
+    m_cdnHttp1PolicyApplied =
+        applyCdnHttp1TransportPolicy(request, APPLICATION->settings()->get("CdnHttp1Connections").toBool());
+#endif
+
+#if defined(LAUNCHER_APPLICATION)
     auto user_agent = APPLICATION->getUserAgent();
 #else
     auto user_agent = BuildConfig.USER_AGENT;
@@ -195,6 +221,12 @@ void NetRequest::executeTask()
     if (rep == nullptr)  // it failed
         return;
     m_reply.reset(rep);
+    if (m_cdnHttp1PolicyApplied) {
+        connect(rep, &QNetworkReply::redirected, this, [this](const QUrl& redirectedUrl) {
+            if (m_url.host().compare(redirectedUrl.host(), Qt::CaseInsensitive) != 0)
+                emit redirectedToNewHost(redirectedUrl);
+        });
+    }
     connect(rep, &QNetworkReply::uploadProgress, this, &NetRequest::onProgress);
     connect(rep, &QNetworkReply::downloadProgress, this, &NetRequest::onProgress);
     connect(rep, &QNetworkReply::finished, this, &NetRequest::downloadFinished);

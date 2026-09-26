@@ -24,6 +24,8 @@
 #include <QTemporaryDir>
 #include <QTest>
 
+#include <algorithm>
+
 #include "Application.h"
 #include "FileSystem.h"
 #include "RangeHttpServer.h"
@@ -45,6 +47,9 @@ namespace {
  *  discovery chunk still gives every segment more than MinSegmentSize (8 MiB).
  */
 constexpr qint64 LargeSize = 33LL * 1024 * 1024;
+/// Leaves eight full minimum-size segments after Discovery has consumed its first 1 MiB chunk.
+constexpr qint64 EightSegmentSize = SegmentedDownload::MaxSegments * SegmentedDownload::MinSegmentSize
+    + SegmentedDownload::DiscoveryChunk;
 /// Below the threshold, and below the discovery chunk, so it arrives in a single request.
 constexpr qint64 TinySize = 64LL * 1024;
 /// Above the discovery chunk but below the threshold: fetched, but never split.
@@ -814,6 +819,200 @@ class SegmentedDownloadTest final : public QObject {
             QCOMPARE(requests.at(firstRequest + 1).status, 200);
             QVERIFY(requests.at(firstRequest + 1).range.isEmpty());
             QCOMPARE(harness.scheduler()->outstandingPermits(), 0);
+        }
+    }
+
+    /*! A ranged refusal at edge can split after the plain retry reveals a range-capable redirect. */
+    void redirectedRangeCapableTargetIsSplitAndValidated()
+    {
+        const QByteArray body = makeBody(EightSegmentSize, 0x45454545u);
+        RangeHttpServer server;
+        QVERIFY(server.start());
+
+        RangeHttpServer::Resource edgeResource;
+        QUrl resolvedUrl(QStringLiteral("http://mediafilez.forgecdn.net/files/resolved.zip"));
+        edgeResource.body = resolvedUrl.toEncoded();
+        edgeResource.rangeStatus = 404;
+        edgeResource.forcedStatus = 302;
+        server.serve("/files/edge.zip", edgeResource);
+        server.serve("/files/resolved.zip", simpleResource(body));
+
+        Harness harness;
+        QVERIFY(harness.valid());
+        const QUrl proxyUrl = server.url("/");
+        harness.network()->setProxy(
+            QNetworkProxy(QNetworkProxy::HttpProxy, proxyUrl.host(), static_cast<quint16>(proxyUrl.port())));
+        const QUrl edgeUrl(QStringLiteral("http://edge.forgecdn.net/files/edge.zip"));
+        auto task = harness.create(edgeUrl);
+        [[maybe_unused]] TaskSettler settleTask(harness, task);
+        task->addValidator(new Net::ChecksumValidator(QCryptographicHash::Sha1, sha1Of(body)));
+
+        QVERIFY2(harness.run(task, 120000), qPrintable(task->failReason()));
+        QVERIFY2(task->wasSuccessful(), qPrintable(task->failReason()));
+        QCOMPARE(task->segmentsUsed(), SegmentedDownload::MaxSegments);
+        QCOMPARE(readAll(harness.target()), body);
+        QVERIFY(!QFileInfo::exists(Net::PartFile::partPathFor(harness.target())));
+
+        const auto requests = server.requests();
+        QList<RangeHttpServer::RequestRecord> edgeRequests;
+        QList<RangeHttpServer::RequestRecord> targetRequests;
+        for (const auto& request : requests) {
+            if (request.host.compare("edge.forgecdn.net", Qt::CaseInsensitive) == 0)
+                edgeRequests.append(request);
+            else if (request.host.compare("mediafilez.forgecdn.net", Qt::CaseInsensitive) == 0)
+                targetRequests.append(request);
+        }
+        QCOMPARE(edgeRequests.size(), 2);
+        QCOMPARE(edgeRequests.at(0).status, 404);
+        QVERIFY(edgeRequests.at(0).range.startsWith("bytes="));
+        QCOMPARE(edgeRequests.at(1).status, 302);
+        QVERIFY(edgeRequests.at(1).range.isEmpty());
+
+        QCOMPARE(targetRequests.size(), task->segmentsUsed() + 2);
+        QCOMPARE(targetRequests.first().status, 200);
+        QVERIFY(targetRequests.first().range.isEmpty());
+        QVERIFY(targetRequests.at(1).range.startsWith("bytes="));
+        QVERIFY(targetRequests.at(1).ifRange.isEmpty());
+        QCOMPARE(std::count_if(targetRequests.cbegin(), targetRequests.cend(), [](const auto& request) {
+                     return !request.range.isEmpty();
+                 }),
+                 task->segmentsUsed() + 1);
+        for (int i = 1; i < targetRequests.size(); i++) {
+            QVERIFY(targetRequests.at(i).range.startsWith("bytes="));
+            QCOMPARE(targetRequests.at(i).status, 206);
+            if (i > 1)
+                QCOMPARE(targetRequests.at(i).ifRange, QByteArrayLiteral("\"v1\""));
+        }
+        QString why;
+        QVERIFY2(rangesTileExactly(server.servedRanges(), EightSegmentSize, &why), qPrintable(why));
+        QCOMPARE(harness.scheduler()->outstandingPermits(), 0);
+    }
+
+    /*! A redirected target without range support keeps the original single-stream fallback. */
+    void redirectedTargetWithoutRangesStaysSingleStream()
+    {
+        const QByteArray body = makeBody(LargeSize, 0x46464646u);
+        RangeHttpServer server;
+        QVERIFY(server.start());
+
+        RangeHttpServer::Resource edgeResource;
+        const QUrl resolvedUrl(QStringLiteral("http://mediafilez.forgecdn.net/files/ordinary.zip"));
+        edgeResource.body = resolvedUrl.toEncoded();
+        edgeResource.rangeStatus = 404;
+        edgeResource.forcedStatus = 302;
+        server.serve("/files/edge-ordinary.zip", edgeResource);
+        auto targetResource = simpleResource(body);
+        targetResource.acceptRanges = false;
+        server.serve("/files/ordinary.zip", targetResource);
+
+        Harness harness;
+        QVERIFY(harness.valid());
+        const QUrl proxyUrl = server.url("/");
+        harness.network()->setProxy(
+            QNetworkProxy(QNetworkProxy::HttpProxy, proxyUrl.host(), static_cast<quint16>(proxyUrl.port())));
+        auto task = harness.create(QUrl(QStringLiteral("http://edge.forgecdn.net/files/edge-ordinary.zip")));
+        [[maybe_unused]] TaskSettler settleTask(harness, task);
+        task->addValidator(new Net::ChecksumValidator(QCryptographicHash::Sha1, sha1Of(body)));
+
+        QVERIFY2(harness.run(task, 120000), qPrintable(task->failReason()));
+        QVERIFY2(task->wasSuccessful(), qPrintable(task->failReason()));
+        QCOMPARE(task->segmentsUsed(), 1);
+        QCOMPARE(readAll(harness.target()), body);
+        QVERIFY(!QFileInfo::exists(Net::PartFile::partPathFor(harness.target())));
+
+        const auto requests = server.requests();
+        QList<RangeHttpServer::RequestRecord> edgeRequests;
+        QList<RangeHttpServer::RequestRecord> targetRequests;
+        for (const auto& request : requests) {
+            if (request.host.compare("edge.forgecdn.net", Qt::CaseInsensitive) == 0)
+                edgeRequests.append(request);
+            else if (request.host.compare("mediafilez.forgecdn.net", Qt::CaseInsensitive) == 0)
+                targetRequests.append(request);
+        }
+        QCOMPARE(edgeRequests.size(), 2);
+        QCOMPARE(edgeRequests.first().status, 404);
+        QCOMPARE(edgeRequests.last().status, 302);
+        QCOMPARE(targetRequests.size(), 1);
+        QCOMPARE(targetRequests.first().status, 200);
+        QVERIFY(targetRequests.first().range.isEmpty());
+        QCOMPARE(harness.scheduler()->outstandingPermits(), 0);
+    }
+
+    /*! If the resolved target refuses its own ranged probe, retry it once as a single stream. */
+    void redirectedTargetRangeRefusalFallsBackToSingleStream()
+    {
+        const QByteArray body = makeBody(LargeSize, 0x47474747u);
+        RangeHttpServer server;
+        QVERIFY(server.start());
+
+        Harness harness;
+        QVERIFY(harness.valid());
+        const QUrl proxyUrl = server.url("/");
+        harness.network()->setProxy(
+            QNetworkProxy(QNetworkProxy::HttpProxy, proxyUrl.host(), static_cast<quint16>(proxyUrl.port())));
+
+        for (const int status : { 404, 416 }) {
+            const int firstRequest = server.requests().size();
+            const QString suffix = QString::number(status);
+            const QByteArray edgePath = QStringLiteral("/files/edge-refused-%1.zip").arg(suffix).toUtf8();
+            const QByteArray targetPath = QStringLiteral("/files/target-refused-%1.zip").arg(suffix).toUtf8();
+            const QString targetName = QStringLiteral("target-refused-%1.zip").arg(suffix);
+            const QUrl resolvedUrl(QStringLiteral("http://mediafilez.forgecdn.net%1").arg(QString::fromUtf8(targetPath)));
+            const QUrl edgeUrl(QStringLiteral("http://edge.forgecdn.net%1").arg(QString::fromUtf8(edgePath)));
+
+            RangeHttpServer::Resource edgeResource;
+            edgeResource.body = resolvedUrl.toEncoded();
+            edgeResource.rangeStatus = 404;
+            edgeResource.forcedStatus = 302;
+            server.serve(edgePath, edgeResource);
+
+            auto targetResource = simpleResource(body);
+            // The full response advertises byte ranges, but the target refuses the ranged probe.
+            targetResource.acceptRanges = true;
+            targetResource.rangeStatus = status;
+            server.serve(targetPath, targetResource);
+
+            auto task = harness.create(edgeUrl, 4, targetName);
+            [[maybe_unused]] TaskSettler settleTask(harness, task);
+            task->addValidator(new Net::ChecksumValidator(QCryptographicHash::Sha1, sha1Of(body)));
+
+            QVERIFY2(harness.run(task, 120000), qPrintable(task->failReason()));
+            QVERIFY2(task->wasSuccessful(), qPrintable(task->failReason()));
+            QCOMPARE(task->segmentsUsed(), 1);
+            QCOMPARE(readAll(harness.target(targetName)), body);
+            QVERIFY(!QFileInfo::exists(Net::PartFile::partPathFor(harness.target(targetName))));
+            QCOMPARE(harness.scheduler()->outstandingPermits(), 0);
+
+            // Five HTTP messages cover four logical requests: the unranged edge GET redirects to
+            // a target GET, followed by target Discovery and its single-stream retry.
+            const auto requests = server.requests();
+            QCOMPARE(requests.size() - firstRequest, 5);
+            const auto& edgeDiscovery = requests.at(firstRequest);
+            QCOMPARE(edgeDiscovery.host.toLower(), QByteArrayLiteral("edge.forgecdn.net"));
+            QCOMPARE(edgeDiscovery.target, edgePath);
+            QCOMPARE(edgeDiscovery.status, 404);
+            QVERIFY(edgeDiscovery.range.startsWith("bytes="));
+            const auto& edgeRetry = requests.at(firstRequest + 1);
+            QCOMPARE(edgeRetry.host.toLower(), QByteArrayLiteral("edge.forgecdn.net"));
+            QCOMPARE(edgeRetry.target, edgePath);
+            QCOMPARE(edgeRetry.status, 302);
+            QVERIFY(edgeRetry.range.isEmpty());
+
+            const auto& redirectedProbe = requests.at(firstRequest + 2);
+            QCOMPARE(redirectedProbe.host.toLower(), QByteArrayLiteral("mediafilez.forgecdn.net"));
+            QCOMPARE(redirectedProbe.target, targetPath);
+            QCOMPARE(redirectedProbe.status, 200);
+            QVERIFY(redirectedProbe.range.isEmpty());
+            const auto& targetDiscovery = requests.at(firstRequest + 3);
+            QCOMPARE(targetDiscovery.host.toLower(), QByteArrayLiteral("mediafilez.forgecdn.net"));
+            QCOMPARE(targetDiscovery.target, targetPath);
+            QCOMPARE(targetDiscovery.status, status);
+            QVERIFY(targetDiscovery.range.startsWith("bytes="));
+            const auto& targetRetry = requests.at(firstRequest + 4);
+            QCOMPARE(targetRetry.host.toLower(), QByteArrayLiteral("mediafilez.forgecdn.net"));
+            QCOMPARE(targetRetry.target, targetPath);
+            QCOMPARE(targetRetry.status, 200);
+            QVERIFY(targetRetry.range.isEmpty());
         }
     }
 

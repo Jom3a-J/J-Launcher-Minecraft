@@ -41,6 +41,7 @@
 
 #include <QElapsedTimer>
 #include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QUrl>
 #include <QTimer>
 #include <chrono>
@@ -54,6 +55,10 @@
 #include "tasks/Task.h"
 
 namespace Net {
+
+/*! Applies the opt-in HTTP/1 policy to the known CurseForge file CDN hosts. */
+bool applyCdnHttp1TransportPolicy(QNetworkRequest& request, bool enabled);
+
 class NetRequest : public Task {
     Q_OBJECT
    protected:
@@ -137,6 +142,8 @@ class NetRequest : public Task {
     qint64 m_last_progress_bytes;
 
     QNetworkAccessManager* m_network;
+    /// Whether the current reply should use the larger buffer for the opted-in Forge CDN policy.
+    bool m_cdnHttp1PolicyApplied = false;
 
     /// the network reply
     std::unique_ptr<QNetworkReply> m_reply;

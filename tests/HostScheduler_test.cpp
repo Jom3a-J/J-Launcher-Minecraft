@@ -43,6 +43,11 @@ QUrl flameCdnUrl()
     return QUrl(QStringLiteral("https://") + BuildConfig.FLAME_DOWNLOAD_HOST + QStringLiteral("/files/1/a.jar"));
 }
 
+QUrl mediafilezCdnUrl()
+{
+    return QUrl(QStringLiteral("https://mediafilez.forgecdn.net/files/1/a.jar"));
+}
+
 QUrl modrinthCdnUrl()
 {
     return QUrl(QStringLiteral("https://") + BuildConfig.MODRINTH_DOWNLOAD_HOST + QStringLiteral("/data/a.jar"));
@@ -156,6 +161,38 @@ class HostSchedulerTest : public QObject {
 
         completeCleanly(scheduler, url, HostScheduler::CleanCompletionsPerStep);
         QCOMPARE(scheduler.limitFor(url), HostScheduler::ColdStartLevel + 2);
+    }
+
+    void test_flameCdnHasHigherColdStartThanOtherHosts()
+    {
+        HostScheduler scheduler;
+        const auto flame = flameCdnUrl();
+        const auto unknown = unknownUrl();
+
+        QCOMPARE(scheduler.limitFor(flame), HostScheduler::FlameCdnColdStartLevel);
+        QCOMPARE(scheduler.limitFor(unknown), HostScheduler::ColdStartLevel);
+    }
+
+    void test_flameCdnColdStartIsClampedToScaledCeiling()
+    {
+        HostScheduler scheduler;
+        scheduler.setNormalPerHostLevel(2);
+        const auto url = flameCdnUrl();
+
+        // 16 * 2 / 6 rounds up to a ceiling of 6, below the Flame CDN cold start of 8.
+        QCOMPARE(scheduler.ceilingFor(url), 6);
+        QCOMPARE(scheduler.limitFor(url), 6);
+
+        QVector<HostScheduler::Permit> permits;
+        for (int i = 0; i < 6; i++) {
+            const auto permit = scheduler.tryAcquire(url);
+            QVERIFY(permit != HostScheduler::InvalidPermit);
+            permits.append(permit);
+        }
+        QCOMPARE(scheduler.tryAcquire(url), HostScheduler::InvalidPermit);
+        QCOMPARE(scheduler.inFlightFor(url), 6);
+        for (const auto permit : permits)
+            scheduler.release(permit, HostOutcome::Aborted);
     }
 
     void test_rampStopsAtTheCeiling()
@@ -412,14 +449,91 @@ class HostSchedulerTest : public QObject {
                 break;
             extra.append(next);
         }
-        QCOMPARE(scheduler.inFlightFor(to), HostScheduler::ColdStartLevel);
-        QCOMPARE(extra.size(), HostScheduler::ColdStartLevel - 1);
+        QCOMPARE(scheduler.inFlightFor(to), HostScheduler::FlameCdnColdStartLevel);
+        QCOMPARE(extra.size(), HostScheduler::FlameCdnColdStartLevel - 1);
 
         scheduler.release(permit, HostOutcome::Success);
         for (const auto next : extra)
             scheduler.release(next, HostOutcome::Success);
         QCOMPARE(scheduler.globalInFlight(), 0);
         QCOMPARE(scheduler.inFlightFor(to), 0);
+    }
+
+    /*! Flame CDN redirects keep their original charge so edge can ramp independently. */
+    void test_flameCdnRedirectKeepsPermitOnAdmittingHost()
+    {
+        HostScheduler scheduler;
+        const auto edge = flameCdnUrl();
+        const auto mediafilez = mediafilezCdnUrl();
+
+        QCOMPARE(scheduler.limitFor(edge), HostScheduler::FlameCdnColdStartLevel);
+        const auto redirected = scheduler.tryAcquire(edge);
+        QVERIFY(redirected != HostScheduler::InvalidPermit);
+        scheduler.migratePermit(redirected, mediafilez);
+
+        QCOMPARE(scheduler.inFlightFor(edge), 1);
+        QCOMPARE(scheduler.inFlightFor(mediafilez), 0);
+
+        // The redirected request's successful completion still ramps the host that admitted it.
+        scheduler.release(redirected, HostOutcome::Success);
+        completeCleanly(scheduler, edge, HostScheduler::CleanCompletionsPerStep - 1);
+        QCOMPARE(scheduler.limitFor(edge), HostScheduler::FlameCdnColdStartLevel + 1);
+        QCOMPARE(scheduler.inFlightFor(edge), 0);
+        QCOMPARE(scheduler.inFlightFor(mediafilez), 0);
+    }
+
+    /*! In-flight redirects cannot consume the independent direct mediafilez allowance. */
+    void test_flameCdnRedirectsLeaveDirectDestinationCapacityAvailable()
+    {
+        HostScheduler scheduler;
+        const auto edge = flameCdnUrl();
+        const auto mediafilez = mediafilezCdnUrl();
+        QVector<HostScheduler::Permit> redirected;
+
+        for (int i = 0; i < HostScheduler::FlameCdnColdStartLevel; i++) {
+            const auto permit = scheduler.tryAcquire(edge);
+            QVERIFY(permit != HostScheduler::InvalidPermit);
+            redirected.append(permit);
+            scheduler.migratePermit(permit, mediafilez);
+        }
+
+        QCOMPARE(scheduler.inFlightFor(edge), HostScheduler::FlameCdnColdStartLevel);
+        QCOMPARE(scheduler.inFlightFor(mediafilez), 0);
+
+        QVector<HostScheduler::Permit> direct;
+        for (int i = 0; i < HostScheduler::FlameCdnColdStartLevel; i++) {
+            const auto permit = scheduler.tryAcquire(mediafilez);
+            QVERIFY(permit != HostScheduler::InvalidPermit);
+            direct.append(permit);
+        }
+        QCOMPARE(scheduler.tryAcquire(mediafilez), HostScheduler::InvalidPermit);
+        QCOMPARE(scheduler.inFlightFor(mediafilez), HostScheduler::FlameCdnColdStartLevel);
+
+        for (const auto permit : redirected)
+            scheduler.release(permit, HostOutcome::Success);
+        for (const auto permit : direct)
+            scheduler.release(permit, HostOutcome::Success);
+        QCOMPARE(scheduler.globalInFlight(), 0);
+    }
+
+    /*! Redirects to a host outside the Flame CDN class still move their charge. */
+    void test_flameCdnPermitStillMovesToUnknownHost()
+    {
+        HostScheduler scheduler;
+        const auto from = flameCdnUrl();
+        const auto to = unknownUrl();
+
+        const auto permit = scheduler.tryAcquire(from);
+        QVERIFY(permit != HostScheduler::InvalidPermit);
+        scheduler.migratePermit(permit, to);
+
+        QCOMPARE(scheduler.inFlightFor(from), 0);
+        QCOMPARE(scheduler.inFlightFor(to), 1);
+        QCOMPARE(scheduler.globalInFlight(), 1);
+
+        scheduler.release(permit, HostOutcome::Success);
+        QCOMPARE(scheduler.inFlightFor(to), 0);
+        QCOMPARE(scheduler.globalInFlight(), 0);
     }
 
     /*! Migrating an unknown permit, or one that is not actually moving, changes nothing. */

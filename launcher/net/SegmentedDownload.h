@@ -50,8 +50,9 @@ struct ModrinthDownloadMeta;
  *
  *    1. Discovery - one GET with "Range: bytes=0-1048575" and "Accept-Encoding: identity".
  *       A 200 means the server ignored the range: that same reply keeps streaming the whole file
- *       into the part file and becomes the ordinary single stream download. No second request, no
- *       discarded bytes.
+ *       into the part file and becomes the ordinary single stream download. If the 403/404
+ *       fallback GET is redirected to a large range-capable CurseForge file host, that probe is
+ *       retired and one ranged Discovery is started against the resolved URL.
  *       A 206 with a concrete Content-Range tells us the total size and that ranges work.
  *    2. Fan out - the remainder is split into K segments, each an ordinary Net::Download in an
  *       inner NetJob. K is bounded by the caller's setting, by MaxSegments, by MinSegmentSize and
@@ -85,6 +86,8 @@ class SegmentedDownload : public Task {
     static constexpr qint64 DiscoveryChunk = 1LL * 1024 * 1024;
     /// Per reply read buffer, so N segments cannot queue an unbounded amount of memory.
     static constexpr qint64 ReadBufferBytes = 1LL * 1024 * 1024;
+    /// Larger buffer for opted-in HTTP/1 CDN replies, where a small buffer can stall the socket.
+    static constexpr qint64 CdnHttp1ReadBufferBytes = 4LL * 1024 * 1024;
     /// Chunk size of the final validator replay.
     static constexpr qint64 ValidationChunkBytes = 1LL * 1024 * 1024;
     /// The default of the "SegmentedDownloadSegments" setting.
@@ -137,7 +140,7 @@ class SegmentedDownload : public Task {
      */
     void setRequestDecorator(Decorator decorator) { m_decorate = std::move(decorator); }
 
-    QUrl url() const { return m_url; }
+    QUrl url() const { return m_originalUrl; }
     QString targetPath() const { return m_targetPath; }
 
     bool abort() override;
@@ -160,18 +163,21 @@ class SegmentedDownload : public Task {
         Discovery,  //!< bounded ranged GET that doubles as the no-range fallback
         Streaming,  //!< discovery answered 200 and is downloading the whole file
         Segments,   //!< fanned out over several ranged requests
-        Plain,      //!< restarted as a single unranged GET into the part file
+        Plain,      //!< restarted as a single unranged GET into the part file; may resolve a CDN
         Validating,
         Done,
     };
 
     int allowedSegments() const;
+    int allowedSegments(const QUrl& url) const;
     int segmentCountFor(qint64 total) const;
+    int segmentCountFor(qint64 total, const QUrl& url) const;
 
     void startLegacy();
     void startDiscovery();
     void startSegments(qint64 from);
     void restartUnranged(const QString& why);
+    void restartDiscoveryAtResolvedUrl(const QUrl& url);
     void assemble();
     void onValidationFinished();
     void promote();
@@ -203,7 +209,8 @@ class SegmentedDownload : public Task {
     void failWith(const QString& reason);
     void logOutcome(const char* result) const;
 
-    QUrl m_url;
+    QUrl m_url;          //!< Active URL, updated when a refused Forge edge redirects to its file host.
+    QUrl m_originalUrl;  //!< Caller-supplied URL restored if the task is started again.
     QString m_targetPath;
     QNetworkAccessManager* m_network = nullptr;
     QPointer<Net::HostScheduler> m_scheduler;
@@ -229,6 +236,8 @@ class SegmentedDownload : public Task {
     bool m_rangesUsable = false;
     bool m_restartPending = false;
     bool m_restarted = false;
+    bool m_discoveryRangeRefused = false;  //!< Discovery got a 403/404; only this case probes a redirected file host.
+    bool m_redirectRangeRetried = false;   //!< The resolved target gets at most one new ranged Discovery.
     bool m_aborting = false;
     int m_segmentsUsed = 0;
 

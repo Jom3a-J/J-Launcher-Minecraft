@@ -130,6 +130,9 @@ ecm_add_test(NetRequest_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MA
     TEST_NAME NetRequest)
 set_tests_properties(NetRequest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+ecm_add_test(CdnTransportPolicy_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME CdnTransportPolicy)
+
 ecm_add_test(Privacy_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME Privacy)
 

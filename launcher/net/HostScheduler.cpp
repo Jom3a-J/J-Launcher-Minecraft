@@ -49,7 +49,14 @@ const QHash<QString, HostClass>& exactHostTable()
 
         add(hostOf(BuildConfig.DEFAULT_RESOURCE_BASE), HostClass::MinecraftResources);
         add(hostOf(BuildConfig.LIBRARY_BASE), HostClass::MinecraftLibraries);
-        add(BuildConfig.FLAME_DOWNLOAD_HOST, HostClass::FlameCdn);
+        // The edge endpoint redirects file bytes to these CDN hosts; they share the same file policy.
+        const QStringList flameCdnHosts = {
+            BuildConfig.FLAME_DOWNLOAD_HOST,
+            QStringLiteral("mediafilez.forgecdn.net"),
+            QStringLiteral("media.forgecdn.net"),
+        };
+        for (const auto& host : flameCdnHosts)
+            add(host, HostClass::FlameCdn);
         add(BuildConfig.MODRINTH_DOWNLOAD_HOST, HostClass::ModrinthCdn);
         add(hostOf(BuildConfig.FLAME_BASE_URL), HostClass::FlameApi);
         add(hostOf(BuildConfig.MODRINTH_PROD_URL), HostClass::ModrinthApi);
@@ -243,8 +250,13 @@ HostScheduler::HostState& HostScheduler::stateFor(const QString& key, HostClass 
 
     HostState fresh;
     fresh.hostClass = hostClass;
-    fresh.limit = isPinned(hostClass) ? 1 : qMin(ColdStartLevel, scaledCeiling(hostClass));
+    fresh.limit = isPinned(hostClass) ? 1 : qMin(coldStartLevelFor(hostClass), scaledCeiling(hostClass));
     return *m_hosts.insert(key, fresh);
+}
+
+int HostScheduler::coldStartLevelFor(HostClass hostClass)
+{
+    return hostClass == HostClass::FlameCdn ? FlameCdnColdStartLevel : ColdStartLevel;
 }
 
 int HostScheduler::ceilingFor(const QUrl& url) const
@@ -257,7 +269,7 @@ int HostScheduler::limitFor(const QUrl& url) const
     const auto it = m_hosts.constFind(hostKey(url));
     if (it == m_hosts.constEnd()) {
         const HostClass hostClass = classify(url);
-        return isPinned(hostClass) ? 1 : qMin(ColdStartLevel, scaledCeiling(hostClass));
+        return isPinned(hostClass) ? 1 : qMin(coldStartLevelFor(hostClass), scaledCeiling(hostClass));
     }
     return effectiveLimit(*it);
 }
@@ -424,14 +436,21 @@ void HostScheduler::migratePermit(Permit permit, const QUrl& url)
         return;
 
     const QString newKey = hostKey(url);
-    if (permitIt->host == newKey)
-        return;
-
+    const HostClass destinationClass = classify(url);
     auto previousIt = m_hosts.find(permitIt->host);
+    const bool sameFlameCdnClass =
+        previousIt != m_hosts.end() && previousIt->hostClass == HostClass::FlameCdn
+        && destinationClass == HostClass::FlameCdn;
+    if (permitIt->host == newKey || sameFlameCdnClass) {
+        // Keep CurseForge file CDN redirects charged to the admitting host so edge can ramp from
+        // its completions while direct segment requests to mediafilez retain their own capacity.
+        return;
+    }
+
     if (previousIt != m_hosts.end() && previousIt->inFlight > 0)
         previousIt->inFlight--;
 
-    HostState& destination = stateFor(newKey, classify(url));
+    HostState& destination = stateFor(newKey, destinationClass);
     destination.inFlight++;
     permitIt->host = newKey;
 
