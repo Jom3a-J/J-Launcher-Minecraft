@@ -58,6 +58,8 @@ namespace Net {
 
 /*! Applies the opt-in HTTP/1 policy to the known CurseForge file CDN hosts. */
 bool applyCdnHttp1TransportPolicy(QNetworkRequest& request, bool enabled);
+/*! Applies the opt-in HTTP/1 policy to the exact Mojang file hosts. */
+bool applyMojangHttp1TransportPolicy(QNetworkRequest& request, bool enabled);
 
 class NetRequest : public Task {
     Q_OBJECT
