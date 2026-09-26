@@ -37,6 +37,7 @@ class ListModel : public QAbstractListModel {
     void fetchMore(const QModelIndex& parent) override;
 
     void getLogo(const QString& logo, const QString& logoUrl, LogoCallback callback);
+    void setShowServerBadges(bool show);
     void searchWithTerm(const QString& term, int sort, std::shared_ptr<ModFilterWidget::Filter> filter, bool filterChanged);
 
     bool hasActiveSearchJob() const { return m_jobPtr && m_jobPtr->isRunning(); }
@@ -68,6 +69,7 @@ class ListModel : public QAbstractListModel {
     int m_nextSearchOffset = 0;
     enum SearchState { None, CanPossiblyFetchMore, ResetRequested, Finished } m_searchState = None;
     Task::Ptr m_jobPtr;
+    bool m_showServerBadges = false;
 };
 
 }  // namespace Flame

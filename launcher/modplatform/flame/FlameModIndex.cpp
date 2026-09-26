@@ -6,6 +6,7 @@
 #include "Json.h"
 #include "modplatform/ModIndex.h"
 #include "modplatform/flame/FlameAPI.h"
+#include "modplatform/ServerSupport.h"
 
 void FlameMod::loadIndexedPack(ModPlatform::IndexedPack& pack, QJsonObject& obj)
 {
@@ -15,6 +16,7 @@ void FlameMod::loadIndexedPack(ModPlatform::IndexedPack& pack, QJsonObject& obj)
     pack.slug = Json::requireString(obj, "slug");
     pack.websiteUrl = obj["links"].toObject()["websiteUrl"].toString("");
     pack.description = obj["summary"].toString("");
+    pack.hasLatestServerPack = ModPlatform::curseForgeServerSupport(obj) == ModPlatform::ServerSupport::Official;
 
     QJsonObject logo = obj["logo"].toObject();
     pack.logoName = logo["title"].toString();
@@ -137,6 +139,7 @@ auto FlameMod::loadIndexedPackVersion(QJsonObject& obj, bool load_changelog) -> 
     if (serverPackFileId.isDouble() && serverPackFileId.toInteger() > 0) {
         file.serverPackFileId = serverPackFileId.toInteger();
     }
+    file.isServerPack = obj.value("isServerPack").toBool();
     file.date = Json::requireString(obj, "fileDate");
     file.version = Json::requireString(obj, "displayName");
     file.downloadUrl = obj["downloadUrl"].toString();

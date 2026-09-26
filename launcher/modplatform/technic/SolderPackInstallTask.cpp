@@ -42,6 +42,7 @@
 #include <QtConcurrentRun>
 
 #include "SolderPackManifest.h"
+#include "modplatform/ServerSupport.h"
 #include "TechnicPackProcessor.h"
 #include "logs/Privacy.h"
 #include "net/ApiDownload.h"
@@ -81,8 +82,12 @@ void Technic::SolderPackInstallTask::executeTask()
             return;
         }
     }
-    if (shouldCreateServerPair() && (m_serverPackUrl.isEmpty() || !m_serverPackUrl.isValid())) {
+    const auto serverSupport = ModPlatform::technicServerSupport(m_serverPackUrl);
+    if (shouldCreateServerPair() && serverSupport == ModPlatform::ServerSupport::ClientDerived) {
         logWarning(tr("Technic does not publish a version-compatible server pack for this modpack. The launcher will derive server content from the client pack."));
+    } else if (shouldCreateServerPair() && serverSupport == ModPlatform::ServerSupport::Website) {
+        logWarning(tr("Technic lists server files on its website (%1). The launcher is building server content from the client pack instead.")
+                       .arg(Privacy::sanitizeUrl(m_serverPackUrl)));
     }
     setStatus(tr("Resolving modpack files"));
 
@@ -140,7 +145,8 @@ void Technic::SolderPackInstallTask::fileListSucceeded(QByteArray* response)
     }
 
     m_modCount = build.mods.size();
-    if (shouldCreateServerPair() && m_serverPackUrl.isValid() && !m_serverPackUrl.isEmpty()) {
+    const auto serverSupport = ModPlatform::technicServerSupport(m_serverPackUrl);
+    if (shouldCreateServerPair() && serverSupport == ModPlatform::ServerSupport::Official) {
         m_serverArchivePath = FS::PathCombine(m_outputDir.path(), "published-server-pack.zip");
         m_filesNetJob->addNetAction(Net::ApiDownload::makeFile(m_serverPackUrl, m_serverArchivePath));
     }

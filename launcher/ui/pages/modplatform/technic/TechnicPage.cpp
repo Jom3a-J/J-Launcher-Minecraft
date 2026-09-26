@@ -48,6 +48,7 @@
 #include "TechnicModel.h"
 #include "modplatform/technic/SingleZipPackInstallTask.h"
 #include "modplatform/technic/SolderPackInstallTask.h"
+#include "modplatform/ServerSupport.h"
 
 #include "Application.h"
 #include "modplatform/technic/SolderPackManifest.h"
@@ -59,6 +60,8 @@ TechnicPage::TechnicPage(NewInstanceDialog* dialog, QWidget* parent)
     : QWidget(parent), ui(new Ui::TechnicPage), dialog(dialog), m_fetch_progress(this, false)
 {
     ui->setupUi(this);
+    ui->serverCompatibilityLabel->setOpenExternalLinks(true);
+    ui->serverCompatibilityLabel->setWordWrap(true);
     ui->serverCompatibilityLabel->setVisible(
         dialog->isServerModpackMode());
     ui->searchEdit->installEventFilter(this);
@@ -144,6 +147,7 @@ void TechnicPage::onSelectionChanged(QModelIndex first, [[maybe_unused]] QModelI
     QVariant raw = model->data(first, Qt::UserRole);
     Q_ASSERT(raw.canConvert<Technic::Modpack>());
     current = raw.value<Technic::Modpack>();
+    dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "technic");
     suggestCurrent();
 }
 
@@ -292,22 +296,23 @@ void TechnicPage::selectVersion()
     }
     if (current.broken) {
         ui->serverCompatibilityLabel->clear();
+        dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "technic");
         dialog->setSuggestedPack();
         return;
     }
 
     if (dialog->isServerModpackMode()) {
-        const bool hasOfficialServerPack =
-            selectedVersion == current.currentVersion
-            && QUrl(current.serverPackUrl).isValid()
-            && !current.serverPackUrl.isEmpty();
-        ui->serverCompatibilityLabel->setText(
-            hasOfficialServerPack ? tr("Official server pack")
-                                  : tr("Derived server"));
-        ui->serverCompatibilityLabel->setToolTip(
-            hasOfficialServerPack
-                ? tr("Technic publishes a dedicated server package for this version.")
-                : tr("No dedicated server package is published for this selection; J Launcher will attempt a derived server."));
+        const QUrl serverUrl = selectedVersion == current.currentVersion ? QUrl(current.serverPackUrl) : QUrl();
+        const auto support = ModPlatform::technicServerSupport(serverUrl);
+        dialog->setServerSupport(support, serverUrl.toString(), "technic");
+        if (support == ModPlatform::ServerSupport::Official) {
+            ui->serverCompatibilityLabel->setText(tr("Official server pack"));
+        } else if (support == ModPlatform::ServerSupport::Website) {
+            ui->serverCompatibilityLabel->setText(tr("<a href=\"%1\">%2</a>")
+                .arg(serverUrl.toString().toHtmlEscaped(), tr("Server files on the pack's website")));
+        } else {
+            ui->serverCompatibilityLabel->setText(tr("No official server pack — built from client files, may not work"));
+        }
     }
 
     if (!current.isSolder) {
@@ -371,6 +376,7 @@ void TechnicPage::onVersionSelectionChanged(QString version)
     if (version.isNull() || version.isEmpty()) {
         selectedVersion = "";
         ui->serverCompatibilityLabel->clear();
+        dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "technic");
         return;
     }
 

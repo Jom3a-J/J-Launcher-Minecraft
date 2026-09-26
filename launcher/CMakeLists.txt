@@ -505,6 +505,7 @@ set(META_SOURCES
 
 set(API_SOURCES
     modplatform/ModIndex.h
+    modplatform/ServerSupport.h
     modplatform/ModIndex.cpp
     modplatform/ResourceType.h
     modplatform/ResourceType.cpp

@@ -36,6 +36,7 @@
 #include "FlamePage.h"
 #include "Version.h"
 #include "modplatform/ModIndex.h"
+#include "modplatform/ServerSupport.h"
 #include "modplatform/ResourceAPI.h"
 #include "ui/dialogs/CustomMessageBox.h"
 #include "ui/widgets/ModFilterWidget.h"
@@ -55,11 +56,13 @@ FlamePage::FlamePage(NewInstanceDialog* dialog, QWidget* parent)
     : QWidget(parent), m_ui(new Ui::FlamePage), m_dialog(dialog), m_listModel(new Flame::ListModel(this)), m_fetch_progress(this, false)
 {
     m_ui->setupUi(this);
+    m_ui->serverCompatibilityLabel->setWordWrap(true);
     m_ui->searchEdit->installEventFilter(this);
     m_ui->serverCompatibilityLabel->setVisible(
         m_dialog->isServerModpackMode());
 
     m_ui->packView->setModel(m_listModel);
+    m_listModel->setShowServerBadges(m_dialog->isServerModpackMode());
 
     m_ui->versionSelectionBox->view()->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     m_ui->versionSelectionBox->view()->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
@@ -148,6 +151,7 @@ void FlamePage::onSelectionChanged(QModelIndex curr, [[maybe_unused]] QModelInde
     m_ui->versionSelectionBox->clear();
 
     if (!curr.isValid()) {
+        m_dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "flame");
         if (isOpened) {
             m_dialog->setSuggestedPack();
         }
@@ -155,6 +159,7 @@ void FlamePage::onSelectionChanged(QModelIndex curr, [[maybe_unused]] QModelInde
     }
 
     m_current = m_listModel->data(curr, Qt::UserRole).value<ModPlatform::IndexedPack::Ptr>();
+    m_dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "flame");
 
     if (!m_current->versionsLoaded || m_filterWidget->changed()) {
         qDebug() << "Loading flame modpack versions";
@@ -234,6 +239,7 @@ void FlamePage::suggestCurrent()
 
     if (m_selected_version_index == -1) {
         m_ui->serverCompatibilityLabel->clear();
+        m_dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "flame");
         m_dialog->setSuggestedPack();
         return;
     }
@@ -241,21 +247,27 @@ void FlamePage::suggestCurrent()
     auto version = m_current->versions.at(m_selected_version_index);
 
     if (m_dialog->isServerModpackMode()) {
-        const bool hasOfficialServerPack = version.serverPackFileId.isValid();
+        const bool hasOfficialServerPack = version.serverPackFileId.isValid() || version.isServerPack;
         m_ui->serverCompatibilityLabel->setText(
             hasOfficialServerPack ? tr("Official server pack")
-                                  : tr("Derived server"));
+                                  : tr("No official server pack — built from client files, may not work"));
+        m_dialog->setServerSupport(hasOfficialServerPack ? ModPlatform::ServerSupport::Official
+                                                         : ModPlatform::ServerSupport::ClientDerived,
+                                   {}, "flame");
         m_ui->serverCompatibilityLabel->setToolTip(
             hasOfficialServerPack
                 ? tr("CurseForge publishes a dedicated server package for this version.")
-                : tr("No dedicated server package is published for this version; J Launcher will derive one from provider metadata."));
+                : tr("J Launcher will build a server from the client files; it may not work."));
     }
 
     QMap<QString, QString> extra_info;
     extra_info.insert("pack_id", m_current->addonId.toString());
     extra_info.insert("pack_version_id", version.fileId.toString());
-    if (version.serverPackFileId.isValid()) {
-        extra_info.insert("server_pack_file_id", version.serverPackFileId.toString());
+    const QVariant serverPackFileId = version.serverPackFileId.isValid()
+        ? version.serverPackFileId
+        : (version.isServerPack ? version.fileId : QVariant());
+    if (serverPackFileId.isValid()) {
+        extra_info.insert("server_pack_file_id", serverPackFileId.toString());
     }
 
     m_dialog->setSuggestedPack(m_current->name, new InstanceImportTask(version.downloadUrl, true, this, std::move(extra_info)));
@@ -272,6 +284,7 @@ void FlamePage::onVersionSelectionChanged(int index)
     if (index == -1 || is_blocked) {
         m_selected_version_index = -1;
         m_ui->serverCompatibilityLabel->clear();
+        m_dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "flame");
         return;
     }
 

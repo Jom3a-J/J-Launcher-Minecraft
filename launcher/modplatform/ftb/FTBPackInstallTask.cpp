@@ -58,6 +58,7 @@
 #include <QDirIterator>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QTimer>
 #include <QProcess>
 
 #ifdef Q_OS_WIN
@@ -69,6 +70,12 @@
 namespace FTB {
 
 namespace {
+QMap<QPair<int, int>, ModPlatform::ServerSupport>& serverPackProbeCache()
+{
+    static QMap<QPair<int, int>, ModPlatform::ServerSupport> cache;
+    return cache;
+}
+
 QString dedicatedServerInstallerUrl(int packId, int versionId)
 {
     return QString(BuildConfig.FTB_API_BASE_URL
@@ -121,6 +128,49 @@ bool verifyTrustedWindowsExecutable(const QString& path, QString* error)
 #endif
 }
 }
+
+ModPlatform::ServerSupport serverPackSupportFromHttpStatus(int status, bool networkError)
+{
+    if (status == 200) return ModPlatform::ServerSupport::Official;
+    if (status == 404) return ModPlatform::ServerSupport::ClientDerived;
+    Q_UNUSED(networkError)
+    return ModPlatform::ServerSupport::Unknown;
+}
+
+QPointer<QNetworkReply> probeDedicatedServerPack(QNetworkAccessManager* network, int packId, int versionId,
+                                                  QObject* context,
+                                                  std::function<void(ModPlatform::ServerSupport)> callback)
+{
+#ifdef Q_OS_WIN
+    const auto key = qMakePair(packId, versionId);
+    auto& cache = serverPackProbeCache();
+    if (cache.contains(key)) {
+        const auto result = cache.value(key);
+        QTimer::singleShot(0, context, [callback = std::move(callback), result] { callback(result); });
+        return {};
+    }
+    QNetworkRequest request(QUrl(dedicatedServerInstallerUrl(packId, versionId)));
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    auto* reply = network->head(request);
+    QObject::connect(reply, &QNetworkReply::finished, context, [reply, key, callback = std::move(callback)]() mutable {
+        const auto status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const auto result = serverPackSupportFromHttpStatus(status, reply->error() != QNetworkReply::NoError);
+        if (result != ModPlatform::ServerSupport::Unknown) {
+            serverPackProbeCache().insert(key, result);
+        }
+        callback(result);
+        reply->deleteLater();
+    });
+    return reply;
+#else
+    Q_UNUSED(network)
+    Q_UNUSED(packId)
+    Q_UNUSED(versionId)
+    QTimer::singleShot(0, context, [callback = std::move(callback)] { callback(ModPlatform::ServerSupport::ClientDerived); });
+    return {};
+#endif
+}
+
 PackInstallTask::PackInstallTask(Modpack pack, QString version, QWidget* parent)
     : m_pack(std::move(pack)), m_versionName(std::move(version)), m_parent(parent)
 {}
@@ -225,46 +275,19 @@ void PackInstallTask::onManifestDownloadSucceeded(QByteArray* responsePtr)
 
 void PackInstallTask::probeDedicatedServerPack()
 {
-#ifdef Q_OS_WIN
     setStatus(tr("Checking for the official FTB server installer..."));
     setAbortable(true);
-    QNetworkRequest request(
-        QUrl(dedicatedServerInstallerUrl(m_pack.id, m_version.id)));
-    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
-                         QNetworkRequest::NoLessSafeRedirectPolicy);
-    m_serverPackProbe = APPLICATION->network()->head(request);
-    connect(m_serverPackProbe, &QNetworkReply::finished, this, [this]() {
-        if (!m_serverPackProbe) {
-            return;
-        }
-        const int status = m_serverPackProbe
-                               ->attribute(QNetworkRequest::HttpStatusCodeAttribute)
-                               .toInt();
-        const auto networkError = m_serverPackProbe->error();
-        m_serverPackProbe->deleteLater();
+    m_serverPackProbe = FTB::probeDedicatedServerPack(
+        APPLICATION->network(), m_pack.id, m_version.id, this,
+        [this](ModPlatform::ServerSupport support) {
         m_serverPackProbe = nullptr;
-        if (status == 200) {
-            m_hasDedicatedServerPack = true;
-        } else if (status == 404) {
-            m_hasDedicatedServerPack = false;
-        } else if (networkError != QNetworkReply::NoError) {
-            emitFailed(tr(
-                "J Launcher could not determine whether this FTB pack has an official "
-                "server version. Check the connection and try again."));
-            return;
-        } else {
-            emitFailed(tr(
-                "The FTB service returned an unexpected response (%1) while checking "
-                "for a server version.")
-                           .arg(status));
+        if (support == ModPlatform::ServerSupport::Unknown) {
+            emitFailed(tr("J Launcher could not determine whether this FTB pack has an official server version. Check the connection and try again."));
             return;
         }
+        m_hasDedicatedServerPack = support == ModPlatform::ServerSupport::Official;
         resolveMods();
     });
-#else
-    m_hasDedicatedServerPack = false;
-    resolveMods();
-#endif
 }
 
 void PackInstallTask::resolveMods()

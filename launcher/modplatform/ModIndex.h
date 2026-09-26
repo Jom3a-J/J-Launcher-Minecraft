@@ -144,6 +144,7 @@ struct IndexedVersion {
     QVariant addonId;
     QVariant fileId;
     QVariant serverPackFileId;
+    bool isServerPack = false;
     QString version;
     QString version_number;
     IndexedVersionType version_type;
@@ -206,6 +207,7 @@ struct IndexedPack {
     QString logoUrl;
     QString websiteUrl;
     SideType side = SideType::NoSide;
+    bool hasLatestServerPack = false;
 
     bool versionsLoaded = false;
     QList<IndexedVersion> versions;

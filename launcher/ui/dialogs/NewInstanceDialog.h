@@ -38,6 +38,7 @@
 #include <QDialog>
 
 #include "InstanceTask.h"
+#include "modplatform/ServerSupport.h"
 #include "ui/pages/BasePageProvider.h"
 
 namespace Ui {
@@ -66,6 +67,8 @@ class NewInstanceDialog : public QDialog, public BasePageProvider {
     ~NewInstanceDialog() override;
 
     bool isServerModpackMode() const { return m_mode == Mode::ServerModpack; }
+    void setServerSupport(ModPlatform::ServerSupport support, QString websiteUrl = {}, QString providerId = {});
+    void setServerSupportChecking(bool checking);
     void updateDialogState();
 
     void setSuggestedPack(const QString& name = QString(), InstanceTask* task = nullptr);
@@ -119,4 +122,9 @@ class NewInstanceDialog : public QDialog, public BasePageProvider {
     QString m_searchTerm;
 
     Mode m_mode = Mode::NewInstance;
+    ModPlatform::ServerSupport m_serverSupport = ModPlatform::ServerSupport::Unknown;
+    bool m_serverSupportChecking = false;
+    QString m_serverSupportWebsiteUrl;
+    QString m_serverSupportProviderId;
+    QString m_activeProviderId;
 };
