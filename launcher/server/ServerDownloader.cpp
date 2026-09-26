@@ -103,6 +103,12 @@ ServerProviderEndpoints ServerProviderEndpoints::production()
     };
 }
 
+QString serverLoaderInstallIncompleteMarkerPath(const QString &serverDirectory)
+{
+    return QDir(serverDirectory).filePath(
+        QStringLiteral(".jlauncher-loader-install-incomplete"));
+}
+
 ServerDownloader::ServerDownloader(QObject *parent)
     : ServerDownloader(ServerProviderEndpoints::production(), parent)
 {
@@ -335,6 +341,7 @@ void ServerDownloader::cancel()
 
 void ServerDownloader::cleanUp()
 {
+    stopInstallerProcess();
     if (m_currentReply) {
         m_currentReply->disconnect(this);
         m_currentReply->abort();
@@ -342,6 +349,44 @@ void ServerDownloader::cleanUp()
         m_currentReply = nullptr;
     }
     retireFileDownloadJob(true);
+}
+
+void ServerDownloader::stopInstallerProcess()
+{
+    if (!m_installerProcess)
+        return;
+
+    QProcess *installer = m_installerProcess;
+    m_installerProcess = nullptr;
+    disconnect(installer, nullptr, this, nullptr);
+    if (installer->state() != QProcess::NotRunning) {
+        installer->kill();
+        installer->waitForFinished(-1);
+    }
+    installer->deleteLater();
+
+    if (!m_activeInstallerPath.isEmpty()) {
+        QFile::remove(m_activeInstallerPath);
+        QFile::remove(m_activeInstallerPath + QStringLiteral(".log"));
+        m_activeInstallerPath.clear();
+    }
+}
+
+bool ServerDownloader::writeLoaderInstallIncompleteMarker(QString *errorMessage) const
+{
+    QFile marker(serverLoaderInstallIncompleteMarkerPath(m_destinationDir));
+    if (!marker.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        *errorMessage = tr("Could not mark the loader installation as incomplete: %1")
+                            .arg(marker.errorString());
+        return false;
+    }
+    if (marker.write(QByteArrayLiteral("J Launcher loader installation in progress\n")) < 0
+        || !marker.flush()) {
+        *errorMessage = tr("Could not write the incomplete loader installation marker: %1")
+                            .arg(marker.errorString());
+        return false;
+    }
+    return true;
 }
 
 void ServerDownloader::retireFileDownloadJob(bool abort)
@@ -1375,6 +1420,8 @@ void ServerDownloader::onForgeInstallerDownloaded()
 
     // Run the installer in --installServer mode
     QProcess *installer = new QProcess(this);
+    m_installerProcess = installer;
+    m_activeInstallerPath = installerPath;
     installer->setWorkingDirectory(m_destinationDir);
 
     auto completed = std::make_shared<bool>(false);
@@ -1384,6 +1431,9 @@ void ServerDownloader::onForgeInstallerDownloaded()
             return;
         }
         *completed = true;
+        if (m_installerProcess == installer)
+            m_installerProcess = nullptr;
+        m_activeInstallerPath.clear();
         const QString processError = installer->errorString();
         QFile::remove(installerPath);
         installer->deleteLater();
@@ -1396,6 +1446,9 @@ void ServerDownloader::onForgeInstallerDownloaded()
             return;
         }
         *completed = true;
+        if (m_installerProcess == installer)
+            m_installerProcess = nullptr;
+        m_activeInstallerPath.clear();
         installer->deleteLater();
 
         // Clean up installer
@@ -1409,11 +1462,15 @@ void ServerDownloader::onForgeInstallerDownloaded()
 
         QString validationError;
         if (!validateLoaderInstallation(QStringLiteral("Forge"), &validationError)) {
-            if (!m_loaderScriptExistedBeforeInstall) {
-                QFile::remove(QDir(m_destinationDir).filePath(platformLoaderScriptName()));
-            }
             m_step = Step::Idle;
             finishDownload(false, validationError);
+            return;
+        }
+
+        const QString markerPath = serverLoaderInstallIncompleteMarkerPath(m_destinationDir);
+        if (!QFile::remove(markerPath) && QFileInfo::exists(markerPath)) {
+            m_step = Step::Idle;
+            finishDownload(false, tr("Could not clear the incomplete loader installation marker."));
             return;
         }
 
@@ -1423,6 +1480,15 @@ void ServerDownloader::onForgeInstallerDownloaded()
     });
 
     // Find Java
+    QString markerError;
+    if (!writeLoaderInstallIncompleteMarker(&markerError)) {
+        m_installerProcess = nullptr;
+        m_activeInstallerPath.clear();
+        installer->deleteLater();
+        m_step = Step::Idle;
+        finishDownload(false, markerError);
+        return;
+    }
     installer->start(m_javaPath.isEmpty() ? "java" : m_javaPath,
                      QStringList() << "-jar" << installerPath << "--installServer");
 }
@@ -1514,6 +1580,8 @@ void ServerDownloader::onNeoForgeInstallerDownloaded()
     emit progress(55);
 
     QProcess *installer = new QProcess(this);
+    m_installerProcess = installer;
+    m_activeInstallerPath = installerPath;
     installer->setWorkingDirectory(m_destinationDir);
 
     auto completed = std::make_shared<bool>(false);
@@ -1523,6 +1591,9 @@ void ServerDownloader::onNeoForgeInstallerDownloaded()
             return;
         }
         *completed = true;
+        if (m_installerProcess == installer)
+            m_installerProcess = nullptr;
+        m_activeInstallerPath.clear();
         const QString processError = installer->errorString();
         QFile::remove(installerPath);
         installer->deleteLater();
@@ -1535,6 +1606,9 @@ void ServerDownloader::onNeoForgeInstallerDownloaded()
             return;
         }
         *completed = true;
+        if (m_installerProcess == installer)
+            m_installerProcess = nullptr;
+        m_activeInstallerPath.clear();
         installer->deleteLater();
         QFile::remove(installerPath);
 
@@ -1546,11 +1620,15 @@ void ServerDownloader::onNeoForgeInstallerDownloaded()
 
         QString validationError;
         if (!validateLoaderInstallation(QStringLiteral("NeoForge"), &validationError)) {
-            if (!m_loaderScriptExistedBeforeInstall) {
-                QFile::remove(QDir(m_destinationDir).filePath(platformLoaderScriptName()));
-            }
             m_step = Step::Idle;
             finishDownload(false, validationError);
+            return;
+        }
+
+        const QString markerPath = serverLoaderInstallIncompleteMarkerPath(m_destinationDir);
+        if (!QFile::remove(markerPath) && QFileInfo::exists(markerPath)) {
+            m_step = Step::Idle;
+            finishDownload(false, tr("Could not clear the incomplete loader installation marker."));
             return;
         }
 
@@ -1559,6 +1637,15 @@ void ServerDownloader::onNeoForgeInstallerDownloaded()
         finishDownload(true);
     });
 
+    QString markerError;
+    if (!writeLoaderInstallIncompleteMarker(&markerError)) {
+        m_installerProcess = nullptr;
+        m_activeInstallerPath.clear();
+        installer->deleteLater();
+        m_step = Step::Idle;
+        finishDownload(false, markerError);
+        return;
+    }
     installer->start(m_javaPath.isEmpty() ? "java" : m_javaPath,
                      QStringList() << "-jar" << installerPath << "--installServer");
 }

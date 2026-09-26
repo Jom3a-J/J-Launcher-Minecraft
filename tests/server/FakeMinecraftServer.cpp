@@ -5,6 +5,9 @@
 #include <filesystem>
 #include <cstdlib>
 #include <string>
+#include <algorithm>
+#include <thread>
+#include <chrono>
 
 int main(int argc, char **argv)
 {
@@ -35,6 +38,55 @@ int main(int argc, char **argv)
         return 0;
     }
     if (installServer) {
+        if (const char* countPath = std::getenv("JLAUNCHER_TEST_INSTALLER_COUNT_FILE")) {
+            int count = 0;
+            std::ifstream existingCount(countPath);
+            existingCount >> count;
+            std::ofstream updatedCount(countPath, std::ios::trunc);
+            updatedCount << count + 1;
+        }
+
+        if (const char* loaderJarPath = std::getenv("JLAUNCHER_TEST_INSTALLER_LOADER_JAR")) {
+            std::ofstream loaderJar(loaderJarPath, std::ios::binary);
+            loaderJar << "synthetic Forge loader jar";
+        }
+
+        if (const char* installerLog = std::getenv("JLAUNCHER_TEST_INSTALLER_CREATE_LOG")) {
+            if (installerLog[0] != '\0' && installerLog[0] != '0') {
+                for (int index = 1; index + 1 < argc; ++index) {
+                    if (std::string(argv[index]) == "-jar") {
+                        std::ofstream log(std::string(argv[index + 1]) + ".log");
+                        log << "synthetic installer log";
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (const char* readyPath = std::getenv("JLAUNCHER_TEST_INSTALLER_READY_FILE")) {
+            std::ofstream ready(readyPath);
+            ready << "running";
+        }
+        int delayMs = 0;
+        if (const char* delay = std::getenv("JLAUNCHER_TEST_INSTALLER_DELAY_MS")) {
+            delayMs = std::max(0, std::atoi(delay));
+        }
+        if (delayMs > 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
+            if (const char* completedPath = std::getenv("JLAUNCHER_TEST_INSTALLER_COMPLETED_FILE")) {
+                std::ofstream completed(completedPath);
+                completed << "completed";
+            }
+        }
+
+        int installerExitCode = 0;
+        if (const char* exitCode = std::getenv("JLAUNCHER_TEST_INSTALLER_EXIT_CODE")) {
+            installerExitCode = std::atoi(exitCode);
+        }
+        if (installerExitCode != 0) {
+            return installerExitCode;
+        }
+
         std::filesystem::create_directories("libraries/synthetic");
 #ifdef _WIN32
         std::ofstream runScript("run.bat", std::ios::binary);

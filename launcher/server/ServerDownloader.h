@@ -25,6 +25,8 @@
 
 #include "net/NetJob.h"
 
+class QProcess;
+
 struct ServerProviderEndpoints
 {
     QUrl vanillaManifest;
@@ -38,6 +40,8 @@ struct ServerProviderEndpoints
 
     static ServerProviderEndpoints production();
 };
+
+QString serverLoaderInstallIncompleteMarkerPath(const QString &serverDirectory);
 
 class ServerDownloader : public QObject
 {
@@ -98,6 +102,8 @@ private:
     void onFileDownloadFailed(const QString &reason);
     void finishDownload(bool success, const QString &errorMessage = QString());
     void retireFileDownloadJob(bool abort);
+    bool writeLoaderInstallIncompleteMarker(QString *errorMessage) const;
+    void stopInstallerProcess();
     bool validateLoaderInstallation(const QString &loaderName,
                                     QString *errorMessage) const;
     void cleanUp();
@@ -197,6 +203,8 @@ private:
     QNetworkAccessManager *m_network = nullptr; //!< Private manager retained for metadata requests.
     QNetworkAccessManager *m_downloadNetwork = nullptr; //!< Shared app manager, or app-owned fallback for downloads.
     QNetworkReply *m_currentReply = nullptr;
+    QProcess *m_installerProcess = nullptr;
+    QString m_activeInstallerPath;
     NetJob::Ptr m_fileDownloadJob;
     QList<NetJob::Ptr> m_retiredJobs;
     QString m_fileDownloadPath;

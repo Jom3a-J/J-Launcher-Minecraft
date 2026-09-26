@@ -1542,7 +1542,153 @@ class ArgumentProbe {
                      qPrintable(provider.at(0) + ": "
                                 + finished.last().at(1).toString()));
             QCOMPARE(downloader.resolvedLoaderVersion(), provider.at(2));
+            if (provider.at(0) == QStringLiteral("forge")
+                || provider.at(0) == QStringLiteral("neoforge")) {
+                QVERIFY(!QFileInfo::exists(
+                    serverLoaderInstallIncompleteMarkerPath(destination)));
+            }
         }
+    }
+
+    void failedForgeInstallerMarksTheServerUnlaunchable()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString destination = root.filePath("failed-forge");
+        const QString loaderJar = QDir(destination).filePath(
+            "forge-26.3-66.0.4-shim.jar");
+        QVERIFY(writeFile(
+            root.filePath(
+                "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/"
+                "forge-1.21.1-52.0.1-installer.jar"),
+            "synthetic forge installer"));
+
+        ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
+        endpoints.forgeMavenBase = directoryUrl(root.filePath("forge-maven"));
+        ServerInstance server("failed-forge", "Failed Forge", endpoints);
+        server.setServerDirectory(destination);
+        server.setVersion("1.21.1");
+        server.setLoaderType("forge");
+        server.setLoaderVersion("52.0.1");
+        server.setJavaPath(fakeMinecraftServerPath());
+        QSignalSpy finished(&server, &ServerInstance::serverSoftwareDownloadFinished);
+        ScopedEnvironmentVariable fakeLoaderJar(
+            "JLAUNCHER_TEST_INSTALLER_LOADER_JAR", loaderJar.toLocal8Bit());
+        const QString countPath = root.filePath("installer-count");
+        ScopedEnvironmentVariable installerCount(
+            "JLAUNCHER_TEST_INSTALLER_COUNT_FILE", countPath.toLocal8Bit());
+
+        {
+            ScopedEnvironmentVariable exitCode("JLAUNCHER_TEST_INSTALLER_EXIT_CODE", "7");
+            QVERIFY(server.prepareServerSoftware());
+            QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 10000);
+            QVERIFY(!finished.constFirst().at(1).toBool());
+        }
+
+        QVERIFY(QFileInfo::exists(loaderJar));
+        QVERIFY(QFileInfo::exists(
+            serverLoaderInstallIncompleteMarkerPath(destination)));
+        QCOMPARE(server.serverJarPath(), QFileInfo(loaderJar).absoluteFilePath());
+        QVERIFY(!server.hasInstalledLaunchTarget());
+        QCOMPARE(readFile(countPath), QByteArray("1"));
+
+        {
+            ScopedEnvironmentVariable exitCode("JLAUNCHER_TEST_INSTALLER_EXIT_CODE", "0");
+            QVERIFY(server.prepareServerSoftware());
+            QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 2, 10000);
+            QVERIFY(finished.at(1).at(1).toBool());
+        }
+        QCOMPARE(readFile(countPath), QByteArray("2"));
+        QVERIFY(!QFileInfo::exists(
+            serverLoaderInstallIncompleteMarkerPath(destination)));
+    }
+
+    void cancellingForgeInstallerStopsItAndPrepareRetries()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        const QString destination = root.filePath("cancelled-forge");
+        const QString loaderJar = QDir(destination).filePath(
+            "forge-26.3-66.0.4-shim.jar");
+        const QString installerPath = QDir(destination).filePath("forge-installer.jar");
+        const QString installerLogPath = installerPath + QStringLiteral(".log");
+        const QString readyPath = root.filePath("installer-ready");
+        const QString completedPath = root.filePath("installer-completed");
+        const QString countPath = root.filePath("installer-count");
+        QVERIFY(writeFile(
+            root.filePath(
+                "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/"
+                "forge-1.21.1-52.0.1-installer.jar"),
+            "synthetic forge installer"));
+
+        ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
+        endpoints.forgeMavenBase = directoryUrl(root.filePath("forge-maven"));
+        ServerInstance server("cancelled-forge", "Cancelled Forge", endpoints);
+        server.setServerDirectory(destination);
+        server.setVersion("1.21.1");
+        server.setLoaderType("forge");
+        server.setLoaderVersion("52.0.1");
+        server.setJavaPath(fakeMinecraftServerPath());
+        QSignalSpy finished(&server, &ServerInstance::serverSoftwareDownloadFinished);
+        ScopedEnvironmentVariable fakeLoaderJar(
+            "JLAUNCHER_TEST_INSTALLER_LOADER_JAR", loaderJar.toLocal8Bit());
+        ScopedEnvironmentVariable installerCount(
+            "JLAUNCHER_TEST_INSTALLER_COUNT_FILE", countPath.toLocal8Bit());
+        {
+            ScopedEnvironmentVariable delay("JLAUNCHER_TEST_INSTALLER_DELAY_MS", "2000");
+            ScopedEnvironmentVariable ready(
+                "JLAUNCHER_TEST_INSTALLER_READY_FILE", readyPath.toLocal8Bit());
+            ScopedEnvironmentVariable completed(
+                "JLAUNCHER_TEST_INSTALLER_COMPLETED_FILE", completedPath.toLocal8Bit());
+            ScopedEnvironmentVariable createLog("JLAUNCHER_TEST_INSTALLER_CREATE_LOG", "1");
+
+            QVERIFY(server.prepareServerSoftware());
+            QTRY_VERIFY_WITH_TIMEOUT(QFileInfo::exists(readyPath), 10000);
+            QVERIFY(QFileInfo::exists(installerLogPath));
+            QVERIFY(server.cancelDownload());
+            QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 5000);
+            QCOMPARE(finished.constFirst().at(1).toBool(), false);
+            QCOMPARE(finished.constFirst().at(2).toBool(), true);
+        }
+
+        QTest::qWait(2200);
+        QVERIFY(!QFileInfo::exists(completedPath));
+        QVERIFY(QFileInfo::exists(
+            serverLoaderInstallIncompleteMarkerPath(destination)));
+        QVERIFY(!QFileInfo::exists(installerPath));
+        QVERIFY(!QFileInfo::exists(installerLogPath));
+        QVERIFY(QFileInfo::exists(loaderJar));
+        QCOMPARE(server.serverJarPath(), QFileInfo(loaderJar).absoluteFilePath());
+        QCOMPARE(readFile(countPath), QByteArray("1"));
+
+        QVERIFY(!server.hasInstalledLaunchTarget());
+        QVERIFY(server.prepareServerSoftware());
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 2, 10000);
+        QCOMPARE(finished.at(1).at(1).toBool(), true);
+        QCOMPARE(readFile(countPath), QByteArray("2"));
+        QVERIFY(!QFileInfo::exists(
+            serverLoaderInstallIncompleteMarkerPath(destination)));
+        QVERIFY(server.hasInstalledLaunchTarget());
+    }
+
+    void existingForgeJarWithoutIncompleteMarkerRemainsReady()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QString destination = temporaryRoot.filePath("existing-forge");
+        const QString loaderJar = QDir(destination).filePath(
+            "forge-1.21.1-52.0.1-shim.jar");
+        QVERIFY(writeFile(loaderJar, "existing forge server jar"));
+
+        ServerInstance server("existing-forge", "Existing Forge");
+        server.setServerDirectory(destination);
+        server.setLoaderType("forge");
+        QVERIFY(!QFileInfo::exists(
+            serverLoaderInstallIncompleteMarkerPath(destination)));
+        QVERIFY(server.hasInstalledLaunchTarget());
+        QVERIFY(server.prepareServerSoftware());
     }
 
     void rejectsForgeInstallWhenMinecraftServerPayloadIsMissing()
@@ -1570,10 +1716,14 @@ class ArgumentProbe {
         QVERIFY(!finished.last().at(0).toBool());
         QVERIFY(finished.last().at(1).toString().contains(
             "did not download the Minecraft server files"));
+        QVERIFY(QFileInfo::exists(
+            serverLoaderInstallIncompleteMarkerPath(destination)));
+        QVERIFY(QFileInfo::exists(
+            serverLoaderInstallIncompleteMarkerPath(destination)));
 #ifdef Q_OS_WIN
-        QVERIFY(!QFileInfo::exists(QDir(destination).filePath("run.bat")));
+        QVERIFY(QFileInfo::exists(QDir(destination).filePath("run.bat")));
 #else
-        QVERIFY(!QFileInfo::exists(QDir(destination).filePath("run.sh")));
+        QVERIFY(QFileInfo::exists(QDir(destination).filePath("run.sh")));
 #endif
     }
 
