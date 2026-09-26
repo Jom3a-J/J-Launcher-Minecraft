@@ -273,6 +273,27 @@ class NetRequestTest final : public QObject
         QCOMPARE(destination.requestCount(), 1);
         QCOMPARE(destination.authorizedRequestCount(), 0);
     }
+
+    void rejectsRedirectSchemesQtWouldNotFollow()
+    {
+        LoopbackHttpServer origin;
+        QVERIFY(origin.start());
+        origin.redirect("/unsupported-scheme", QUrl(QStringLiteral("ftp://127.0.0.1/resource")));
+
+        QNetworkAccessManager network;
+        network.setProxy(QNetworkProxy::NoProxy);
+        TestDownload request(origin.url("/unsupported-scheme"));
+        request.setNetwork(&network);
+
+        QSignalSpy failed(&request, &Task::failed);
+        QSignalSpy finished(&request, &Task::finished);
+        request.start();
+
+        QTRY_VERIFY_WITH_TIMEOUT(finished.count() == 1, 2000);
+        QCOMPARE(failed.count(), 1);
+        QVERIFY(request.failReason().contains(QStringLiteral("scheme transition")));
+        QCOMPARE(origin.requestCount(), 1);
+    }
 };
 
 int main(int argc, char** argv)

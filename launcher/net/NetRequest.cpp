@@ -184,14 +184,17 @@ void NetRequest::executeTask()
     }
 
 #if defined(LAUNCHER_APPLICATION)
-    m_cdnHttp1PolicyApplied =
-        applyCdnHttp1TransportPolicy(request, APPLICATION->settings()->get("CdnHttp1Connections").toBool());
+    Application* application = APPLICATION_DYN;
+    const bool cdnHttp1Enabled = application
+        ? application->settings()->get("CdnHttp1Connections").toBool()
+        : true;
+    m_cdnHttp1PolicyApplied = applyCdnHttp1TransportPolicy(request, cdnHttp1Enabled);
 #endif
 
 #if defined(LAUNCHER_APPLICATION)
-    auto user_agent = APPLICATION->getUserAgent();
+    const auto user_agent = application ? application->getUserAgent() : BuildConfig.USER_AGENT;
 #else
-    auto user_agent = BuildConfig.USER_AGENT;
+    const auto user_agent = BuildConfig.USER_AGENT;
 #endif
 
     request.setHeader(QNetworkRequest::UserAgentHeader, user_agent.toUtf8());
@@ -206,7 +209,10 @@ void NetRequest::executeTask()
                     << formatRequestForLogging(request);
 
 #if defined(LAUNCHER_APPLICATION)
-    request.setTransferTimeout(APPLICATION->settings()->get("RequestTimeout").toInt() * 1000);
+    if (application)
+        request.setTransferTimeout(application->settings()->get("RequestTimeout").toInt() * 1000);
+    else
+        request.setTransferTimeout();
 #else
     request.setTransferTimeout();
 #endif
@@ -394,11 +400,21 @@ auto NetRequest::handleRedirect() -> bool
         return false;
     }
 
-    if (currentUrl.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0
-        && redirect.scheme().compare(QStringLiteral("http"), Qt::CaseInsensitive) == 0) {
+    const QString currentScheme = currentUrl.scheme().toLower();
+    const QString redirectScheme = redirect.scheme().toLower();
+    // Match NoLessSafeRedirectPolicy's permitted HTTP/HTTPS transitions. The credential-origin
+    // check below is intentionally stricter than Qt's scheme-only redirect policy.
+    const bool safeSchemeTransition =
+        (currentScheme == QStringLiteral("http")
+         && (redirectScheme == QStringLiteral("http") || redirectScheme == QStringLiteral("https")))
+        || (currentScheme == QStringLiteral("https") && redirectScheme == QStringLiteral("https"));
+    if (!safeSchemeTransition) {
         m_state = State::Failed;
         m_redirectRejected = true;
-        m_failReason = tr("Redirect rejected: HTTPS cannot be downgraded to HTTP.");
+        if (currentScheme == QStringLiteral("https") && redirectScheme == QStringLiteral("http"))
+            m_failReason = tr("Redirect rejected: HTTPS cannot be downgraded to HTTP.");
+        else
+            m_failReason = tr("Redirect rejected: the scheme transition is not permitted.");
         qCWarning(logCat) << getUid().toString() << m_failReason;
         return false;
     }
