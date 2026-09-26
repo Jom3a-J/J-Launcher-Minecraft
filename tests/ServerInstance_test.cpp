@@ -47,6 +47,32 @@ QByteArray readFile(const QString& path)
     return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
 }
 
+QUrl writeVanillaFileFixture(const QString& rootPath, const QString& version,
+                             const QByteArray& serverJar)
+{
+    const QDir root(rootPath);
+    const QString jarPath = root.filePath(QStringLiteral("vanilla/%1/server.jar").arg(version));
+    const QString versionPath = root.filePath(QStringLiteral("vanilla/%1/version.json").arg(version));
+    const QString manifestPath = root.filePath(QStringLiteral("vanilla/manifest.json"));
+    if (!writeFile(jarPath, serverJar)
+        || !writeFile(versionPath, QJsonDocument(QJsonObject{
+            { "downloads", QJsonObject{ { "server", QJsonObject{
+                { "url", QUrl::fromLocalFile(jarPath).toString() },
+                { "sha1", QString::fromLatin1(
+                    QCryptographicHash::hash(serverJar, QCryptographicHash::Sha1).toHex()) },
+            } } } },
+        }).toJson(QJsonDocument::Compact))
+        || !writeFile(manifestPath, QJsonDocument(QJsonObject{
+            { "versions", QJsonArray{ QJsonObject{
+                { "id", version },
+                { "url", QUrl::fromLocalFile(versionPath).toString() },
+            } } },
+        }).toJson(QJsonDocument::Compact))) {
+        return {};
+    }
+    return QUrl::fromLocalFile(manifestPath);
+}
+
 bool writeArchive(const QString& path, const QList<QPair<QString, QByteArray>>& entries)
 {
     MMCZip::ArchiveWriter archive(path);
@@ -1464,6 +1490,9 @@ class ArgumentProbe {
         QTemporaryDir temporaryRoot;
         QVERIFY(temporaryRoot.isValid());
         const QDir root(temporaryRoot.path());
+        const QUrl legacyVanillaManifest = writeVanillaFileFixture(
+            root.path(), QStringLiteral("1.12.2"), QByteArrayLiteral("exact legacy vanilla server"));
+        QVERIFY(!legacyVanillaManifest.isEmpty());
 
         FixtureHttpServer fixtureHttp;
         QVERIFY(fixtureHttp.start());
@@ -1507,6 +1536,8 @@ class ArgumentProbe {
                 "forge-maven/net/minecraftforge/forge/1.12.2-14.23.5.2860/"
                 "forge-1.12.2-14.23.5.2860-installer.jar"),
             "exact forge installer"));
+        QVERIFY(!QFileInfo::exists(
+            root.filePath("forge-maven/net/minecraftforge/forge/maven-metadata.xml")));
         QVERIFY(writeFile(
             root.filePath(
                 "neoforge-maven/net/neoforged/neoforge/21.1.233/"
@@ -1514,7 +1545,7 @@ class ArgumentProbe {
             "exact neoforge installer"));
 
         ServerProviderEndpoints endpoints{
-            fixtureHttp.url("/unused/vanilla"),
+            legacyVanillaManifest,
             fixtureHttp.baseUrl("paper"),
             fixtureHttp.baseUrl("fabric"),
             fixtureHttp.baseUrl("purpur"),
@@ -1548,6 +1579,94 @@ class ArgumentProbe {
                     serverLoaderInstallIncompleteMarkerPath(destination)));
             }
         }
+    }
+
+    void resolvesForgeMavenCoordinatesAndPrefetchesLegacyServerJar()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+
+        const QString legacyBuild = QStringLiteral("10.13.4.1614");
+        const QString legacyMavenVersion = QStringLiteral("1.7.10-10.13.4.1614-1.7.10");
+        const QString legacyInstaller = root.filePath(
+            QStringLiteral("legacy-forge-maven/net/minecraftforge/forge/%1/forge-%1-installer.jar")
+                .arg(legacyMavenVersion));
+        QVERIFY(writeFile(legacyInstaller, "suffixed legacy Forge installer"));
+        QVERIFY(writeFile(
+            root.filePath("legacy-forge-maven/net/minecraftforge/forge/maven-metadata.xml"),
+            QStringLiteral("<metadata><versioning><versions><version>%1</version>"
+                           "</versions></versioning></metadata>").arg(legacyMavenVersion).toUtf8()));
+
+        const QByteArray legacyVanillaServer("verified 1.7.10 vanilla server payload");
+        const QUrl legacyManifest = writeVanillaFileFixture(
+            root.path(), QStringLiteral("1.7.10"), legacyVanillaServer);
+        QVERIFY(!legacyManifest.isEmpty());
+        const QString legacyDestination = root.filePath("legacy-forge-server");
+        const QString legacyServerJar = QDir(legacyDestination).filePath(
+            "minecraft_server.1.7.10.jar");
+        const QString legacyObserved = root.filePath("legacy-installer-server-jar-state");
+
+        ServerProviderEndpoints legacyEndpoints = ServerProviderEndpoints::production();
+        legacyEndpoints.vanillaManifest = legacyManifest;
+        legacyEndpoints.forgeMavenBase = directoryUrl(root.filePath("legacy-forge-maven"));
+        ServerDownloader legacyDownloader(legacyEndpoints);
+        QSignalSpy legacyFinished(&legacyDownloader, &ServerDownloader::finished);
+        ScopedEnvironmentVariable legacyServerJarPath(
+            "JLAUNCHER_TEST_INSTALLER_SERVER_JAR_PATH", legacyServerJar.toLocal8Bit());
+        ScopedEnvironmentVariable legacyObservedPath(
+            "JLAUNCHER_TEST_INSTALLER_SERVER_JAR_OBSERVED_FILE", legacyObserved.toLocal8Bit());
+
+        legacyDownloader.startDownload(QStringLiteral("1.7.10"), QStringLiteral("forge"),
+                                       legacyDestination, fakeMinecraftServerPath(), legacyBuild);
+        QTRY_COMPARE_WITH_TIMEOUT(legacyFinished.size(), 1, 10000);
+        QVERIFY2(legacyFinished.constFirst().at(0).toBool(),
+                 qPrintable(legacyFinished.constFirst().at(1).toString()));
+        QCOMPARE(legacyDownloader.resolvedLoaderVersion(), legacyBuild);
+        QCOMPARE(readFile(legacyServerJar), legacyVanillaServer);
+        QCOMPARE(readFile(legacyObserved), QByteArray("present"));
+
+        const QString modernVersion = QStringLiteral("1.13.2");
+        const QString modernBuild = QStringLiteral("25.0.223");
+        const QString modernMavenVersion = modernVersion + QLatin1Char('-') + modernBuild;
+        const QString modernMavenRoot = root.filePath("modern-forge-maven");
+        QVERIFY(writeFile(
+            QDir(modernMavenRoot).filePath(
+                QStringLiteral("net/minecraftforge/forge/%1/forge-%1-installer.jar")
+                    .arg(modernMavenVersion)),
+            "unsuffixed modern Forge installer"));
+        QVERIFY(writeFile(
+            QDir(modernMavenRoot).filePath("net/minecraftforge/forge/maven-metadata.xml"),
+            QStringLiteral("<metadata><versioning><versions><version>%1</version>"
+                           "</versions></versioning></metadata>").arg(modernMavenVersion).toUtf8()));
+
+        const QByteArray modernVanillaServer("modern vanilla payload should stay unused");
+        const QUrl modernManifest = writeVanillaFileFixture(
+            root.path(), modernVersion, modernVanillaServer);
+        QVERIFY(!modernManifest.isEmpty());
+        const QString modernDestination = root.filePath("modern-forge-server");
+        const QString modernServerJar = QDir(modernDestination).filePath(
+            QStringLiteral("minecraft_server.%1.jar").arg(modernVersion));
+        const QString modernObserved = root.filePath("modern-installer-server-jar-state");
+
+        ServerProviderEndpoints modernEndpoints = ServerProviderEndpoints::production();
+        modernEndpoints.vanillaManifest = modernManifest;
+        modernEndpoints.forgeMavenBase = directoryUrl(modernMavenRoot);
+        ServerDownloader modernDownloader(modernEndpoints);
+        QSignalSpy modernFinished(&modernDownloader, &ServerDownloader::finished);
+        ScopedEnvironmentVariable modernServerJarPath(
+            "JLAUNCHER_TEST_INSTALLER_SERVER_JAR_PATH", modernServerJar.toLocal8Bit());
+        ScopedEnvironmentVariable modernObservedPath(
+            "JLAUNCHER_TEST_INSTALLER_SERVER_JAR_OBSERVED_FILE", modernObserved.toLocal8Bit());
+
+        modernDownloader.startDownload(modernVersion, QStringLiteral("forge"),
+                                       modernDestination, fakeMinecraftServerPath(), modernBuild);
+        QTRY_COMPARE_WITH_TIMEOUT(modernFinished.size(), 1, 10000);
+        QVERIFY2(modernFinished.constFirst().at(0).toBool(),
+                 qPrintable(modernFinished.constFirst().at(1).toString()));
+        QCOMPARE(modernDownloader.resolvedLoaderVersion(), modernBuild);
+        QCOMPARE(readFile(modernObserved), QByteArray("missing"));
+        QVERIFY(!QFileInfo::exists(modernServerJar));
     }
 
     void failedForgeInstallerMarksTheServerUnlaunchable()
