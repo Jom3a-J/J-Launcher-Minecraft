@@ -107,6 +107,14 @@ bool containsCredentials(const QNetworkRequest& request)
     }
     return false;
 }
+
+void applyHttp1TransportSettings(QNetworkRequest& request, int connectionCount)
+{
+    auto http1 = request.http1Configuration();
+    http1.setNumberOfConnectionsPerHost(connectionCount);
+    request.setHttp1Configuration(http1);
+    request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+}
 }  // namespace
 
 bool applyCdnHttp1TransportPolicy(QNetworkRequest& request, bool enabled)
@@ -120,10 +128,28 @@ bool applyCdnHttp1TransportPolicy(QNetworkRequest& request, bool enabled)
     }
 
     const int connectionCount = HostScheduler::hardCeiling(HostScheduler::classify(request.url()));
-    auto http1 = request.http1Configuration();
-    http1.setNumberOfConnectionsPerHost(connectionCount);
-    request.setHttp1Configuration(http1);
-    request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+    applyHttp1TransportSettings(request, connectionCount);
+    return true;
+}
+
+bool applyMojangHttp1TransportPolicy(QNetworkRequest& request, bool enabled)
+{
+    if (!enabled)
+        return false;
+
+    const QString host = request.url().host();
+    const HostClass hostClass = HostScheduler::classify(request.url());
+    int connectionCount = 0;
+    if (hostClass == HostClass::MinecraftResources || hostClass == HostClass::MinecraftLibraries) {
+        connectionCount = HostScheduler::hardCeiling(hostClass);
+    } else if (host.compare(QStringLiteral("piston-data.mojang.com"), Qt::CaseInsensitive) == 0) {
+        // Piston data remains in the Unknown scheduler class and keeps its existing ceiling.
+        connectionCount = HostScheduler::UnknownHostCeiling;
+    } else {
+        return false;
+    }
+
+    applyHttp1TransportSettings(request, connectionCount);
     return true;
 }
 
@@ -183,12 +209,18 @@ void NetRequest::executeTask()
             return;
     }
 
+    bool trackTransportRedirects = false;
 #if defined(LAUNCHER_APPLICATION)
     Application* application = APPLICATION_DYN;
     const bool cdnHttp1Enabled = application
         ? application->settings()->get("CdnHttp1Connections").toBool()
         : true;
     m_cdnHttp1PolicyApplied = applyCdnHttp1TransportPolicy(request, cdnHttp1Enabled);
+    const bool mojangHttp1Enabled = application
+        ? application->settings()->get("MojangHttp1Connections").toBool()
+        : true;
+    const bool mojangHttp1PolicyApplied = applyMojangHttp1TransportPolicy(request, mojangHttp1Enabled);
+    trackTransportRedirects = m_cdnHttp1PolicyApplied || mojangHttp1PolicyApplied;
 #endif
 
 #if defined(LAUNCHER_APPLICATION)
@@ -227,7 +259,7 @@ void NetRequest::executeTask()
     if (rep == nullptr)  // it failed
         return;
     m_reply.reset(rep);
-    if (m_cdnHttp1PolicyApplied) {
+    if (trackTransportRedirects) {
         connect(rep, &QNetworkReply::redirected, this, [this](const QUrl& redirectedUrl) {
             if (m_url.host().compare(redirectedUrl.host(), Qt::CaseInsensitive) != 0)
                 emit redirectedToNewHost(redirectedUrl);
