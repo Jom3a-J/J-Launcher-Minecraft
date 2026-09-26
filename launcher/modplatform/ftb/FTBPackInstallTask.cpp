@@ -537,7 +537,7 @@ void PackInstallTask::downloadPack()
         providerMarker.close();
     }
 
-    jobPtr->setMaxConcurrent(1);  // FTB blocks multiple requests at a time
+    // HostScheduler pins each FTB host; leave other hosts free to download in parallel.
     connect(jobPtr.get(), &NetJob::succeeded, this, &PackInstallTask::onModDownloadSucceeded);
     connect(jobPtr.get(), &NetJob::failed, this, &PackInstallTask::onModDownloadFailed);
     connect(jobPtr.get(), &NetJob::aborted, this, &PackInstallTask::abort);

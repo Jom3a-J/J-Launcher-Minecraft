@@ -71,6 +71,33 @@ bool usesLegacyNeoForgeCoordinates(const QString &minecraftVersion,
         || loaderVersion.trimmed().startsWith(QStringLiteral("47."));
 }
 
+bool isBeforeMinecraft113(const QString &version)
+{
+    const QVersionNumber parsed = QVersionNumber::fromString(version);
+    const QVersionNumber cutoff = QVersionNumber::fromString(QStringLiteral("1.13"));
+    return !parsed.isNull() && QVersionNumber::compare(parsed, cutoff) < 0;
+}
+
+bool fileMatchesSha1(const QString &path, const QByteArray &expectedSha1)
+{
+    if (expectedSha1.isEmpty())
+        return false;
+
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly))
+        return false;
+
+    QCryptographicHash hash(QCryptographicHash::Sha1);
+    while (!file.atEnd()) {
+        const QByteArray chunk = file.read(1024 * 1024);
+        if (chunk.isEmpty())
+            return false;
+        hash.addData(chunk);
+    }
+    return file.error() == QFile::NoError
+        && hash.result().toHex().compare(expectedSha1, Qt::CaseInsensitive) == 0;
+}
+
 void sortBuildVersions(QStringList &builds)
 {
     builds.removeAll(QString());
@@ -190,6 +217,11 @@ void ServerDownloader::startDownload(const QString &version, const QString &type
     m_javaPath = javaPath;
     m_loaderVersion = loaderVersion.trimmed();
     m_resolvedLoaderVersion.clear();
+    m_pendingForgeVersion.clear();
+    m_pendingForgeMavenVersion.clear();
+    m_legacyForgeServerJarPath.clear();
+    m_fetchingLegacyForgeServerJar = false;
+    m_downloadingLegacyForgeServerJar = false;
     m_loaderScriptExistedBeforeInstall = QFileInfo(
         QDir(destinationDir).filePath(platformLoaderScriptName())).isFile();
 
@@ -323,7 +355,9 @@ void ServerDownloader::cancel()
     if (m_step == Step::Idle) {
         return;
     }
-    const QString cancelledServerJarPath = m_step == Step::DownloadingJar ? m_fileDownloadPath : QString();
+    const QString cancelledServerJarPath =
+        (m_step == Step::DownloadingJar || m_step == Step::DownloadingLegacyForgeServerJar)
+        ? m_fileDownloadPath : QString();
     const bool versionRequest = isVersionListStep();
     const bool buildRequest = isBuildListStep();
     cleanUp();
@@ -413,6 +447,10 @@ void ServerDownloader::handleReply(QNetworkReply *reply)
     if (reply->error() != QNetworkReply::NoError) {
         QString errorStr = reply->errorString();
         reply->deleteLater();
+        if (m_step == Step::ResolvingForgeInstallerMetadata) {
+            prepareForgeInstaller(m_pendingForgeVersion, QString());
+            return;
+        }
         cleanUp();
         failCurrentRequest(tr("Network error: %1").arg(errorStr));
         return;
@@ -458,6 +496,9 @@ void ServerDownloader::handleReply(QNetworkReply *reply)
         case Step::FetchingForgeVersions:
             onForgeVersionsFetched(responseData);
             break;
+        case Step::ResolvingForgeInstallerMetadata:
+            onForgeInstallerMetadataFetched(responseData);
+            break;
         case Step::FetchingNeoForgeVersions:
             onNeoForgeVersionsFetched(responseData);
             break;
@@ -471,8 +512,11 @@ void ServerDownloader::downloadFile(const QString &url, const QString &outputPat
                                     QCryptographicHash::Algorithm hashAlgorithm)
 {
     cleanUp();
-    m_step = Step::DownloadingJar;
-    emit statusMessage(tr("Downloading server jar..."));
+    m_step = m_downloadingLegacyForgeServerJar
+        ? Step::DownloadingLegacyForgeServerJar : Step::DownloadingJar;
+    emit statusMessage(m_downloadingLegacyForgeServerJar
+                           ? tr("Downloading the vanilla server jar for the Forge installer...")
+                           : tr("Downloading server jar..."));
     startFileDownload(QUrl(url), outputPath, expectedHash, hashAlgorithm, true);
 }
 
@@ -509,7 +553,8 @@ void ServerDownloader::startFileDownload(const QUrl &url, const QString &outputP
         job->addNetAction(download);
     }
 
-    const int progressMaximum = m_step == Step::DownloadingJar ? 100 : 50;
+    const int progressMaximum =
+        (m_step == Step::DownloadingJar || m_step == Step::DownloadingLegacyForgeServerJar) ? 100 : 50;
     connect(job.get(), &Task::progress, this, [this, progressMaximum](qint64 current, qint64 total) {
         if (total <= 0)
             return;
@@ -531,6 +576,10 @@ void ServerDownloader::onFileDownloadSucceeded()
     retireFileDownloadJob(false);
 
     switch (m_step) {
+        case Step::DownloadingLegacyForgeServerJar:
+            m_downloadingLegacyForgeServerJar = false;
+            beginForgeInstallerDownload(m_pendingForgeVersion, m_pendingForgeMavenVersion);
+            return;
         case Step::DownloadingForgeInstaller:
             emit progress(50);
             onForgeInstallerDownloaded();
@@ -777,6 +826,7 @@ QString ServerDownloader::currentFailureContext() const
             break;
         case Step::FetchingForgeVersions:
         case Step::FetchingNeoForgeVersions:
+        case Step::ResolvingForgeInstallerMetadata:
             step = tr("resolving the loader installer");
             break;
         case Step::DownloadingForgeInstaller:
@@ -785,6 +835,9 @@ QString ServerDownloader::currentFailureContext() const
             break;
         case Step::DownloadingJar:
             step = tr("downloading the server JAR");
+            break;
+        case Step::DownloadingLegacyForgeServerJar:
+            step = tr("downloading the vanilla server JAR for Forge");
             break;
         default:
             step = tr("server setup");
@@ -1065,6 +1118,19 @@ void ServerDownloader::onVanillaVersionJsonFetched(const QByteArray &data)
 
     if (jarUrl.isEmpty() || sha1.isEmpty()) {
         finishDownload(false, tr("No server download URL found for this version."));
+        return;
+    }
+
+    if (m_fetchingLegacyForgeServerJar) {
+        m_fetchingLegacyForgeServerJar = false;
+        m_legacyForgeServerJarPath = QDir(m_destinationDir).filePath(
+            QStringLiteral("minecraft_server.%1.jar").arg(m_version));
+        if (fileMatchesSha1(m_legacyForgeServerJarPath, sha1)) {
+            beginForgeInstallerDownload(m_pendingForgeVersion, m_pendingForgeMavenVersion);
+            return;
+        }
+        m_downloadingLegacyForgeServerJar = true;
+        downloadFile(jarUrl, m_legacyForgeServerJarPath, sha1, QCryptographicHash::Sha1);
         return;
     }
 
@@ -1362,7 +1428,7 @@ void ServerDownloader::onForgeVersionsFetched(const QByteArray &data)
                 : error);
             return;
         }
-        downloadForgeInstaller(builds.first());
+        prepareForgeInstaller(builds.first(), resolveForgeMavenVersion(data, builds.first()));
         return;
     }
 
@@ -1398,10 +1464,69 @@ void ServerDownloader::onForgeVersionsFetched(const QByteArray &data)
 void ServerDownloader::downloadForgeInstaller(const QString &forgeVersion)
 {
     m_resolvedLoaderVersion = forgeVersion;
+    m_pendingForgeVersion = forgeVersion;
+    m_step = Step::ResolvingForgeInstallerMetadata;
+    emit statusMessage(tr("Resolving the Forge installer version..."));
+
+    const QUrl metadataUrl = m_endpoints.forgeMavenBase.resolved(
+        QUrl(QStringLiteral("net/minecraftforge/forge/maven-metadata.xml")));
+    m_currentReply = m_network->get(createRequest(metadataUrl));
+    connect(m_currentReply, &QNetworkReply::finished, this, [this]() {
+        handleReply(m_currentReply);
+    });
+}
+
+void ServerDownloader::onForgeInstallerMetadataFetched(const QByteArray &data)
+{
+    const QString requestedVersion = m_pendingForgeVersion;
+    prepareForgeInstaller(requestedVersion, resolveForgeMavenVersion(data, requestedVersion));
+}
+
+QString ServerDownloader::resolveForgeMavenVersion(const QByteArray &data,
+                                                    const QString &forgeVersion) const
+{
+    QXmlStreamReader xml(data);
+    const QString exactVersion = m_version + QLatin1Char('-') + forgeVersion;
+    const QString suffixedPrefix = exactVersion + QLatin1Char('-');
+    QString suffixedVersion;
+    while (!xml.atEnd()) {
+        xml.readNext();
+        if (!xml.isStartElement() || xml.name() != QStringLiteral("version"))
+            continue;
+        const QString candidate = xml.readElementText().trimmed();
+        if (candidate == exactVersion)
+            return candidate;
+        if (suffixedVersion.isEmpty() && candidate.startsWith(suffixedPrefix))
+            suffixedVersion = candidate;
+    }
+    return xml.hasError() ? QString() : suffixedVersion;
+}
+
+void ServerDownloader::prepareForgeInstaller(const QString &forgeVersion,
+                                              const QString &mavenVersion)
+{
+    m_resolvedLoaderVersion = forgeVersion;
+    m_pendingForgeVersion = forgeVersion;
+    m_pendingForgeMavenVersion = mavenVersion;
+
+    if (isBeforeMinecraft113(m_version)) {
+        m_fetchingLegacyForgeServerJar = true;
+        fetchVanillaManifest();
+        return;
+    }
+
+    beginForgeInstallerDownload(forgeVersion, mavenVersion);
+}
+
+void ServerDownloader::beginForgeInstallerDownload(const QString &forgeVersion,
+                                                    const QString &mavenVersion)
+{
     // Download the exact loader selected by the modpack when one is supplied.
+    const QString resolvedMavenVersion = mavenVersion.isEmpty()
+        ? m_version + QLatin1Char('-') + forgeVersion : mavenVersion;
     const QUrl installerUrl = m_endpoints.forgeMavenBase.resolved(
-        QUrl(QString("net/minecraftforge/forge/%1-%2/forge-%1-%2-installer.jar")
-                 .arg(m_version, forgeVersion)));
+        QUrl(QStringLiteral("net/minecraftforge/forge/%1/forge-%1-installer.jar")
+                 .arg(resolvedMavenVersion)));
 
     QString installerPath = QDir(m_destinationDir).filePath("forge-installer.jar");
 

@@ -96,7 +96,37 @@ class HostSchedulerTest : public QObject {
         QCOMPARE(HostScheduler::classify(QUrl(QStringLiteral("https://maven.neoforged.net/a.jar"))), HostClass::ForgeMaven);
         QCOMPARE(HostScheduler::classify(ftbUrl()), HostClass::Ftb);
         QCOMPARE(HostScheduler::classify(QUrl(BuildConfig.LEGACY_FTB_CDN_BASE_URL + QStringLiteral("a.zip"))), HostClass::Ftb);
+        QCOMPARE(HostScheduler::classify(QUrl(QStringLiteral("https://files.feed-the-beast.com/a.zip"))), HostClass::Ftb);
+        QCOMPARE(HostScheduler::classify(QUrl(QStringLiteral("https://cdn.feed-the-beast.com/a.zip"))), HostClass::Ftb);
         QCOMPARE(HostScheduler::classify(unknownUrl()), HostClass::Unknown);
+    }
+
+    void test_ftbHostsArePinnedWhileCurseForgeCanRunInParallel()
+    {
+        HostScheduler scheduler;
+        const QUrl filesUrl(QStringLiteral("https://files.feed-the-beast.com/a.zip"));
+        const QUrl cdnUrl(QStringLiteral("https://cdn.feed-the-beast.com/b.zip"));
+        const QUrl curseForgeUrl(QStringLiteral("https://edge.forgecdn.net/files/1/a.jar"));
+        QCOMPARE(HostScheduler::classify(curseForgeUrl), HostClass::FlameCdn);
+
+        const auto filesPermit = scheduler.tryAcquire(filesUrl);
+        QVERIFY(filesPermit != HostScheduler::InvalidPermit);
+        QCOMPARE(scheduler.tryAcquire(filesUrl), HostScheduler::InvalidPermit);
+
+        const auto cdnPermit = scheduler.tryAcquire(cdnUrl);
+        QVERIFY(cdnPermit != HostScheduler::InvalidPermit);
+        QCOMPARE(scheduler.tryAcquire(cdnUrl), HostScheduler::InvalidPermit);
+
+        const auto curseForgePermit = scheduler.tryAcquire(curseForgeUrl);
+        QVERIFY(curseForgePermit != HostScheduler::InvalidPermit);
+        QCOMPARE(scheduler.inFlightFor(filesUrl), 1);
+        QCOMPARE(scheduler.inFlightFor(cdnUrl), 1);
+        QCOMPARE(scheduler.inFlightFor(curseForgeUrl), 1);
+
+        scheduler.release(filesPermit, HostOutcome::Success);
+        scheduler.release(cdnPermit, HostOutcome::Success);
+        scheduler.release(curseForgePermit, HostOutcome::Success);
+        QCOMPARE(scheduler.outstandingPermits(), 0);
     }
 
     /*! A host that merely contains a provider's name must not inherit its policy. */

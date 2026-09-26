@@ -51,6 +51,13 @@ int main(int argc, char **argv)
             loaderJar << "synthetic Forge loader jar";
         }
 
+        if (const char* serverJarPath = std::getenv("JLAUNCHER_TEST_INSTALLER_SERVER_JAR_PATH")) {
+            if (const char* observedPath = std::getenv("JLAUNCHER_TEST_INSTALLER_SERVER_JAR_OBSERVED_FILE")) {
+                std::ofstream observed(observedPath);
+                observed << (std::filesystem::is_regular_file(serverJarPath) ? "present" : "missing");
+            }
+        }
+
         if (const char* installerLog = std::getenv("JLAUNCHER_TEST_INSTALLER_CREATE_LOG")) {
             if (installerLog[0] != '\0' && installerLog[0] != '0') {
                 for (int index = 1; index + 1 < argc; ++index) {
@@ -105,7 +112,7 @@ int main(int argc, char **argv)
             std::getenv("JLAUNCHER_TEST_OMIT_SERVER_PAYLOAD") != nullptr;
         std::ofstream serverJar;
         if (!omitServerPayload) {
-            for (const char* version : { "1.12.2", "1.20.1", "1.21.1", "26.2" }) {
+            for (const char* version : { "1.7.10", "1.12.2", "1.13.2", "1.20.1", "1.21.1", "26.2" }) {
                 const std::filesystem::path directory =
                     std::filesystem::path("libraries/net/minecraft/server") / version;
                 std::filesystem::create_directories(directory);
