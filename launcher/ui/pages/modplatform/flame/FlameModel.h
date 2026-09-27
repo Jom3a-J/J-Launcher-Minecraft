@@ -18,6 +18,21 @@
 
 namespace Flame {
 
+inline constexpr int ServerReadyRole = 262;
+
+class ServerReadyFilterModel : public QSortFilterProxyModel {
+    Q_OBJECT
+public:
+    explicit ServerReadyFilterModel(QObject* parent = nullptr);
+    void setServerReadyOnly(bool serverReadyOnly);
+
+protected:
+    bool filterAcceptsRow(int sourceRow, const QModelIndex& sourceParent) const override;
+
+private:
+    bool m_serverReadyOnly = false;
+};
+
 using LogoMap = QMap<QString, QIcon>;
 using LogoCallback = std::function<void(QString)>;
 
@@ -38,6 +53,8 @@ class ListModel : public QAbstractListModel {
 
     void getLogo(const QString& logo, const QString& logoUrl, LogoCallback callback);
     void setShowServerBadges(bool show);
+    void setServerReadyOnly(bool serverReadyOnly);
+    void setMinimumVisibleServerReadyRows(int rows);
     void searchWithTerm(const QString& term, int sort, std::shared_ptr<ModFilterWidget::Filter> filter, bool filterChanged);
 
     bool hasActiveSearchJob() const { return m_jobPtr && m_jobPtr->isRunning(); }
@@ -70,6 +87,11 @@ class ListModel : public QAbstractListModel {
     enum SearchState { None, CanPossiblyFetchMore, ResetRequested, Finished } m_searchState = None;
     Task::Ptr m_jobPtr;
     bool m_showServerBadges = false;
+    bool m_serverReadyOnly = false;
+    int m_minimumVisibleServerReadyRows = 1;
+    int m_automaticPagesFetched = 0;
+
+    void maybeFetchServerReadyPage();
 };
 
 }  // namespace Flame

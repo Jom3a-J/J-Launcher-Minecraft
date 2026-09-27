@@ -48,9 +48,11 @@ class FlamePage;
 }
 
 class NewInstanceDialog;
+class QResizeEvent;
 
 namespace Flame {
 class ListModel;
+class ServerReadyFilterModel;
 }
 
 class FlamePage : public QWidget, public ModpackProviderBasePage {
@@ -71,6 +73,7 @@ class FlamePage : public QWidget, public ModpackProviderBasePage {
     void openedImpl() override;
 
     bool eventFilter(QObject* watched, QEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
 
     /** Programatically set the term in the search bar. */
     virtual void setSearchTerm(QString) override;
@@ -90,6 +93,7 @@ class FlamePage : public QWidget, public ModpackProviderBasePage {
     Ui::FlamePage* m_ui = nullptr;
     NewInstanceDialog* m_dialog = nullptr;
     Flame::ListModel* m_listModel = nullptr;
+    Flame::ServerReadyFilterModel* m_serverReadyFilterModel = nullptr;
     ModPlatform::IndexedPack::Ptr m_current;
 
     int m_selected_version_index = -1;

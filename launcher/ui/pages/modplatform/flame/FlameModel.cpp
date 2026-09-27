@@ -1,4 +1,5 @@
 #include "FlameModel.h"
+#include "FlameServerReadyFilter.h"
 #include <Json.h>
 #include "Application.h"
 #include "modplatform/ModIndex.h"
@@ -11,9 +12,28 @@
 #include <Version.h>
 
 #include <QtMath>
+#include <algorithm>
 #include <memory>
 
 namespace Flame {
+
+ServerReadyFilterModel::ServerReadyFilterModel(QObject* parent) : QSortFilterProxyModel(parent)
+{
+    setDynamicSortFilter(true);
+}
+
+void ServerReadyFilterModel::setServerReadyOnly(bool serverReadyOnly)
+{
+    if (m_serverReadyOnly == serverReadyOnly) return;
+    m_serverReadyOnly = serverReadyOnly;
+    invalidateFilter();
+}
+
+bool ServerReadyFilterModel::filterAcceptsRow(int sourceRow, const QModelIndex& sourceParent) const
+{
+    const auto ready = sourceModel()->index(sourceRow, 0, sourceParent).data(ServerReadyRole).toBool();
+    return isVisibleWithServerReadyFilter(ready, m_serverReadyOnly);
+}
 
 ListModel::ListModel(QObject* parent) : QAbstractListModel(parent) {}
 
@@ -64,6 +84,8 @@ QVariant ListModel::data(const QModelIndex& index, int role) const
             return QSize(0, 58);
         case UserDataTypes::TITLE:
             return pack->name;
+        case ServerReadyRole:
+            return pack->hasLatestServerPack;
         case UserDataTypes::DESCRIPTION:
             return pack->description;
         case UserDataTypes::INSTALLED:
@@ -92,6 +114,34 @@ void ListModel::setShowServerBadges(bool show)
         emit dataChanged(index(0, 0), index(m_modpacks.size() - 1, 0),
                          { UserDataTypes::BADGE_TEXT, UserDataTypes::BADGE_TONE, Qt::AccessibleTextRole });
     }
+}
+
+void ListModel::setMinimumVisibleServerReadyRows(int rows)
+{
+    m_minimumVisibleServerReadyRows = qMax(1, rows);
+    maybeFetchServerReadyPage();
+}
+
+void ListModel::setServerReadyOnly(bool serverReadyOnly)
+{
+    if (m_serverReadyOnly == serverReadyOnly) return;
+    m_serverReadyOnly = serverReadyOnly;
+    maybeFetchServerReadyPage();
+}
+
+void ListModel::maybeFetchServerReadyPage()
+{
+    if (hasActiveSearchJob()) return;
+    const int readyCount = static_cast<int>(std::count_if(m_modpacks.cbegin(), m_modpacks.cend(), [](const auto& pack) {
+        return pack->hasLatestServerPack;
+    }));
+    if (!shouldAutomaticallyFetchServerReadyPage(m_serverReadyOnly, readyCount,
+                                                  m_minimumVisibleServerReadyRows, m_automaticPagesFetched,
+                                                  m_searchState == CanPossiblyFetchMore)) {
+        return;
+    }
+    ++m_automaticPagesFetched;
+    performPaginatedSearch();
 }
 
 bool ListModel::setData(const QModelIndex& index, const QVariant& value, [[maybe_unused]] int role)
@@ -184,6 +234,7 @@ void ListModel::fetchMore(const QModelIndex& parent)
 
 void ListModel::performPaginatedSearch()
 {
+    if (hasActiveSearchJob()) return;
     // activate search by id only for numerical values because all CurseForge ids are numerical
     static const QRegularExpression s_projectIdExpr("^\\#[0-9]+$");
     if (m_searchState != ResetRequested && s_projectIdExpr.match(m_currentSearchTerm).hasMatch()) {
@@ -240,6 +291,7 @@ void ListModel::searchWithTerm(const QString& term, int sort, std::shared_ptr<Mo
     m_currentSearchTerm = term;
     m_currentSort = sort;
     m_filter = filter;
+    m_automaticPagesFetched = 0;
     if (hasActiveSearchJob()) {
         m_jobPtr->abort();
         m_searchState = ResetRequested;
@@ -273,6 +325,7 @@ void Flame::ListModel::searchRequestFinished(QList<ModPlatform::IndexedPack::Ptr
     beginInsertRows(QModelIndex(), m_modpacks.size(), m_modpacks.size() + newList.size() - 1);
     m_modpacks.append(newList);
     endInsertRows();
+    maybeFetchServerReadyPage();
 }
 
 void Flame::ListModel::searchRequestForOneSucceeded(ModPlatform::IndexedPack::Ptr pack)

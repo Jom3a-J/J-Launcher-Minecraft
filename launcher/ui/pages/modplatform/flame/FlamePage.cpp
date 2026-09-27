@@ -43,6 +43,8 @@
 #include "ui_FlamePage.h"
 
 #include <QKeyEvent>
+#include <QCheckBox>
+#include <QResizeEvent>
 #include <memory>
 
 #include "FlameModel.h"
@@ -60,9 +62,14 @@ FlamePage::FlamePage(NewInstanceDialog* dialog, QWidget* parent)
     m_ui->searchEdit->installEventFilter(this);
     m_ui->serverCompatibilityLabel->setVisible(
         m_dialog->isServerModpackMode());
+    m_ui->serverCatalogControls->setVisible(m_dialog->isServerModpackMode());
 
-    m_ui->packView->setModel(m_listModel);
+    m_serverReadyFilterModel = new Flame::ServerReadyFilterModel(this);
+    m_serverReadyFilterModel->setSourceModel(m_listModel);
+    m_serverReadyFilterModel->setServerReadyOnly(m_dialog->isServerModpackMode());
+    m_ui->packView->setModel(m_serverReadyFilterModel);
     m_listModel->setShowServerBadges(m_dialog->isServerModpackMode());
+    m_listModel->setServerReadyOnly(m_dialog->isServerModpackMode());
 
     m_ui->versionSelectionBox->view()->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     m_ui->versionSelectionBox->view()->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
@@ -89,6 +96,11 @@ FlamePage::FlamePage(NewInstanceDialog* dialog, QWidget* parent)
     connect(m_ui->sortByBox, &QComboBox::currentIndexChanged, this, &FlamePage::triggerSearch);
     connect(m_ui->packView->selectionModel(), &QItemSelectionModel::currentChanged, this, &FlamePage::onSelectionChanged);
     connect(m_ui->versionSelectionBox, &QComboBox::currentIndexChanged, this, &FlamePage::onVersionSelectionChanged);
+    connect(m_ui->showOtherPacksCheckBox, &QCheckBox::toggled, this, [this](bool showOtherPacks) {
+        const bool serverReadyOnly = !showOtherPacks;
+        m_serverReadyFilterModel->setServerReadyOnly(serverReadyOnly);
+        m_listModel->setServerReadyOnly(serverReadyOnly);
+    });
 
     m_ui->packView->setItemDelegate(new ProjectItemDelegate(this));
     m_ui->packDescription->setMetaEntry("FlamePacks");
@@ -118,6 +130,12 @@ bool FlamePage::eventFilter(QObject* watched, QEvent* event)
     return QWidget::eventFilter(watched, event);
 }
 
+void FlamePage::resizeEvent(QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);
+    m_listModel->setMinimumVisibleServerReadyRows(qMax(1, m_ui->packView->viewport()->height() / 58));
+}
+
 bool FlamePage::shouldDisplay() const
 {
     return true;
@@ -136,6 +154,7 @@ void FlamePage::openedImpl()
 
 void FlamePage::triggerSearch()
 {
+    m_listModel->setMinimumVisibleServerReadyRows(qMax(1, m_ui->packView->viewport()->height() / 58));
     m_ui->packView->selectionModel()->setCurrentIndex({}, QItemSelectionModel::SelectionFlag::ClearAndSelect);
     m_ui->packView->clearSelection();
     m_ui->packDescription->clear();
@@ -151,6 +170,9 @@ void FlamePage::onSelectionChanged(QModelIndex curr, [[maybe_unused]] QModelInde
     m_ui->versionSelectionBox->clear();
 
     if (!curr.isValid()) {
+        m_current.reset();
+        m_ui->packDescription->clear();
+        m_ui->serverCompatibilityLabel->clear();
         m_dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "flame");
         if (isOpened) {
             m_dialog->setSuggestedPack();
@@ -158,7 +180,9 @@ void FlamePage::onSelectionChanged(QModelIndex curr, [[maybe_unused]] QModelInde
         return;
     }
 
-    m_current = m_listModel->data(curr, Qt::UserRole).value<ModPlatform::IndexedPack::Ptr>();
+    // Rows shift under the proxy as filtered pages arrive, so keep hold of the source row.
+    const QPersistentModelIndex sourceIndex(m_serverReadyFilterModel->mapToSource(curr));
+    m_current = sourceIndex.data(Qt::UserRole).value<ModPlatform::IndexedPack::Ptr>();
     m_dialog->setServerSupport(ModPlatform::ServerSupport::Unknown, {}, "flame");
 
     if (!m_current->versionsLoaded || m_filterWidget->changed()) {
@@ -168,7 +192,7 @@ void FlamePage::onSelectionChanged(QModelIndex curr, [[maybe_unused]] QModelInde
 
         auto addonId = m_current->addonId;
         // Use default if no callbacks are set
-        callbacks.on_succeed = [this, curr, addonId](auto& doc) {
+        callbacks.on_succeed = [this, sourceIndex, addonId](auto& doc) {
             if (addonId != m_current->addonId) {
                 return;  // wrong request
             }
@@ -197,7 +221,7 @@ void FlamePage::onSelectionChanged(QModelIndex curr, [[maybe_unused]] QModelInde
             QVariant current_updated;
             current_updated.setValue(m_current);
 
-            if (!m_listModel->setData(curr, current_updated, Qt::UserRole)) {
+            if (!m_listModel->setData(sourceIndex, current_updated, Qt::UserRole)) {
                 qWarning() << "Failed to cache versions for the current pack!";
             }
 
