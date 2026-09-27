@@ -163,5 +163,8 @@ ecm_add_test(ModrinthDownloadPolicy_test.cpp LINK_LIBRARIES Launcher_logic Qt${Q
     TEST_NAME ModrinthDownloadPolicy)
 set_tests_properties(ModrinthDownloadPolicy PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+ecm_add_test(FlameServerReadyFilter_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME FlameServerReadyFilter)
+
 ecm_add_test(GameUpdateTaskGraph_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME GameUpdateTaskGraph)
