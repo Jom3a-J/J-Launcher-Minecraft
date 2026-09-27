@@ -38,6 +38,22 @@ int main(int argc, char **argv)
         return 0;
     }
     if (installServer) {
+        if (const char* requiredLibraries = std::getenv("JLAUNCHER_TEST_INSTALLER_REQUIRED_LIBRARIES")) {
+            if (const char* observedPath = std::getenv("JLAUNCHER_TEST_INSTALLER_LIBRARIES_OBSERVED_FILE")) {
+                std::ofstream observed(observedPath, std::ios::trunc | std::ios::binary);
+                std::string paths(requiredLibraries);
+                size_t start = 0;
+                while (start <= paths.size()) {
+                    const size_t end = paths.find(';', start);
+                    const std::string path = paths.substr(start, end == std::string::npos ? end : end - start);
+                    observed << (std::filesystem::is_regular_file(path) ? "present" : "missing") << '\n';
+                    if (end == std::string::npos)
+                        break;
+                    start = end + 1;
+                }
+            }
+        }
+
         if (const char* countPath = std::getenv("JLAUNCHER_TEST_INSTALLER_COUNT_FILE")) {
             int count = 0;
             std::ifstream existingCount(countPath);

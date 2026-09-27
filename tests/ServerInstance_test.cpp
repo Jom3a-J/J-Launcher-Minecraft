@@ -8,6 +8,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRegularExpression>
 #include <QSignalSpy>
 #include <QTcpServer>
 #include <QTcpSocket>
@@ -75,6 +76,9 @@ QUrl writeVanillaFileFixture(const QString& rootPath, const QString& version,
 
 bool writeArchive(const QString& path, const QList<QPair<QString, QByteArray>>& entries)
 {
+    if (!QDir().mkpath(QFileInfo(path).absolutePath())) {
+        return false;
+    }
     MMCZip::ArchiveWriter archive(path);
     if (!archive.open()) {
         return false;
@@ -85,6 +89,41 @@ bool writeArchive(const QString& path, const QList<QPair<QString, QByteArray>>& 
         }
     }
     return archive.close();
+}
+
+QJsonObject installerLibrary(const QString& name, const QString& path,
+                             const QUrl& url, const QByteArray& contents)
+{
+    return {
+        { "name", name },
+        { "downloads", QJsonObject{
+            { "artifact", QJsonObject{
+                { "path", path },
+                { "url", url.toString() },
+                { "sha1", QString::fromLatin1(
+                    QCryptographicHash::hash(contents, QCryptographicHash::Sha1).toHex()) },
+                { "size", contents.size() },
+            } },
+        } },
+    };
+}
+
+bool writeModernInstaller(const QString& path, const QJsonArray& profileLibraries,
+                          const QJsonArray& versionLibraries)
+{
+    const QByteArray profile = QJsonDocument(QJsonObject{
+        { "spec", 1 },
+        { "libraries", profileLibraries },
+        { "data", QJsonObject{} },
+    }).toJson(QJsonDocument::Compact);
+    const QByteArray version = QJsonDocument(QJsonObject{
+        { "spec", 1 },
+        { "libraries", versionLibraries },
+    }).toJson(QJsonDocument::Compact);
+    return writeArchive(path, {
+        { "install_profile.json", profile },
+        { "version.json", version },
+    });
 }
 
 class ScopedEnvironmentVariable
@@ -1667,6 +1706,243 @@ class ArgumentProbe {
         QCOMPARE(modernDownloader.resolvedLoaderVersion(), modernBuild);
         QCOMPARE(readFile(modernObserved), QByteArray("missing"));
         QVERIFY(!QFileInfo::exists(modernServerJar));
+    }
+
+    void prefetchesModernForgeLibrariesBeforeInstallerAndReusesVerifiedFiles()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        RangeHttpServer http;
+        QVERIFY(http.start());
+        const QByteArray profileBytes("profile processor library");
+        const QByteArray versionBytes("version library");
+        const QByteArray cachedBytes("cached library");
+        const QByteArray vanillaBytes("vanilla server library");
+        http.serve("/libraries/profile.jar", httpResource(profileBytes));
+        http.serve("/libraries/version.jar", httpResource(versionBytes));
+        http.serve("/libraries/vanilla-server.jar", httpResource(vanillaBytes));
+
+        const QString installerPath = root.filePath(
+            "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/forge-1.21.1-52.0.1-installer.jar");
+        QVERIFY(writeModernInstaller(installerPath,
+            QJsonArray{ installerLibrary("test:profile:1", "test/profile/1/profile-1.jar",
+                                         http.url("/libraries/profile.jar"), profileBytes) },
+            QJsonArray{
+                installerLibrary("test:version:1", "test/version/1/version-1.jar",
+                                 http.url("/libraries/version.jar"), versionBytes),
+                installerLibrary("test:cached:1", "test/cached/1/cached-1.jar",
+                                 http.url("/libraries/cached.jar"), cachedBytes),
+                installerLibrary("net.minecraft:server:1.21.1",
+                                 "net/minecraft/server/1.21.1/server-1.21.1.jar",
+                                 http.url("/libraries/vanilla-server.jar"), vanillaBytes),
+            }));
+
+        const QString destination = root.filePath("forge-server");
+        const QString profilePath = QDir(destination).filePath(
+            "libraries/test/profile/1/profile-1.jar");
+        const QString versionPath = QDir(destination).filePath(
+            "libraries/test/version/1/version-1.jar");
+        const QString cachedPath = QDir(destination).filePath(
+            "libraries/test/cached/1/cached-1.jar");
+        const QString vanillaPath = QDir(destination).filePath(
+            "libraries/net/minecraft/server/1.21.1/server-1.21.1.jar");
+        QVERIFY(writeFile(cachedPath, cachedBytes));
+        const QString observedPath = root.filePath("installer-libraries");
+        const QString countPath = root.filePath("installer-count");
+
+        ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
+        endpoints.forgeMavenBase = directoryUrl(root.filePath("forge-maven"));
+        ServerDownloader downloader(endpoints);
+        QSignalSpy finished(&downloader, &ServerDownloader::finished);
+        ScopedEnvironmentVariable requiredLibraries(
+            "JLAUNCHER_TEST_INSTALLER_REQUIRED_LIBRARIES",
+            QStringList{ profilePath, versionPath, cachedPath, vanillaPath }.join(';').toLocal8Bit());
+        ScopedEnvironmentVariable observedLibraries(
+            "JLAUNCHER_TEST_INSTALLER_LIBRARIES_OBSERVED_FILE", observedPath.toLocal8Bit());
+        ScopedEnvironmentVariable installerCount(
+            "JLAUNCHER_TEST_INSTALLER_COUNT_FILE", countPath.toLocal8Bit());
+
+        downloader.startDownload("1.21.1", "forge", destination,
+                                 fakeMinecraftServerPath(), "52.0.1");
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 10000);
+        QVERIFY2(finished.constFirst().at(0).toBool(),
+                 qPrintable(finished.constFirst().at(1).toString()));
+        QCOMPARE(readFile(profilePath), profileBytes);
+        QCOMPARE(readFile(versionPath), versionBytes);
+        QCOMPARE(readFile(cachedPath), cachedBytes);
+        QCOMPARE(readFile(vanillaPath), vanillaBytes);
+        QCOMPARE(readFile(observedPath), QByteArray("present\npresent\npresent\npresent\n"));
+        QCOMPARE(readFile(countPath), QByteArray("1"));
+        QCOMPARE(http.requestCount(), 3);
+    }
+
+    void prefetchesModernNeoForgeLibrariesBeforeInstaller()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        RangeHttpServer http;
+        QVERIFY(http.start());
+        const QByteArray libraryBytes("NeoForge processor library");
+        http.serve("/libraries/neoforge.jar", httpResource(libraryBytes));
+        const QString installerPath = root.filePath(
+            "neoforge-maven/net/neoforged/neoforge/21.1.50/neoforge-21.1.50-installer.jar");
+        QVERIFY(writeModernInstaller(installerPath,
+            QJsonArray{ installerLibrary("test:neoforge:1", "test/neoforge/1/neoforge-1.jar",
+                                         http.url("/libraries/neoforge.jar"), libraryBytes) }, {}));
+
+        const QString destination = root.filePath("neoforge-server");
+        const QString libraryPath = QDir(destination).filePath(
+            "libraries/test/neoforge/1/neoforge-1.jar");
+        const QString observedPath = root.filePath("installer-libraries");
+        const QString countPath = root.filePath("installer-count");
+        ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
+        endpoints.neoForgeMavenBase = directoryUrl(root.filePath("neoforge-maven"));
+        ServerDownloader downloader(endpoints);
+        QSignalSpy finished(&downloader, &ServerDownloader::finished);
+        ScopedEnvironmentVariable requiredLibraries(
+            "JLAUNCHER_TEST_INSTALLER_REQUIRED_LIBRARIES", libraryPath.toLocal8Bit());
+        ScopedEnvironmentVariable observedLibraries(
+            "JLAUNCHER_TEST_INSTALLER_LIBRARIES_OBSERVED_FILE", observedPath.toLocal8Bit());
+        ScopedEnvironmentVariable installerCount(
+            "JLAUNCHER_TEST_INSTALLER_COUNT_FILE", countPath.toLocal8Bit());
+
+        downloader.startDownload("1.21.1", "neoforge", destination,
+                                 fakeMinecraftServerPath(), "21.1.50");
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 10000);
+        QVERIFY2(finished.constFirst().at(0).toBool(),
+                 qPrintable(finished.constFirst().at(1).toString()));
+        QCOMPARE(readFile(libraryPath), libraryBytes);
+        QCOMPARE(readFile(observedPath), QByteArray("present\n"));
+        QCOMPARE(readFile(countPath), QByteArray("1"));
+        QCOMPARE(http.requestCount(), 1);
+    }
+
+    void continuesForgeInstallWhenModernLibraryPrefetchHas404()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        RangeHttpServer http;
+        QVERIFY(http.start());
+        const QByteArray availableBytes("available library");
+        http.serve("/libraries/available.jar", httpResource(availableBytes));
+        const QString installerPath = root.filePath(
+            "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/forge-1.21.1-52.0.1-installer.jar");
+        QVERIFY(writeModernInstaller(installerPath, {}, QJsonArray{
+            installerLibrary("test:available:1", "test/available/1/available-1.jar",
+                             http.url("/libraries/available.jar"), availableBytes),
+            installerLibrary("test:missing:1", "test/missing/1/missing-1.jar",
+                             http.url("/libraries/missing.jar"), QByteArray("missing library")),
+        }));
+
+        const QString destination = root.filePath("forge-server");
+        const QString availablePath = QDir(destination).filePath(
+            "libraries/test/available/1/available-1.jar");
+        const QString missingPath = QDir(destination).filePath(
+            "libraries/test/missing/1/missing-1.jar");
+        const QString observedPath = root.filePath("installer-libraries");
+        const QString countPath = root.filePath("installer-count");
+        ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
+        endpoints.forgeMavenBase = directoryUrl(root.filePath("forge-maven"));
+        ServerDownloader downloader(endpoints);
+        QSignalSpy finished(&downloader, &ServerDownloader::finished);
+        ScopedEnvironmentVariable requiredLibraries(
+            "JLAUNCHER_TEST_INSTALLER_REQUIRED_LIBRARIES",
+            QStringList{ availablePath, missingPath }.join(';').toLocal8Bit());
+        ScopedEnvironmentVariable observedLibraries(
+            "JLAUNCHER_TEST_INSTALLER_LIBRARIES_OBSERVED_FILE", observedPath.toLocal8Bit());
+        ScopedEnvironmentVariable installerCount(
+            "JLAUNCHER_TEST_INSTALLER_COUNT_FILE", countPath.toLocal8Bit());
+        QTest::ignoreMessage(QtWarningMsg,
+                             QRegularExpression("Forge library prefetch failed for 1 file.*"));
+
+        downloader.startDownload("1.21.1", "forge", destination,
+                                 fakeMinecraftServerPath(), "52.0.1");
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 10000);
+        QVERIFY2(finished.constFirst().at(0).toBool(),
+                 qPrintable(finished.constFirst().at(1).toString()));
+        QCOMPARE(readFile(availablePath), availableBytes);
+        QVERIFY(!QFileInfo::exists(missingPath));
+        QCOMPARE(readFile(observedPath), QByteArray("present\nmissing\n"));
+        QCOMPARE(readFile(countPath), QByteArray("1"));
+    }
+
+    void skipsModernLibraryPrefetchForInstallerWithoutModernProfile()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        RangeHttpServer http;
+        QVERIFY(http.start());
+        const QByteArray libraryBytes("must not prefetch");
+        const QString installerPath = root.filePath(
+            "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/forge-1.21.1-52.0.1-installer.jar");
+        const QByteArray profile = QJsonDocument(QJsonObject{
+            { "libraries", QJsonArray{ installerLibrary(
+                "test:legacy:1", "test/legacy/1/legacy-1.jar",
+                http.url("/libraries/legacy.jar"), libraryBytes) } },
+        }).toJson(QJsonDocument::Compact);
+        QVERIFY(writeArchive(installerPath, { { "install_profile.json", profile } }));
+
+        const QString destination = root.filePath("forge-server");
+        const QString countPath = root.filePath("installer-count");
+        ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
+        endpoints.forgeMavenBase = directoryUrl(root.filePath("forge-maven"));
+        ServerDownloader downloader(endpoints);
+        QSignalSpy finished(&downloader, &ServerDownloader::finished);
+        ScopedEnvironmentVariable installerCount(
+            "JLAUNCHER_TEST_INSTALLER_COUNT_FILE", countPath.toLocal8Bit());
+
+        downloader.startDownload("1.21.1", "forge", destination,
+                                 fakeMinecraftServerPath(), "52.0.1");
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 10000);
+        QVERIFY2(finished.constFirst().at(0).toBool(),
+                 qPrintable(finished.constFirst().at(1).toString()));
+        QCOMPARE(http.requestCount(), 0);
+        QVERIFY(!QFileInfo::exists(QDir(destination).filePath(
+            "libraries/test/legacy/1/legacy-1.jar")));
+        QCOMPARE(readFile(countPath), QByteArray("1"));
+    }
+
+    void cancellingModernLibraryPrefetchLeavesMarkerAndSkipsInstaller()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QDir root(temporaryRoot.path());
+        RangeHttpServer http;
+        QVERIFY(http.start());
+        const QByteArray libraryBytes("stalled library");
+        RangeHttpServer::Resource stalled = httpResource(libraryBytes);
+        stalled.stallAfter = 0;
+        http.serve("/libraries/stalled.jar", stalled);
+        const QString installerPath = root.filePath(
+            "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/forge-1.21.1-52.0.1-installer.jar");
+        QVERIFY(writeModernInstaller(installerPath, {}, QJsonArray{
+            installerLibrary("test:stalled:1", "test/stalled/1/stalled-1.jar",
+                             http.url("/libraries/stalled.jar"), libraryBytes),
+        }));
+
+        const QString destination = root.filePath("forge-server");
+        const QString countPath = root.filePath("installer-count");
+        ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
+        endpoints.forgeMavenBase = directoryUrl(root.filePath("forge-maven"));
+        ServerDownloader downloader(endpoints);
+        QSignalSpy finished(&downloader, &ServerDownloader::finished);
+        ScopedEnvironmentVariable installerCount(
+            "JLAUNCHER_TEST_INSTALLER_COUNT_FILE", countPath.toLocal8Bit());
+
+        downloader.startDownload("1.21.1", "forge", destination,
+                                 fakeMinecraftServerPath(), "52.0.1");
+        QTRY_VERIFY_WITH_TIMEOUT(http.requestCount() > 0, 10000);
+        QVERIFY(QFileInfo::exists(serverLoaderInstallIncompleteMarkerPath(destination)));
+        downloader.cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 5000);
+        QCOMPARE(finished.constFirst().at(0).toBool(), false);
+        QCOMPARE(finished.constFirst().at(1).toString(), QString("Download cancelled."));
+        QVERIFY(QFileInfo::exists(serverLoaderInstallIncompleteMarkerPath(destination)));
+        QVERIFY(!QFileInfo::exists(countPath));
     }
 
     void failedForgeInstallerMarksTheServerUnlaunchable()
