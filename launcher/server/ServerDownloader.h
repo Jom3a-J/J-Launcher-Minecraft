@@ -22,6 +22,7 @@
 #include <QCryptographicHash>
 #include <QStringList>
 #include <QUrl>
+#include <QHash>
 
 #include "net/NetJob.h"
 
@@ -140,6 +141,9 @@ private:
     void prepareForgeInstaller(const QString &forgeVersion, const QString &mavenVersion);
     void beginForgeInstallerDownload(const QString &forgeVersion, const QString &mavenVersion);
     void onForgeInstallerDownloaded();
+    bool prefetchModernInstallerLibraries(const QString &installerPath, const QString &loaderName);
+    void onInstallerLibrariesPrefetched();
+    void startInstallerProcess(const QString &loaderName, const QString &installerPath);
 
     // NeoForge
     void fetchNeoForgeVersions();
@@ -188,6 +192,7 @@ private:
         // NeoForge
         FetchingNeoForgeVersions,
         DownloadingNeoForgeInstaller,
+        DownloadingInstallerLibraries,
         // Final download
         DownloadingJar
     };
@@ -210,6 +215,10 @@ private:
     QString m_legacyForgeServerJarPath;
     bool m_fetchingLegacyForgeServerJar = false;
     bool m_downloadingLegacyForgeServerJar = false;
+    QString m_pendingInstallerLoader;
+    QString m_pendingInstallerPath;
+    QStringList m_prefetchLibraryPaths;
+    QHash<QString, QByteArray> m_prefetchLibraryHashes;
 
     QNetworkAccessManager *m_network = nullptr; //!< Private manager retained for metadata requests.
     QNetworkAccessManager *m_downloadNetwork = nullptr; //!< Shared app manager, or app-owned fallback for downloads.
