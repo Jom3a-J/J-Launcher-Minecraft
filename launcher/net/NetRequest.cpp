@@ -44,6 +44,7 @@
 #include <QHttp1Configuration>
 #include <QLocale>
 #include <QNetworkReply>
+#include <QtMath>
 #include <QUrl>
 #include <array>
 #include <cstdint>
@@ -156,6 +157,9 @@ bool applyMojangHttp1TransportPolicy(QNetworkRequest& request, bool enabled)
 NetRequest::NetRequest() : Task()
 {
     connect(&m_retryTimer, &QTimer::timeout, this, &NetRequest::executeTask);
+    m_stallTimer.setSingleShot(true);
+    m_stallTimer.setTimerType(Qt::PreciseTimer);
+    connect(&m_stallTimer, &QTimer::timeout, this, &NetRequest::onStallTimeout);
 
     m_progressFlush.setSingleShot(true);
     m_progressFlush.setTimerType(Qt::CoarseTimer);
@@ -254,6 +258,7 @@ void NetRequest::executeTask()
     // A retry or a redirect starts the byte counts over, so the next update must not be held
     // back by the throttle of the attempt that was replaced.
     resetProgressThrottle();
+    m_stallAbortPending = false;
 
     auto rep = getReply(request);
     if (rep == nullptr)  // it failed
@@ -271,6 +276,41 @@ void NetRequest::executeTask()
     connect(rep, &QNetworkReply::errorOccurred, this, &NetRequest::downloadError);
     connect(rep, &QNetworkReply::sslErrors, this, &NetRequest::sslErrors);
     connect(rep, &QNetworkReply::readyRead, this, &NetRequest::downloadReadyRead);
+#if defined(LAUNCHER_APPLICATION)
+    m_stallTimeoutMs = application && supportsDownloadStallRetry()
+        && (m_url.scheme().compare(QStringLiteral("http"), Qt::CaseInsensitive) == 0
+            || m_url.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0)
+        ? qRound(application->settings()->get("DownloadStallTimeout").toDouble() * 1000)
+        : 0;
+    if (m_stallTimeoutMs > 0)
+        m_stallTimer.start(m_stallTimeoutMs);
+#endif
+}
+
+void NetRequest::onStallTimeout()
+{
+    if (!m_reply || m_state != State::Running || m_retryTimer.isActive())
+        return;
+    m_stallAbortPending = true;
+    m_reply->abort();
+}
+
+void NetRequest::scheduleStallRetry()
+{
+    ++m_stallRetryCount;
+    const int delaySeconds = m_stallRetryCount == 1 ? 1 : 3;
+    const QString retryMessage = QStringLiteral("Download stalled for %1 s, retrying (attempt %2/2)")
+                                     .arg(QString::number(m_stallTimeoutMs / 1000.0, 'g', 3))
+                                     .arg(m_stallRetryCount);
+    qCWarning(logCat).noquote() << getUid().toString() << retryMessage << Privacy::sanitizeUrl(m_url);
+    m_state = State::Running;
+    resetProgressThrottle();
+    m_last_progress_time = m_clock.now();
+    m_last_progress_bytes = 0;
+    m_retryTimer.setTimerType(Qt::PreciseTimer);
+    m_retryTimer.setSingleShot(true);
+    m_retryTimer.setInterval(delaySeconds * 1000);
+    m_retryTimer.start();
 }
 
 void NetRequest::resetProgressThrottle()
@@ -339,13 +379,24 @@ void NetRequest::publishProgress()
 
 void NetRequest::downloadError(QNetworkReply::NetworkError error)
 {
+    m_stallTimer.stop();
     if (const int status = replyStatusCode(); status == 429 /* Too Many Requests */ || status == 503 /* Service Unavailable */) {
         // Report this the moment it is seen. With AutoRetry the task keeps running through the
         // retry delay, so waiting for it to finish would let sibling requests keep pushing.
         emit rateLimited(m_url, retryAfterSeconds());
     }
 
-    if (error == QNetworkReply::OperationCanceledError) {
+    if (error == QNetworkReply::OperationCanceledError && m_stallAbortPending) {
+        m_stallAbortPending = false;
+        if (m_stallRetryCount < 2) {
+            scheduleStallRetry();
+            return;
+        }
+        m_stallFailure = true;
+        qCCritical(logCat) << getUid().toString() << "Download stalled after 2 retries"
+                           << Privacy::sanitizeUrl(m_url);
+        m_state = State::Failed;
+    } else if (error == QNetworkReply::OperationCanceledError) {
         qCCritical(logCat) << getUid().toString() << "Aborted"
                            << Privacy::sanitizeUrl(m_url);
         m_state = State::Failed;
@@ -505,6 +556,7 @@ void NetRequest::handleAutoRetry(int64_t delay)
 
 void NetRequest::downloadFinished()
 {
+    m_stallTimer.stop();
     // currently waiting for retry
     if (m_retryTimer.isActive()) {
         return;
@@ -598,6 +650,8 @@ void NetRequest::downloadReadyRead()
 {
     if (m_state == State::Running) {
         auto data = m_reply->readAll();
+        if (!data.isEmpty() && m_stallTimer.isActive())
+            m_stallTimer.start(m_stallTimeoutMs);
         m_state = m_sink->write(data);
         if (replyStatusCode() >= 400) {
             constexpr qsizetype MaxErrorResponseBytes = 64 * 1024;
@@ -620,7 +674,20 @@ void NetRequest::downloadReadyRead()
 auto NetRequest::abort() -> bool
 {
     m_state = State::AbortedByUser;
+    m_stallTimer.stop();
     m_progressFlush.stop();
+    if (m_retryTimer.isActive()) {
+        m_retryTimer.stop();
+        if (m_reply) {
+            disconnect(m_reply.get(), &QNetworkReply::errorOccurred, nullptr, nullptr);
+            disconnect(m_reply.get(), &QNetworkReply::finished, nullptr, nullptr);
+            m_reply->abort();
+        }
+        m_sink->abort();
+        emit aborted();
+        emit finished();
+        return true;
+    }
     if (m_reply) {
         disconnect(m_reply.get(), &QNetworkReply::errorOccurred, nullptr, nullptr);
         m_reply->abort();
