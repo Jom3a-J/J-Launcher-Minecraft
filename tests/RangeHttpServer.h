@@ -64,6 +64,10 @@ class RangeHttpServer {
         //! Send this many body bytes and then keep the connection open forever. Gives a test a
         //! transfer that is reliably still in flight when it wants to cancel one.
         qint64 stallAfter = -1;
+        //! For a ranged response, stall only when its first requested byte matches this value.
+        qint64 stallRangeStart = -1;
+        //! Number of matching responses to stall; -1 stalls every match, 0 disables it.
+        int stallCount = -1;
     };
 
     struct RequestRecord {
@@ -332,7 +336,11 @@ class RangeHttpServer {
 
         socket->write(headers);
 
-        if (resource.stallAfter >= 0) {
+        const bool stallRangeMatches = resource.stallRangeStart < 0 || first == resource.stallRangeStart;
+        const bool shouldStall = resource.stallAfter >= 0 && stallRangeMatches && resource.stallCount != 0;
+        if (shouldStall) {
+            if (resource.stallCount > 0)
+                resource.stallCount--;
             socket->write(body.left(static_cast<int>(qMin<qint64>(resource.stallAfter, body.size()))));
             socket->flush();
             // Deliberately never finished: the transfer stays in flight until the client gives up

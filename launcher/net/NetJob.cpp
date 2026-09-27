@@ -207,6 +207,8 @@ Net::HostOutcome NetJob::outcomeFor(Task* task, TaskStepState state)
     auto* request = dynamic_cast<Net::NetRequest*>(task);
     if (!request)
         return Net::HostOutcome::Failure;
+    if (request->isStallFailure())
+        return Net::HostOutcome::Failure;
 
     // 429/503 is reported through NetRequest::rateLimited() the moment it is seen, so it is
     // deliberately not classified again here: doing both would penalise the host twice.

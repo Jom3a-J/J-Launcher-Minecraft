@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include <QHash>
+#include <QElapsedTimer>
 #include <QNetworkAccessManager>
 #include <QNetworkProxy>
 #include <QSignalSpy>
@@ -8,6 +9,7 @@
 #include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QVariant>
 
 #include <memory>
 
@@ -16,8 +18,23 @@
 #include "net/Download.h"
 #include "net/RawHeaderProxy.h"
 #include "net/NetUtils.h"
+#include "RangeHttpServer.h"
+#include "settings/SettingsObject.h"
 
 namespace {
+class StallTimeoutSetting final {
+   public:
+    explicit StallTimeoutSetting(double seconds)
+        : m_previous(APPLICATION->settings()->get("DownloadStallTimeout"))
+    {
+        APPLICATION->settings()->set("DownloadStallTimeout", seconds);
+    }
+    ~StallTimeoutSetting() { APPLICATION->settings()->set("DownloadStallTimeout", m_previous); }
+
+   private:
+    QVariant m_previous;
+};
+
 struct Response {
     int status = 200;
     QByteArray location;
@@ -293,6 +310,112 @@ class NetRequestTest final : public QObject
         QCOMPARE(failed.count(), 1);
         QVERIFY(request.failReason().contains(QStringLiteral("scheme transition")));
         QCOMPARE(origin.requestCount(), 1);
+    }
+
+    void stalledDownloadRetriesAndRestartsItsSink()
+    {
+        [[maybe_unused]] StallTimeoutSetting timeout(0.1);
+        RangeHttpServer server;
+        QVERIFY(server.start());
+        RangeHttpServer::Resource resource;
+        resource.body = "complete-content";
+        resource.stallAfter = 4;
+        resource.stallCount = 1;
+        server.serve("/stalled", resource);
+
+        QNetworkAccessManager network;
+        network.setProxy(QNetworkProxy::NoProxy);
+        TestDownload request(server.url("/stalled"));
+        request.setNetwork(&network);
+        QSignalSpy succeeded(&request, &Task::succeeded);
+        QSignalSpy finished(&request, &Task::finished);
+        request.start();
+
+        QTRY_VERIFY_WITH_TIMEOUT(finished.count() == 1, 5000);
+        QCOMPARE(succeeded.count(), 1);
+        QCOMPARE(*request.output(), QByteArrayLiteral("complete-content"));
+        QCOMPARE(server.requestCount(), 2);
+    }
+
+    void stalledFirstByteFailsAfterTwoFastRetries()
+    {
+        [[maybe_unused]] StallTimeoutSetting timeout(0.1);
+        RangeHttpServer server;
+        QVERIFY(server.start());
+        RangeHttpServer::Resource resource;
+        resource.body = "never sent";
+        resource.stallAfter = 0;
+        server.serve("/never", resource);
+
+        QNetworkAccessManager network;
+        network.setProxy(QNetworkProxy::NoProxy);
+        TestDownload request(server.url("/never"));
+        request.setNetwork(&network);
+        QSignalSpy failed(&request, &Task::failed);
+        QSignalSpy finished(&request, &Task::finished);
+        QElapsedTimer elapsed;
+        elapsed.start();
+        request.start();
+
+        QTRY_VERIFY_WITH_TIMEOUT(finished.count() == 1, 8000);
+        QVERIFY(failed.count() == 1);
+        QCOMPARE(server.requestCount(), 3);
+        QVERIFY2(elapsed.elapsed() >= 4000, "the stall retries did not include both backoffs");
+        QVERIFY2(elapsed.elapsed() < 7000, "the stall watchdog waited for the outer request timeout");
+    }
+
+    void abortDuringStallRetryBackoffFinishesPromptly()
+    {
+        [[maybe_unused]] StallTimeoutSetting timeout(0.1);
+        RangeHttpServer server;
+        QVERIFY(server.start());
+        RangeHttpServer::Resource resource;
+        resource.body = "never sent";
+        resource.stallAfter = 0;
+        server.serve("/abort-backoff", resource);
+
+        QNetworkAccessManager network;
+        network.setProxy(QNetworkProxy::NoProxy);
+        TestDownload request(server.url("/abort-backoff"));
+        request.setNetwork(&network);
+        QSignalSpy aborted(&request, &Task::aborted);
+        QSignalSpy finished(&request, &Task::finished);
+        request.start();
+        QTRY_VERIFY_WITH_TIMEOUT(server.requestCount() == 1, 1000);
+        QTest::qWait(200);
+
+        QElapsedTimer elapsed;
+        elapsed.start();
+        QVERIFY(request.abort());
+        QTRY_VERIFY_WITH_TIMEOUT(finished.count() == 1, 500);
+        QVERIFY(elapsed.elapsed() < 500);
+        QCOMPARE(aborted.count(), 1);
+        QCOMPARE(server.requestCount(), 1);
+    }
+
+    void zeroStallTimeoutDisablesWatchdog()
+    {
+        [[maybe_unused]] StallTimeoutSetting timeout(0.0);
+        RangeHttpServer server;
+        QVERIFY(server.start());
+        RangeHttpServer::Resource resource;
+        resource.body = "never sent";
+        resource.stallAfter = 0;
+        server.serve("/disabled", resource);
+
+        QNetworkAccessManager network;
+        network.setProxy(QNetworkProxy::NoProxy);
+        TestDownload request(server.url("/disabled"));
+        request.setNetwork(&network);
+        QSignalSpy aborted(&request, &Task::aborted);
+        QSignalSpy finished(&request, &Task::finished);
+        request.start();
+        QTRY_VERIFY_WITH_TIMEOUT(server.requestCount() == 1, 1000);
+        QTest::qWait(250);
+        QCOMPARE(server.requestCount(), 1);
+        QVERIFY(request.abort());
+        QTRY_VERIFY_WITH_TIMEOUT(finished.count() == 1, 500);
+        QCOMPARE(aborted.count(), 1);
     }
 };
 

@@ -29,6 +29,7 @@
 #include "Application.h"
 #include "FileSystem.h"
 #include "RangeHttpServer.h"
+#include "settings/SettingsObject.h"
 #include "net/ApiHeaderProxy.h"
 #include "net/ChecksumValidator.h"
 #include "net/HostScheduler.h"
@@ -40,6 +41,19 @@ using Net::HostScheduler;
 using Net::SegmentedDownload;
 
 namespace {
+
+class StallTimeoutSetting final {
+   public:
+    explicit StallTimeoutSetting(double seconds)
+        : m_previous(APPLICATION->settings()->get("DownloadStallTimeout"))
+    {
+        APPLICATION->settings()->set("DownloadStallTimeout", seconds);
+    }
+    ~StallTimeoutSetting() { APPLICATION->settings()->set("DownloadStallTimeout", m_previous); }
+
+   private:
+    QVariant m_previous;
+};
 
 /*! Big enough to be split.
  *
@@ -498,6 +512,47 @@ class SegmentedDownloadTest final : public QObject {
         }
         QVERIFY2(sawResume, "no request resumed from a non-zero offset");
         QCOMPARE(harness.scheduler()->outstandingPermits(), 0);
+        harness.settle(task);
+    }
+
+    void stalledMiddleSegmentRetriesFromItsCursor()
+    {
+        [[maybe_unused]] StallTimeoutSetting timeout(0.1);
+        const QByteArray body = makeBody(LargeSize, 0xCCCCCCCCu);
+        RangeHttpServer server;
+        QVERIFY(server.start());
+        Harness harness;
+        QVERIFY(harness.valid());
+
+        // Mirror startSegments(): the harness asks for 4 segments, bounded by the minimum segment
+        // size and by half of the host's ceiling. The second segment starts one share in.
+        const qint64 remaining = LargeSize - SegmentedDownload::DiscoveryChunk;
+        const qint64 segments = qMin<qint64>(qMin<qint64>(4, remaining / SegmentedDownload::MinSegmentSize),
+                                             qMax(1, harness.scheduler()->ceilingFor(server.url("/pack.zip")) / 2));
+        QVERIFY(segments >= 3);
+        auto resource = simpleResource(body);
+        resource.stallRangeStart = SegmentedDownload::DiscoveryChunk + remaining / segments;
+        resource.stallAfter = 4096;
+        resource.stallCount = 1;
+        server.serve("/pack.zip", resource);
+
+        auto task = harness.create(server.url("/pack.zip"));
+        QVERIFY(harness.run(task));
+        QVERIFY2(task->wasSuccessful(), qPrintable(task->failReason()));
+        QCOMPARE(readAll(harness.target()), body);
+
+        const QByteArray originalRange = "bytes=" + QByteArray::number(resource.stallRangeStart) + "-";
+        const QByteArray resumedRange = "bytes=" + QByteArray::number(resource.stallRangeStart + 4096) + "-";
+        int originalCount = 0;
+        int resumedCount = 0;
+        for (const auto& record : server.requests()) {
+            if (record.range.startsWith(originalRange))
+                originalCount++;
+            if (record.range.startsWith(resumedRange))
+                resumedCount++;
+        }
+        QCOMPARE(originalCount, 1);
+        QCOMPARE(resumedCount, 1);
         harness.settle(task);
     }
 

@@ -67,5 +67,6 @@ class Download : public NetRequest {
 
    protected:
     virtual QNetworkReply* getReply(QNetworkRequest&) override;
+    bool supportsDownloadStallRetry() const override { return true; }
 };
 }  // namespace Net

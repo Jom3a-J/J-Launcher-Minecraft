@@ -666,6 +666,7 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
         m_settings->registerSetting("NumberOfConcurrentDownloads", 6);
         m_settings->registerSetting("NumberOfManualRetries", 1);
         m_settings->registerSetting("RequestTimeout", 60);
+        m_settings->registerSetting("DownloadStallTimeout", 15.0);
         // Use separate HTTP/1 connections for known CurseForge file CDNs; keep this hidden for A/B testing.
         m_settings->registerSetting("CdnHttp1Connections", true);
         // Use HTTP/1 connections for Mojang file hosts; keep independent for provider A/B testing.

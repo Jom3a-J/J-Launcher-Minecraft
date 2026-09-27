@@ -98,6 +98,7 @@ class NetRequest : public Task {
     int replyStatusCode() const;
     QNetworkReply::NetworkError error() const;
     QString errorString() const;
+    bool isStallFailure() const { return m_stallFailure; }
     /*! Retry-After of the last reply, in seconds, or -1 when absent or unparsable. */
     qint64 retryAfterSeconds() const;
 
@@ -117,6 +118,10 @@ class NetRequest : public Task {
     auto handleRedirect() -> bool;
     void handleAutoRetry(int64_t delay);
     virtual QNetworkReply* getReply(QNetworkRequest&) = 0;
+    // Upload requests share this base class but must not use the download progress watchdog.
+    virtual bool supportsDownloadStallRetry() const { return false; }
+    void onStallTimeout();
+    void scheduleStallRetry();
 
    protected:
     /*! Publishes the most recent byte counts as progress and details, and restarts the throttle. */
@@ -161,6 +166,11 @@ class NetRequest : public Task {
     bool m_requestHadCredentials = false;
     bool m_latencyCritical = false;
     QTimer m_retryTimer;
+    QTimer m_stallTimer;
+    int m_stallRetryCount = 0;
+    int m_stallTimeoutMs = 0;
+    bool m_stallAbortPending = false;
+    bool m_stallFailure = false;
 
     /// Progress updates are coalesced to this rate; the final value is always published exactly.
     static constexpr int ProgressIntervalMs = 100;
