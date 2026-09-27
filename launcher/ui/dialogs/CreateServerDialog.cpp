@@ -67,6 +67,8 @@ void CreateServerDialog::setupUI()
     m_templateCombo->addItem(tr("Paper Performance"));
     m_templateCombo->addItem(tr("Fabric Modded"));
     m_templateCombo->addItem(tr("Forge Modded"));
+    m_templateCombo->addItem(tr("NeoForge Modded"));
+    m_templateCombo->addItem(tr("Purpur Performance"));
     generalForm->addRow(tr("Template:"), m_templateCombo);
 
     // Server Type
@@ -311,7 +313,9 @@ void CreateServerDialog::applyTemplate(int index)
         { "Vanilla Survival", "Vanilla" },
         { "Paper Performance", "Paper" },
         { "Fabric Modded", "Fabric" },
-        { "Forge Modded", "Forge" }
+        { "Forge Modded", "Forge" },
+        { "NeoForge Modded", "NeoForge" },
+        { "Purpur Performance", "Purpur" }
     };
     const Template &selected = templates[index - 1];
     m_typeCombo->setCurrentText(selected.type);

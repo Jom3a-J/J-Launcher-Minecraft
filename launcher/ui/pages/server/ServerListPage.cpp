@@ -537,16 +537,29 @@ ServerListPage::ServerListPage(QWidget *parent)
     emptyListHint->setAlignment(Qt::AlignCenter);
     applyMutedLabelPalette(emptyListHint);
     emptyListLayout->addWidget(emptyListHint);
+    auto *emptyListActions = new QHBoxLayout;
+    emptyListActions->setAlignment(Qt::AlignCenter);
     auto *emptyListCreateButton = new QPushButton(tr("Create Server"), m_emptyServerListWidget);
     emptyListCreateButton->setObjectName(QStringLiteral("emptyCreateServerButton"));
     emptyListCreateButton->setProperty("role", "primary");
     emptyListCreateButton->setIcon(launcherIcon("new", QStyle::SP_FileDialogNewFolder));
     emptyListCreateButton->setIconSize(QSize(20, 20));
-    emptyListCreateButton->setMinimumSize(132, 36);
-    emptyListLayout->addWidget(emptyListCreateButton, 0, Qt::AlignCenter);
+    emptyListActions->addWidget(emptyListCreateButton);
+    auto *emptyListCreateFromModpackButton = new QPushButton(tr("Create from Modpack"), m_emptyServerListWidget);
+    emptyListCreateFromModpackButton->setObjectName(QStringLiteral("emptyCreateFromModpackButton"));
+    emptyListCreateFromModpackButton->setIcon(launcherIcon("centralmods", QStyle::SP_FileDialogNewFolder));
+    emptyListCreateFromModpackButton->setIconSize(QSize(20, 20));
+    const QSize emptyListActionSize = emptyListCreateButton->sizeHint()
+                                         .expandedTo(emptyListCreateFromModpackButton->sizeHint())
+                                         .expandedTo(QSize(132, 36));
+    emptyListCreateButton->setFixedSize(emptyListActionSize);
+    emptyListCreateFromModpackButton->setFixedSize(emptyListActionSize);
+    emptyListActions->addWidget(emptyListCreateFromModpackButton);
+    emptyListLayout->addLayout(emptyListActions);
     emptyListLayout->addStretch();
     ui->serverListPanelLayout->addWidget(m_emptyServerListWidget, 1);
     connect(emptyListCreateButton, &QPushButton::clicked, this, &ServerListPage::onCreateServer);
+    connect(emptyListCreateFromModpackButton, &QPushButton::clicked, this, &ServerListPage::onInstallModpack);
 
     m_emptyDetailWidget = new QWidget(ui->serverDetailPanel);
     m_emptyDetailWidget->setObjectName("serverDetailEmptyState");
@@ -3728,10 +3741,14 @@ void ServerListPage::updateServerList()
     }
     if (auto *emptyHint = m_emptyServerListWidget->findChild<QLabel *>(QStringLiteral("emptyServerListHint"))) {
         emptyHint->setText(hasServers ? tr("Try a different name, version, or server type.")
-                                      : tr("Create a server to manage it from the launcher."));
+                                      : tr("Create a server, or build one from a modpack."));
     }
     if (auto *emptyCreate = m_emptyServerListWidget->findChild<QPushButton *>(QStringLiteral("emptyCreateServerButton"))) {
         emptyCreate->setVisible(!hasServers);
+    }
+    if (auto *emptyCreateFromModpack = m_emptyServerListWidget->findChild<QPushButton *>(
+            QStringLiteral("emptyCreateFromModpackButton"))) {
+        emptyCreateFromModpack->setVisible(!hasServers);
     }
     const bool hasVisibleServers = visible > 0;
     m_emptyServerListWidget->setVisible(!hasVisibleServers);
