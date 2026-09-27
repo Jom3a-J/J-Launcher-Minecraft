@@ -10,6 +10,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 
+#include <server/ServerDownloader.h>
 #include <server/ServerInstance.h>
 #include <server/ServerManager.h>
 #include <server/ServerMemory.h>
@@ -235,6 +236,33 @@ class ServerMemoryTest : public QObject {
         typeCombo->setCurrentText("Paper");
         QVERIFY(!dialog.isMemoryAutomatic());
         QCOMPARE(minSpin->value(), manualMin);
+    }
+
+    void createServerDialogListsEverySupportedType()
+    {
+        CreateServerDialog dialog;
+        auto* typeCombo = dialog.findChild<QComboBox*>("serverTypeCombo");
+        QVERIFY(typeCombo);
+
+        const QStringList supportedTypes = ServerDownloader::supportedTypes();
+        QCOMPARE(typeCombo->count(), supportedTypes.size());
+        for (const QString& type : supportedTypes) {
+            QVERIFY2(typeCombo->findText(type) >= 0, qPrintable(type));
+        }
+        QVERIFY(typeCombo->findText(QStringLiteral("NeoForge")) >= 0);
+    }
+
+    void neoForgeTemplateSelectsNeoForgeType()
+    {
+        CreateServerDialog dialog;
+        auto* templateCombo = dialog.findChild<QComboBox*>("serverTemplateCombo");
+        auto* typeCombo = dialog.findChild<QComboBox*>("serverTypeCombo");
+        QVERIFY(templateCombo && typeCombo);
+
+        const int templateIndex = templateCombo->findText(QStringLiteral("NeoForge Modded"));
+        QVERIFY(templateIndex >= 0);
+        templateCombo->setCurrentIndex(templateIndex);
+        QCOMPARE(typeCombo->currentText(), QStringLiteral("NeoForge"));
     }
 };
 
