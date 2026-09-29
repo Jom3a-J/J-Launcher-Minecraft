@@ -1,11 +1,14 @@
 #include <QLineEdit>
 #include <QComboBox>
+#include <QApplication>
 #include <QLabel>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QSignalSpy>
 #include <QSpinBox>
 #include <QTableWidget>
 #include <QTemporaryDir>
+#include <QTimer>
 #include <QtTest>
 
 #include "server/ServerInstance.h"
@@ -162,6 +165,38 @@ private slots:
         QCOMPARE(properties.value(QStringLiteral("server-port")), QStringLiteral("25591"));
         QCOMPARE(properties.value(QStringLiteral("motd")), QStringLiteral("Saved by J Launcher"));
         QCOMPARE(properties.value(QStringLiteral("difficulty")), QStringLiteral("hard"));
+    }
+
+    void rejectsMinimumMemoryAboveMaximumWithoutSaving()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        auto server = std::make_shared<ServerInstance>("memory-validation", "Memory validation");
+        server->setServerDirectory(root.filePath("server"));
+        server->setMinMemory(2048);
+        server->setMaxMemory(4096);
+        ServerSettingsPage page;
+        page.setServer(server);
+        auto *minMemoryInput = page.findChild<QSpinBox *>("minMemoryInput");
+        auto *maxMemoryInput = page.findChild<QSpinBox *>("maxMemoryInput");
+        auto *saveButton = page.findChild<QPushButton *>("saveChangesTopButton");
+        QVERIFY(minMemoryInput);
+        QVERIFY(maxMemoryInput);
+        QVERIFY(saveButton);
+        minMemoryInput->setValue(6144);
+        maxMemoryInput->setValue(4096);
+        QSignalSpy savedSpy(&page, &ServerSettingsPage::settingsSaved);
+        QTimer::singleShot(0, []() {
+            for (QWidget *widget : QApplication::topLevelWidgets()) {
+                if (auto *messageBox = qobject_cast<QMessageBox *>(widget)) {
+                    messageBox->accept();
+                }
+            }
+        });
+        QTest::mouseClick(saveButton, Qt::LeftButton);
+        QCOMPARE(savedSpy.count(), 0);
+        QCOMPARE(server->minMemory(), 2048);
+        QCOMPARE(server->maxMemory(), 4096);
     }
 };
 

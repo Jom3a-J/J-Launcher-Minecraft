@@ -89,6 +89,7 @@
 #include <QThread>
 #include <QTemporaryDir>
 #include <QProgressBar>
+#include <QProgressDialog>
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QScrollArea>
@@ -105,6 +106,7 @@
 #include <QSaveFile>
 #include <QSettings>
 #include <QSignalBlocker>
+#include <utility>
 #include <QFutureWatcher>
 #include <QtConcurrent/QtConcurrentRun>
 
@@ -302,64 +304,6 @@ QIcon serverFileIcon(const QFileInfo &file)
     return launcherIcon("notes", QStyle::SP_FileIcon);
 }
 
-QString structuredCrashDetails(const std::shared_ptr<ServerInstance> &server, const QString &message,
-                               const QString &rawLog)
-{
-    if (!server) return Privacy::sanitizeText(rawLog, 8192);
-    const QString loader = server->loaderVersion().isEmpty()
-        ? server->loaderType()
-        : server->loaderType() + " " + server->loaderVersion();
-    const QString serverContentDirectory = server->contentDirectory();
-    const QStringList content = serverContentDirectory.isEmpty()
-        ? QStringList()
-        : QDir(serverContentDirectory).entryList(
-              QStringList() << "*.jar" << "*.jar.disabled",
-              QDir::Files, QDir::Name | QDir::IgnoreCase);
-    QStringList finalLines;
-    const QStringList allLines = rawLog.split('\n', Qt::SkipEmptyParts);
-    for (int index = qMax(0, allLines.size() - 25); index < allLines.size(); ++index) {
-        finalLines << Privacy::sanitizeText(allLines.at(index), 8192);
-    }
-
-    QStringList report;
-    const QString relevantLine = Privacy::sanitizeText(
-        ServerDiagnostics::crashRelevantLine(rawLog), 1000);
-    report << QObject::tr("Crash summary")
-           << QObject::tr("Time: %1").arg(QDateTime::currentDateTime().toString(Qt::ISODate))
-           << QObject::tr("Message: %1").arg(Privacy::sanitizeText(message))
-           << QObject::tr("Likely cause: %1").arg(ServerDiagnostics::crashCauseExplanation(
-                  ServerDiagnostics::classifyCrash(rawLog)))
-           << QObject::tr("Reported error: %1").arg(relevantLine.isEmpty()
-                                                        ? QObject::tr("No specific error line was found.")
-                                                        : relevantLine)
-           << QObject::tr("Minecraft: %1").arg(server->version())
-           << QObject::tr("Server type: %1").arg(loader)
-           << QObject::tr("Java: %1").arg(server->javaPath().isEmpty()
-                                              ? QObject::tr("system default")
-                                              : Privacy::sanitizePath(server->javaPath()))
-           << QObject::tr("Memory: %1 MiB minimum / %2 MiB maximum").arg(server->minMemory()).arg(server->maxMemory())
-           << QObject::tr("Installed content (%1): %2").arg(content.size()).arg(content.isEmpty() ? QObject::tr("none") : content.join(", "))
-           << QString()
-           << QObject::tr("Final server log lines:")
-           << (finalLines.isEmpty() ? QObject::tr("No server output was captured.") : finalLines.join('\n'));
-    return report.join('\n');
-}
-
-QString crashSummary(const QString& message, const QString& rawLog)
-{
-    const QString relevantLine = Privacy::sanitizeText(
-        ServerDiagnostics::crashRelevantLine(rawLog), 1000);
-    QString summary = QObject::tr("%1 — %2\nLikely cause: %3")
-        .arg(QDateTime::currentDateTime().toString(Qt::ISODate),
-             Privacy::sanitizeText(message),
-             ServerDiagnostics::crashCauseExplanation(
-                  ServerDiagnostics::classifyCrash(rawLog)));
-    if (!relevantLine.isEmpty()) {
-        summary += QObject::tr("\nServer reported: %1").arg(relevantLine);
-    }
-    return summary;
-}
-
 QStringList modIdsFromJar(const QString& path)
 {
     QStringList identifiers;
@@ -461,7 +405,7 @@ void showServerFailureDialog(QWidget *parent,
     }
     explanation += QObject::tr("\n\nChoose Show Details to view the server version, Java runtime, installed content, and final log lines.");
     dialog.setInformativeText(explanation);
-    dialog.setDetailedText(structuredCrashDetails(server, message, rawLog));
+    dialog.setDetailedText(ServerDiagnostics::structuredCrashDetails(*server, message, rawLog));
     dialog.setStandardButtons(QMessageBox::Close);
     QAbstractButton *disableAndRetryButton = nullptr;
     if (!suspectFiles.isEmpty()) {
@@ -1350,6 +1294,17 @@ void ServerListPage::setServerManager(ServerManager *manager)
                 refreshOverview();
             }
         });
+        connect(m_serverManager, &ServerManager::serverDiagnosticsRecorded,
+                m_serverTrackingContext, [this](const QString &serverId) {
+            if (m_selectedServerId == serverId) refreshDiagnostics();
+        });
+        connect(m_serverManager, &ServerManager::playerHistoryRecorded,
+                m_serverTrackingContext, [this](const QString &serverId) {
+            if (m_selectedServerId == serverId
+                && ui->serverTabs->currentWidget() == m_playersTab) {
+                refreshPlayerList();
+            }
+        });
     }
     updateServerList();
     if (qEnvironmentVariableIsSet("JLAUNCHER_PROFILE_UI")) {
@@ -1362,27 +1317,6 @@ void ServerListPage::attachServerTracking(const std::shared_ptr<ServerInstance> 
 {
     if (!server || !m_serverTrackingContext) return;
     const QString serverId = server->id();
-    connect(server.get(), &ServerInstance::serverCrashed, m_serverTrackingContext,
-            [this, server, serverId](const QString &message, const QString &details) {
-        if (m_currentConnectedServer.get() == server.get()) return;
-        QSettings settings;
-        const QString prefix = QString("ServerDiagnostics/%1/").arg(serverId);
-        settings.setValue(prefix + "lastCrash", crashSummary(message, details));
-        settings.setValue(prefix + "details", structuredCrashDetails(server, message, details));
-        if (m_selectedServerId == serverId) refreshDiagnostics();
-    });
-    connect(server.get(), &ServerInstance::playerActivity, m_serverTrackingContext,
-            [this, serverId](const QString &player, bool joined) {
-        if (m_currentConnectedServer && m_currentConnectedServer->id() == serverId) return;
-        QSettings settings;
-        const QString key = QString("ServerPlayerHistory/%1/events").arg(serverId);
-        QStringList events = settings.value(key).toStringList();
-        events.append(QString("%1 - %2 %3").arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm"), player,
-            joined ? tr("joined") : tr("left")));
-        while (events.size() > 100) events.removeFirst();
-        settings.setValue(key, events);
-        if (m_selectedServerId == serverId) refreshPlayerList();
-    });
     connect(server.get(), &ServerInstance::serverSoftwareDownloadFinished,
             m_serverTrackingContext,
             [this, server, serverId](const QString &targetVersion, bool success,
@@ -1807,15 +1741,41 @@ void ServerListPage::onInstallModpack()
         }
     }
 
+    const ServerModpackProfile profile =
+        ServerModpackInstaller::profileFromInstanceRoot(stagingPath);
+    const QString gameRoot =
+        ServerModpackInstaller::gameRootForInstanceRoot(stagingPath);
+    const QString stagingParent = m_serverManager->serversRoot();
+    const QStringList knownClientOnlyHashes =
+        ServerModpackInstaller::knownClientOnlyHashes();
+    QProgressDialog preparationProgress(
+        tr("Preparing server files from %1...").arg(packName), QString(), 0, 0, this);
+    preparationProgress.setWindowTitle(tr("Creating Server"));
+    preparationProgress.setCancelButton(nullptr);
+    preparationProgress.setWindowModality(Qt::ApplicationModal);
+    preparationProgress.setMinimumDuration(0);
+    preparationProgress.show();
+
+    QFutureWatcher<PreparedServerModpack> watcher;
+    QEventLoop waitLoop;
+    connect(&watcher, &QFutureWatcher<PreparedServerModpack>::finished,
+            &waitLoop, &QEventLoop::quit);
+    watcher.setFuture(QtConcurrent::run(
+        [profile, stagingPath, gameRoot, stagingParent, selectedServerRoot,
+         knownClientOnlyHashes]() {
+            return ServerModpackInstaller::prepareMatchingServer(
+                profile, stagingPath, gameRoot, stagingParent, selectedServerRoot,
+                knownClientOnlyHashes);
+        }));
+    if (!watcher.isFinished()) {
+        waitLoop.exec();
+    }
+    PreparedServerModpack prepared = watcher.result();
     const ServerModpackInstallResult result =
-        ServerModpackInstaller::createMatchingServer(
-            m_serverManager,
-            ServerModpackInstaller::profileFromInstanceRoot(stagingPath),
-            stagingPath,
-            ServerModpackInstaller::gameRootForInstanceRoot(stagingPath),
-            packName + tr(" Server"),
-            stagedProviderRecommendation(stagingPath), 0,
-            selectedServerRoot);
+        ServerModpackInstaller::installPreparedServer(
+            m_serverManager, std::move(prepared), packName + tr(" Server"),
+            stagedProviderRecommendation(stagingPath), 0);
+    preparationProgress.close();
 
     // The staged pack has served its purpose either way: on success its files
     // are already copied into the server, on failure there is nothing to keep.
@@ -3354,28 +3314,11 @@ void ServerListPage::onServerSelectionChanged()
                     if (m_selectedServerId.isEmpty()) return;
                     const auto failedServer = m_currentConnectedServer;
                     const QString failedServerId = m_selectedServerId;
-                    QSettings settings;
-                    const QString prefix = QString("ServerDiagnostics/%1/").arg(m_selectedServerId);
-                    settings.setValue(prefix + "lastCrash", crashSummary(message, details));
-                    settings.setValue(prefix + "details", structuredCrashDetails(m_currentConnectedServer, message, details));
-                    refreshDiagnostics();
                     QTimer::singleShot(0, this,
                                        [this, failedServer, failedServerId, message, details]() {
                         if (!failedServer || m_selectedServerId != failedServerId) return;
                         showServerFailureDialog(this, failedServer, message, details);
                     });
-                });
-                connect(m_currentConnectedServer.get(), &ServerInstance::playerActivity, this,
-                        [this](const QString &player, bool joined) {
-                    if (m_selectedServerId.isEmpty()) return;
-                    QSettings settings;
-                    const QString key = QString("ServerPlayerHistory/%1/events").arg(m_selectedServerId);
-                    QStringList events = settings.value(key).toStringList();
-                    events.append(QString("%1 — %2 %3").arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm"), player,
-                        joined ? tr("joined") : tr("left")));
-                    while (events.size() > 100) events.removeFirst();
-                    settings.setValue(key, events);
-                    if (ui->serverTabs->currentWidget() == m_playersTab) refreshPlayerList();
                 });
             }
         }

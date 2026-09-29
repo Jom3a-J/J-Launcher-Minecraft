@@ -130,6 +130,8 @@ public:
     static bool isReadyOutput(const QString &line);
     static bool isPortAvailable(quint16 port);
     static bool isJavaMajorCompatible(int requiredVersion, int detectedVersion);
+    static int javaProbeCountForTesting();
+    static void clearJavaProbeCacheForTesting();
     static int recommendedJavaMajor(const QString &minecraftVersion,
                                     const QString &loaderType);
 

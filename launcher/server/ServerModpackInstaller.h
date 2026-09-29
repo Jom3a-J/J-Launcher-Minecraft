@@ -3,6 +3,7 @@
 #include <QString>
 #include <QStringList>
 #include <QtGlobal>
+#include <memory>
 
 class MinecraftInstance;
 class ServerInstance;
@@ -55,6 +56,19 @@ struct ServerModpackInstallResult {
     bool isValid() const { return !serverId.isEmpty() && error.isEmpty(); }
 };
 
+struct PreparedServerModpack {
+    ServerModpackInstallResult result;
+    QString dependencyWarning;
+    bool hasPublishedServerPack = false;
+    ServerModpackProfile profile;
+    QString instanceRoot;
+    QString gameRoot;
+    QString preparedDirectory;
+    std::shared_ptr<QString> stagingDirectoryOwner;
+
+    bool isReady() const { return result.error.isEmpty() && !preparedDirectory.isEmpty(); }
+};
+
 enum class ServerDependencyCheckState {
     Compatible,
     DefiniteFailure,
@@ -86,7 +100,10 @@ public:
                                const QString &destination, QStringList *skippedClientFiles,
                                QString *error, QStringList *warnings = nullptr,
                                const QString &publishedServerRoot = QString(),
-                               QStringList *missingRequiredFiles = nullptr);
+                               QStringList *missingRequiredFiles = nullptr,
+                               const QStringList &knownClientOnlyHashes = {},
+                               bool knownClientOnlyHashesProvided = false);
+    static QStringList knownClientOnlyHashes();
     static QStringList publishedServerRootChoices(const QString &instanceRoot);
     static ServerDependencyCheckResult checkServerDependencies(
         const QString &serverRoot, const QString &loaderType,
@@ -106,4 +123,13 @@ public:
         const QString &serverName, int providerRecommendationMiB = 0,
         quint64 totalRamMiB = 0,
         const QString &publishedServerRoot = QString());
+    static PreparedServerModpack prepareMatchingServer(
+        const ServerModpackProfile &profile, const QString &instanceRoot,
+        const QString &gameRoot, const QString &stagingParent,
+        const QString &publishedServerRoot = QString(),
+        const QStringList &knownClientOnlyHashes = {});
+    static ServerModpackInstallResult installPreparedServer(
+        ServerManager *manager, PreparedServerModpack prepared,
+        const QString &serverName, int providerRecommendationMiB = 0,
+        quint64 totalRamMiB = 0);
 };

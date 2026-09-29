@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include "ServerDiagnostics.h"
+#include "ServerInstance.h"
+#include "logs/Privacy.h"
 
+#include <QDateTime>
+#include <QDir>
+#include <QFileInfo>
 #include <QObject>
 #include <QRegularExpression>
 #include <QSet>
@@ -199,4 +204,61 @@ QStringList ServerDiagnostics::suspectedModIds(const QString& log)
     QStringList result(identifiers.cbegin(), identifiers.cend());
     result.sort(Qt::CaseInsensitive);
     return result;
+}
+
+QString ServerDiagnostics::crashSummary(const QString &message, const QString &rawLog)
+{
+    const QString relevantLine = Privacy::sanitizeText(
+        crashRelevantLine(rawLog), 1000);
+    QString summary = QObject::tr("%1 — %2\nLikely cause: %3")
+        .arg(QDateTime::currentDateTime().toString(Qt::ISODate),
+             Privacy::sanitizeText(message),
+             crashCauseExplanation(classifyCrash(rawLog)));
+    if (!relevantLine.isEmpty()) {
+        summary += QObject::tr("\nServer reported: %1").arg(relevantLine);
+    }
+    return summary;
+}
+
+QString ServerDiagnostics::structuredCrashDetails(const ServerInstance &server,
+                                                   const QString &message,
+                                                   const QString &rawLog)
+{
+    const QString loader = server.loaderVersion().isEmpty()
+        ? server.loaderType()
+        : server.loaderType() + " " + server.loaderVersion();
+    const QString serverContentDirectory = server.contentDirectory();
+    const QStringList content = serverContentDirectory.isEmpty()
+        ? QStringList()
+        : QDir(serverContentDirectory).entryList(
+              QStringList() << "*.jar" << "*.jar.disabled",
+              QDir::Files, QDir::Name | QDir::IgnoreCase);
+    QStringList finalLines;
+    const QStringList allLines = rawLog.split('\n', Qt::SkipEmptyParts);
+    for (int index = qMax(0, allLines.size() - 25); index < allLines.size(); ++index) {
+        finalLines << Privacy::sanitizeText(allLines.at(index), 8192);
+    }
+
+    QStringList report;
+    const QString relevantLine = Privacy::sanitizeText(crashRelevantLine(rawLog), 1000);
+    report << QObject::tr("Crash summary")
+           << QObject::tr("Time: %1").arg(QDateTime::currentDateTime().toString(Qt::ISODate))
+           << QObject::tr("Message: %1").arg(Privacy::sanitizeText(message))
+           << QObject::tr("Likely cause: %1").arg(crashCauseExplanation(classifyCrash(rawLog)))
+           << QObject::tr("Reported error: %1").arg(relevantLine.isEmpty()
+                  ? QObject::tr("No specific error line was found.") : relevantLine)
+           << QObject::tr("Minecraft: %1").arg(server.version())
+           << QObject::tr("Server type: %1").arg(loader)
+           << QObject::tr("Java: %1").arg(server.javaPath().isEmpty()
+                  ? QObject::tr("system default") : Privacy::sanitizePath(server.javaPath()))
+           << QObject::tr("Memory: %1 MiB minimum / %2 MiB maximum")
+                  .arg(server.minMemory()).arg(server.maxMemory())
+           << QObject::tr("Installed content (%1): %2")
+                  .arg(content.size()).arg(content.isEmpty()
+                      ? QObject::tr("none") : content.join(", "))
+           << QString()
+           << QObject::tr("Final server log lines:")
+           << (finalLines.isEmpty() ? QObject::tr("No server output was captured.")
+                                    : finalLines.join('\n'));
+    return report.join('\n');
 }

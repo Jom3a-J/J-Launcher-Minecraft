@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include <QDir>
+#include <QDirIterator>
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QFile>
@@ -14,6 +15,7 @@
 #include <QTcpServer>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QtConcurrent/QtConcurrentRun>
 #include <QUuid>
 #include <algorithm>
 #include <utility>
@@ -43,6 +45,23 @@ bool writeSyntheticJar(const QString& path)
         && archive.addFile("META-INF/MANIFEST.MF",
                            QByteArray("Main-Class: net.minecraft.bundler.Main\n"))
         && archive.close();
+}
+
+QString fakeMinecraftServerPath()
+{
+    return QDir(QCoreApplication::applicationDirPath()).filePath(
+#ifdef Q_OS_WIN
+        QStringLiteral("FakeMinecraftServer.exe")
+#else
+        QStringLiteral("FakeMinecraftServer")
+#endif
+    );
+}
+
+quint16 unusedPort()
+{
+    QTcpServer probe;
+    return probe.listen(QHostAddress::LocalHost, 0) ? probe.serverPort() : 0;
 }
 
 bool writeFabricModJar(const QString& path, const QString& id,
@@ -2389,6 +2408,25 @@ class ServerManagerTest : public QObject {
         QVERIFY(!reloaded.getServer(serverId));
     }
 
+    void permanentDeletionReleasesServerInstance()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        ServerManager manager(temporaryRoot.path());
+        std::weak_ptr<ServerInstance> weakServer;
+        QString serverId;
+        {
+            const auto server = manager.createServer("Released server", "1.21.8");
+            QVERIFY(server);
+            serverId = server->id();
+            weakServer = server;
+        }
+
+        QVERIFY(!weakServer.expired());
+        QVERIFY(manager.deleteServerPermanently(serverId));
+        QVERIFY(weakServer.expired());
+    }
+
     void stagesBackupRestoreAndCreatesSafetySnapshot()
     {
         QTemporaryDir temporaryRoot;
@@ -2616,6 +2654,166 @@ class ServerManagerTest : public QObject {
 
         settings.remove(prefix);
         settings.sync();
+    }
+
+    void recordsCrashAndPlayerHistoryWithoutServerWindow()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        struct ApplicationSettingsNames {
+            QString organization;
+            QString application;
+            ~ApplicationSettingsNames()
+            {
+                QCoreApplication::setOrganizationName(organization);
+                QCoreApplication::setApplicationName(application);
+            }
+        } previousNames{ QCoreApplication::organizationName(),
+                         QCoreApplication::applicationName() };
+        QCoreApplication::setOrganizationName(QStringLiteral("JLauncherServerRecordingTests"));
+        QCoreApplication::setApplicationName(QStringLiteral("ServerManager_%1")
+            .arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
+        struct SettingsCleanup {
+            QString diagnosticsPrefix;
+            QString historyPrefix;
+            ~SettingsCleanup()
+            {
+                QSettings settings;
+                settings.remove(diagnosticsPrefix);
+                settings.remove(historyPrefix);
+                settings.sync();
+            }
+        } cleanup;
+
+        const QByteArray priorJavaMajor = qgetenv("JLAUNCHER_FAKE_JAVA_MAJOR");
+        const bool hadJavaMajor = qEnvironmentVariableIsSet("JLAUNCHER_FAKE_JAVA_MAJOR");
+        qputenv("JLAUNCHER_FAKE_JAVA_MAJOR", "21");
+        struct JavaMajorCleanup {
+            QByteArray value;
+            bool wasSet = false;
+            ~JavaMajorCleanup()
+            {
+                if (wasSet) qputenv("JLAUNCHER_FAKE_JAVA_MAJOR", value);
+                else qunsetenv("JLAUNCHER_FAKE_JAVA_MAJOR");
+            }
+        } javaCleanup{ priorJavaMajor, hadJavaMajor };
+
+        ServerManager manager(temporaryRoot.path());
+        const auto server = manager.createServer("Recorded crash", "1.21.8");
+        QVERIFY(server);
+        server->setVersion("1.21.8");
+        server->setPort(unusedPort());
+        server->setEulaAccepted(true);
+        server->setMinMemory(1024);
+        server->setMaxMemory(2048);
+        server->setJavaPath(fakeMinecraftServerPath());
+        server->setExtraJvmArguments(QStringLiteral("-Dfake.crash-memory"));
+        QVERIFY(server->port() != 0);
+        QVERIFY(QFileInfo::exists(server->javaPath()));
+        QVERIFY(writeSyntheticJar(server->serverJarPath()));
+
+        cleanup.diagnosticsPrefix = QStringLiteral("ServerDiagnostics/%1/").arg(server->id());
+        cleanup.historyPrefix = QStringLiteral("ServerPlayerHistory/%1/").arg(server->id());
+        QSettings settings;
+        settings.remove(cleanup.diagnosticsPrefix);
+        settings.remove(cleanup.historyPrefix);
+        QSignalSpy crashRecorded(&manager, &ServerManager::serverDiagnosticsRecorded);
+        QSignalSpy playerRecorded(&manager, &ServerManager::playerHistoryRecorded);
+
+        QVERIFY(server->start());
+        QTRY_COMPARE_WITH_TIMEOUT(server->status(), ServerStatus::Error, 5000);
+        QCOMPARE(crashRecorded.size(), 1);
+        QVERIFY(settings.value(cleanup.diagnosticsPrefix + QStringLiteral("lastCrash"))
+                    .toString().contains(QStringLiteral("OutOfMemoryError")));
+
+        emit server->playerActivity(QStringLiteral("FixturePlayer"), true);
+        QCOMPARE(playerRecorded.size(), 1);
+        const QStringList events = settings.value(
+            cleanup.historyPrefix + QStringLiteral("events")).toStringList();
+        QCOMPARE(events.size(), 1);
+        QVERIFY(events.first().contains(QStringLiteral("FixturePlayer joined")));
+    }
+
+    void preparesModpackOnWorkerAndInstallsPreparedFiles()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QString instanceRoot = temporaryRoot.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(writeFile(QDir(gameRoot).filePath("config/server.toml"), "server-config"));
+        QVERIFY(writeFile(QDir(gameRoot).filePath("server.properties"), "motd=fixture"));
+        const ServerModpackProfile profile = ServerModpackInstaller::profileForVersions(
+            "1.21.1", "0.16.10", {}, {}, {});
+        QVERIFY(profile.isValid());
+
+        ServerManager manager(temporaryRoot.filePath("manager-data"));
+        const QString stagingRoot = manager.serversRoot();
+        const auto preparedFuture = QtConcurrent::run([=]() {
+            return ServerModpackInstaller::prepareMatchingServer(
+                profile, instanceRoot, gameRoot, stagingRoot);
+        });
+        PreparedServerModpack prepared = preparedFuture.result();
+        QVERIFY2(prepared.isReady(), qPrintable(prepared.result.error));
+        const auto installed = ServerModpackInstaller::installPreparedServer(
+            &manager, std::move(prepared), "Prepared server");
+        QVERIFY2(installed.isValid(), qPrintable(installed.error));
+
+        ServerManager synchronousManager(temporaryRoot.filePath("synchronous-data"));
+        const auto synchronous = ServerModpackInstaller::createMatchingServer(
+            &synchronousManager, profile, instanceRoot, gameRoot, "Synchronous server");
+        QVERIFY2(synchronous.isValid(), qPrintable(synchronous.error));
+        const QString installedRoot =
+            manager.getServer(installed.serverId)->serverDirectory();
+        const QString synchronousRoot =
+            synchronousManager.getServer(synchronous.serverId)->serverDirectory();
+        QStringList installedFiles;
+        QStringList synchronousFiles;
+        QDirIterator installedIterator(installedRoot, QDir::Files | QDir::NoDotAndDotDot,
+                                       QDirIterator::Subdirectories);
+        while (installedIterator.hasNext()) {
+            installedIterator.next();
+            installedFiles.append(QDir(installedRoot).relativeFilePath(
+                installedIterator.filePath()));
+        }
+        QDirIterator synchronousIterator(synchronousRoot, QDir::Files | QDir::NoDotAndDotDot,
+                                         QDirIterator::Subdirectories);
+        while (synchronousIterator.hasNext()) {
+            synchronousIterator.next();
+            synchronousFiles.append(QDir(synchronousRoot).relativeFilePath(
+                synchronousIterator.filePath()));
+        }
+        installedFiles.sort();
+        synchronousFiles.sort();
+        QCOMPARE(installedFiles, synchronousFiles);
+        for (const QString &relativePath : installedFiles) {
+            QFile installedFile(QDir(installedRoot).filePath(relativePath));
+            QFile synchronousFile(QDir(synchronousRoot).filePath(relativePath));
+            QVERIFY(installedFile.open(QIODevice::ReadOnly));
+            QVERIFY(synchronousFile.open(QIODevice::ReadOnly));
+            QCOMPARE(installedFile.readAll(), synchronousFile.readAll());
+        }
+    }
+
+    void failedPreparedInstallCleansPreparingDirectory()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QString instanceRoot = temporaryRoot.filePath("instance");
+        const QString gameRoot = QDir(instanceRoot).filePath("minecraft");
+        QVERIFY(writeFile(QDir(gameRoot).filePath("config/server.toml"), "server-config"));
+        const ServerModpackProfile profile = ServerModpackInstaller::profileForVersions(
+            "1.21.1", "0.16.10", {}, {}, {});
+        const QString stagingRoot = temporaryRoot.filePath("servers");
+        PreparedServerModpack prepared = ServerModpackInstaller::prepareMatchingServer(
+            profile, instanceRoot, gameRoot, stagingRoot);
+        QVERIFY2(prepared.isReady(), qPrintable(prepared.result.error));
+        QVERIFY(QFileInfo::exists(prepared.preparedDirectory));
+        const auto failed = ServerModpackInstaller::installPreparedServer(
+            nullptr, std::move(prepared), "No manager");
+        QVERIFY(!failed.isValid());
+        QCOMPARE(QDir(stagingRoot).entryList(
+                     QStringList{ QStringLiteral(".preparing-*") },
+                     QDir::Dirs | QDir::NoDotAndDotDot).size(), 0);
     }
 
     void prunesOnlyValidatedAutomaticBackups()

@@ -319,6 +319,11 @@ class ServerInstanceTest : public QObject {
     Q_OBJECT
 
    private slots:
+    void init()
+    {
+        ServerInstance::clearJavaProbeCacheForTesting();
+    }
+
     void classifiesServerHealthStatesAndThresholds()
     {
         ServerHealthInput input;
@@ -1581,6 +1586,45 @@ class ArgumentProbe {
         QCOMPARE(crashes.size(), 1);
         QVERIFY(crashes.first().at(0).toString().contains("exit code 1"));
         QVERIFY(crashes.first().at(1).toString().contains("OutOfMemoryError"));
+    }
+
+    void cachesJavaProbesUntilBinaryMetadataChanges()
+    {
+        ScopedEnvironmentVariable fakeJava("JLAUNCHER_FAKE_JAVA_MAJOR", "21");
+        ServerInstance::clearJavaProbeCacheForTesting();
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        ServerInstance server("java-probe-cache", "Java probe cache");
+        QVERIFY(prepareSyntheticServer(server, temporaryRoot.filePath("server")));
+        const QString javaPath = temporaryRoot.filePath(
+            QFileInfo(fakeMinecraftServerPath()).fileName());
+        QVERIFY(QFile::copy(fakeMinecraftServerPath(), javaPath));
+        server.setJavaPath(javaPath);
+
+        QVERIFY(server.start());
+        QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Running, 5000);
+        QVERIFY(server.stop());
+        QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Stopped, 5000);
+        const int firstProbeCount = ServerInstance::javaProbeCountForTesting();
+        QVERIFY(firstProbeCount > 0);
+
+        QVERIFY(server.start());
+        QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Running, 5000);
+        QVERIFY(server.stop());
+        QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Stopped, 5000);
+        QCOMPARE(ServerInstance::javaProbeCountForTesting(), firstProbeCount);
+
+        QFile javaBinary(javaPath);
+        QVERIFY(javaBinary.open(QIODevice::ReadWrite));
+        QVERIFY(javaBinary.setFileTime(QDateTime::currentDateTime().addSecs(120),
+                                       QFileDevice::FileModificationTime));
+        javaBinary.close();
+        QVERIFY(server.start());
+        QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Running, 5000);
+        QVERIFY(server.stop());
+        QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Stopped, 5000);
+        QVERIFY(ServerInstance::javaProbeCountForTesting() > firstProbeCount);
+        ServerInstance::clearJavaProbeCacheForTesting();
     }
 
     void reportsReadinessTimeoutAndStopsProcess()

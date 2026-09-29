@@ -41,6 +41,21 @@
 #include <QTcpSocket>
 #include <QTimer>
 #include <QProcessEnvironment>
+#include <QHash>
+#include <QMutex>
+#include <QMutexLocker>
+
+namespace {
+struct JavaProbeCacheEntry {
+    QDateTime lastModified;
+    qint64 size = -1;
+    int majorVersion = 0;
+};
+
+QMutex javaProbeCacheMutex;
+QHash<QString, JavaProbeCacheEntry> javaProbeCache;
+int javaProbeCount = 0;
+}
 
 ServerInstance::ServerInstance(const QString &id, const QString &name, QObject *parent)
     : QObject(parent)
@@ -974,19 +989,49 @@ int ServerInstance::recommendedJavaMajor(const QString &minecraftVersion,
 
 int ServerInstance::javaMajorVersion(const QString &path) const
 {
+    const QFileInfo fileInfo(path);
+    const QString absolutePath = fileInfo.absoluteFilePath();
+    const QDateTime lastModified = fileInfo.lastModified();
+    const qint64 size = fileInfo.size();
+    {
+        QMutexLocker locker(&javaProbeCacheMutex);
+        const auto cached = javaProbeCache.constFind(absolutePath);
+        if (cached != javaProbeCache.cend()
+            && cached->lastModified == lastModified && cached->size == size) {
+            return cached->majorVersion;
+        }
+        ++javaProbeCount;
+    }
     QProcess probe;
     probe.setProcessEnvironment(CleanEnviroment());
     probe.start(path, QStringList() << "-version");
-    if (!probe.waitForStarted(3000)) {
-        return 0;
+    int majorVersion = 0;
+    if (probe.waitForStarted(3000)) {
+        probe.waitForFinished(5000);
+        const QString output = QString::fromLocal8Bit(probe.readAllStandardOutput()) +
+                               QString::fromLocal8Bit(probe.readAllStandardError());
+        const QRegularExpressionMatch match =
+            QRegularExpression("version\\s+\\\"(?:1\\.)?(\\d+)").match(output);
+        majorVersion = match.hasMatch() ? match.captured(1).toInt() : 0;
     }
-    probe.waitForFinished(5000);
+    {
+        QMutexLocker locker(&javaProbeCacheMutex);
+        javaProbeCache.insert(absolutePath, { lastModified, size, majorVersion });
+    }
+    return majorVersion;
+}
 
-    const QString output = QString::fromLocal8Bit(probe.readAllStandardOutput()) +
-                           QString::fromLocal8Bit(probe.readAllStandardError());
-    const QRegularExpressionMatch match =
-        QRegularExpression("version\\s+\\\"(?:1\\.)?(\\d+)").match(output);
-    return match.hasMatch() ? match.captured(1).toInt() : 0;
+int ServerInstance::javaProbeCountForTesting()
+{
+    QMutexLocker locker(&javaProbeCacheMutex);
+    return javaProbeCount;
+}
+
+void ServerInstance::clearJavaProbeCacheForTesting()
+{
+    QMutexLocker locker(&javaProbeCacheMutex);
+    javaProbeCache.clear();
+    javaProbeCount = 0;
 }
 
 QString ServerInstance::compatibleJavaPath(int requiredVersion, int *detectedVersion) const

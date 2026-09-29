@@ -168,6 +168,11 @@ void ServerSettingsPage::onSave()
     if (!m_server) {
         return;
     }
+    if (ui->minMemoryInput->value() > ui->maxMemoryInput->value()) {
+        QMessageBox::warning(this, tr("Invalid Memory Settings"),
+                             tr("Minimum memory cannot be greater than maximum memory."));
+        return;
+    }
 
     if (saveServerProperties()) {
         saveSettings();

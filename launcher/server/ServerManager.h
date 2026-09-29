@@ -76,6 +76,7 @@ public:
     std::shared_ptr<ServerInstance> getServer(const QString &id) const;
     QList<std::shared_ptr<ServerInstance>> getAllServers() const;
     int serverCount() const { return m_servers.size(); }
+    QString serversRoot() const;
 
     // Save/Load
     bool save();
@@ -86,11 +87,14 @@ signals:
     void serverRemoved(const QString &id);
     void serverChanged(const QString &id);
     void automationRecorded(const QString &serverId);
+    void serverDiagnosticsRecorded(const QString &serverId);
+    void playerHistoryRecorded(const QString &serverId);
 
 private:
     QString generateId() const;
     void recordAutomation(const std::shared_ptr<ServerInstance> &server,
                           const QString &action, const QString &result);
+    void attachServerRecording(const std::shared_ptr<ServerInstance> &server);
 
     QString m_dataDir;
     QString m_serversFile;

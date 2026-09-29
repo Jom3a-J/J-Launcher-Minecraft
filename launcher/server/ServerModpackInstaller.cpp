@@ -28,6 +28,7 @@
 #include <QSet>
 #include <QSettings>
 #include <QTemporaryDir>
+#include <QUuid>
 
 #include <toml++/toml.h>
 
@@ -75,6 +76,16 @@ QString serverModpackFailureStageName(ServerModpackFailureStage stage)
 }
 
 namespace {
+struct PreparedDirectoryCleanup {
+    QString path;
+    ~PreparedDirectoryCleanup()
+    {
+        if (!path.isEmpty()) {
+            QDir(path).removeRecursively();
+        }
+    }
+};
+
 void recordServerModpackFailure(ServerModpackInstallResult *result,
                                 ServerModpackFailureCategory category,
                                 ServerModpackFailureStage stage,
@@ -1554,7 +1565,8 @@ void excludeClientOnlyMod(const QString &filename, QSet<QString> *excludedPaths,
 }
 
 void readDeclaredClientOnlyMods(const QString &gameRoot, QSet<QString> *excludedPaths,
-                                QStringList *skippedClientFiles)
+                                QStringList *skippedClientFiles,
+                                const QSet<QString> &knownClientOnlyHashes)
 {
     // New downloads use mods/.index. Prism-compatible legacy instances use
     // jarmods. Both describe files installed in the same minecraft/mods folder.
@@ -1582,8 +1594,8 @@ void readDeclaredClientOnlyMods(const QString &gameRoot, QSet<QString> *excluded
             QStringLiteral("mods/") + jar.fileName());
         if (!excludedPaths->contains(relativePath.toLower())
             && (jarDeclaresClientOnly(jar.absoluteFilePath())
-                || ServerModpackInstaller::isKnownClientOnlyFile(
-                    jar.absoluteFilePath()))) {
+                || knownClientOnlyHashes.contains(Hashing::hash(
+                       jar.absoluteFilePath(), Hashing::Algorithm::Sha256).toLower()))) {
             excludeClientOnlyMod(jar.fileName(), excludedPaths,
                                  skippedClientFiles);
         }
@@ -1964,7 +1976,9 @@ bool ServerModpackInstaller::prepareContent(const QString &instanceRoot,
                                             QStringList *skippedClientFiles,
                                             QString *error, QStringList *warnings,
                                             const QString &publishedServerRoot,
-                                            QStringList *missingRequiredFiles)
+                                            QStringList *missingRequiredFiles,
+                                            const QStringList &knownClientOnlyHashes,
+                                            bool knownClientOnlyHashesProvided)
 {
     if (missingRequiredFiles) missingRequiredFiles->clear();
     if (!QFileInfo(gameRoot).isDir()) {
@@ -2026,7 +2040,14 @@ bool ServerModpackInstaller::prepareContent(const QString &instanceRoot,
             &includedPaths, error, warnings)) {
         return false;
     }
-    readDeclaredClientOnlyMods(gameRoot, &excludedPaths, skippedClientFiles);
+    const QStringList effectiveKnownClientOnlyHashes = knownClientOnlyHashesProvided
+        ? knownClientOnlyHashes : ServerModpackInstaller::knownClientOnlyHashes();
+    QSet<QString> knownClientOnlyHashSet;
+    for (const QString &hash : effectiveKnownClientOnlyHashes) {
+        knownClientOnlyHashSet.insert(hash.toLower());
+    }
+    readDeclaredClientOnlyMods(gameRoot, &excludedPaths, skippedClientFiles,
+                               knownClientOnlyHashSet);
     readServerPairClientOnlyFiles(instanceRoot, &excludedPaths,
                                   skippedClientFiles);
 
@@ -2120,19 +2141,50 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
     const QString &serverName, int providerRecommendationMiB,
     quint64 totalRamMiB, const QString &publishedServerRoot)
 {
-    ServerModpackInstallResult result;
     if (!manager) {
+        ServerModpackInstallResult result;
         recordServerModpackFailure(
             &result, ServerModpackFailureCategory::LauncherInternal,
             ServerModpackFailureStage::ServerCreation,
             QObject::tr("The server manager is not available."));
         return result;
     }
+    PreparedServerModpack prepared = prepareMatchingServer(
+        profile, instanceRoot, gameRoot, manager->serversRoot(), publishedServerRoot,
+        knownClientOnlyHashes());
+    return installPreparedServer(manager, std::move(prepared), serverName,
+                                  providerRecommendationMiB, totalRamMiB);
+}
+
+QStringList ServerModpackInstaller::knownClientOnlyHashes()
+{
+    const QString prefix = QStringLiteral("ServerCompatibility/KnownClientOnlyHashes/");
+    QStringList hashes;
+    const QSettings settings;
+    for (const QString &key : settings.allKeys()) {
+        if (key.startsWith(prefix)) {
+            hashes.append(key.mid(prefix.size()).toLower());
+        }
+    }
+    return hashes;
+}
+
+PreparedServerModpack ServerModpackInstaller::prepareMatchingServer(
+    const ServerModpackProfile &profile, const QString &instanceRoot,
+    const QString &gameRoot, const QString &stagingParent,
+    const QString &publishedServerRoot,
+    const QStringList &knownClientOnlyHashes)
+{
+    PreparedServerModpack prepared;
+    prepared.profile = profile;
+    prepared.instanceRoot = instanceRoot;
+    prepared.gameRoot = gameRoot;
+    ServerModpackInstallResult &result = prepared.result;
     if (!profile.isValid()) {
         recordServerModpackFailure(
             &result, ServerModpackFailureCategory::InvalidProfile,
             ServerModpackFailureStage::ProfileInspection, profile.error);
-        return result;
+        return prepared;
     }
 
     const auto compatibility = evaluateServerPack(
@@ -2145,10 +2197,11 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
             &result, ServerModpackFailureCategory::CompatibilityMetadata,
             ServerModpackFailureStage::CompatibilityCheck,
             serverPackCompatibilityDescription(compatibility));
-        return result;
+        return prepared;
     }
 
     const bool hasPublishedServerPack = compatibility.hasDedicatedServerPack;
+    prepared.hasPublishedServerPack = hasPublishedServerPack;
     if (!hasPublishedServerPack) {
         result.warnings.append(
             compatibility.sideMetadataPresent
@@ -2204,13 +2257,33 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
         }
     }
 
-    QTemporaryDir staging;
+    if (!QDir().mkpath(stagingParent)) {
+        recordServerModpackFailure(
+            &result, ServerModpackFailureCategory::ContentProjection,
+            ServerModpackFailureStage::ContentPreparation,
+            QObject::tr("Could not prepare the modpack for the server."));
+        return prepared;
+    }
+    const QString stagingPath = QDir(stagingParent).filePath(
+        QStringLiteral(".preparing-%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
+    if (!QDir().mkpath(stagingPath)) {
+        recordServerModpackFailure(
+            &result, ServerModpackFailureCategory::ContentProjection,
+            ServerModpackFailureStage::ContentPreparation,
+            QObject::tr("Could not prepare the modpack for the server."));
+        return prepared;
+    }
+    prepared.stagingDirectoryOwner = std::shared_ptr<QString>(
+        new QString(stagingPath), [](QString *path) {
+            QDir(*path).removeRecursively();
+            delete path;
+        });
+    prepared.preparedDirectory = stagingPath;
     QString preparationError;
-    if (!staging.isValid()
-        || !prepareContent(instanceRoot, gameRoot, staging.path(),
+    if (!prepareContent(instanceRoot, gameRoot, stagingPath,
                            &result.skippedClientFiles, &preparationError,
                            &result.warnings, publishedServerRoot,
-                           &result.missingFiles)) {
+                           &result.missingFiles, knownClientOnlyHashes, true)) {
         if (preparationError.isEmpty()) {
             preparationError = QObject::tr("Could not prepare the modpack for the server.");
         }
@@ -2218,17 +2291,17 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
             &result, ServerModpackFailureCategory::ContentProjection,
             ServerModpackFailureStage::ContentPreparation,
             preparationError);
-        return result;
+        return prepared;
     }
-    if (!hasUsablePreparedContent(staging.path())) {
+    if (!hasUsablePreparedContent(stagingPath)) {
         recordServerModpackFailure(
             &result, ServerModpackFailureCategory::ContentProjection,
             ServerModpackFailureStage::ContentPreparation,
             QObject::tr("The modpack contains no usable server content to create."));
-        return result;
+        return prepared;
     }
     const ServerDependencyCheckResult dependencyCheck = checkServerDependencies(
-        staging.path(), profile.loaderType, profile.minecraftVersion,
+        stagingPath, profile.loaderType, profile.minecraftVersion,
         profile.loaderVersion);
     result.missingDependencyIds = dependencyCheck.missingDependencyIds;
     for (const QString &warning : dependencyCheck.warnings) {
@@ -2241,7 +2314,7 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
                 &result, ServerModpackFailureCategory::DependencyIncompatibility,
                 ServerModpackFailureStage::DependencyValidation,
                 dependencyCheck.error);
-            return result;
+            return prepared;
         }
         if (!dependencyCheck.error.isEmpty()) {
             result.dependencyRequirements.append(dependencyCheck.error);
@@ -2264,6 +2337,43 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
         }
     }
 
+    prepared.dependencyWarning = dependencyWarning;
+    return prepared;
+}
+
+ServerModpackInstallResult ServerModpackInstaller::installPreparedServer(
+    ServerManager *manager, PreparedServerModpack prepared,
+    const QString &serverName, int providerRecommendationMiB,
+    quint64 totalRamMiB)
+{
+    const PreparedDirectoryCleanup cleanup{ prepared.preparedDirectory };
+    Q_UNUSED(cleanup);
+    if (!prepared.result.error.isEmpty()) {
+        return std::move(prepared.result);
+    }
+    if (!manager) {
+        ServerModpackInstallResult result = std::move(prepared.result);
+        recordServerModpackFailure(
+            &result, ServerModpackFailureCategory::LauncherInternal,
+            ServerModpackFailureStage::ServerCreation,
+            QObject::tr("The server manager is not available."));
+        return result;
+    }
+    if (!prepared.isReady()) {
+        ServerModpackInstallResult result = std::move(prepared.result);
+        recordServerModpackFailure(
+            &result, ServerModpackFailureCategory::LauncherInternal,
+            ServerModpackFailureStage::ServerCreation,
+            QObject::tr("The prepared server content is not available."));
+        return result;
+    }
+    ServerModpackInstallResult result = std::move(prepared.result);
+    const ServerModpackProfile &profile = prepared.profile;
+    const QString &instanceRoot = prepared.instanceRoot;
+    const QString &gameRoot = prepared.gameRoot;
+    const bool hasPublishedServerPack = prepared.hasPublishedServerPack;
+    const QString &dependencyWarning = prepared.dependencyWarning;
+
     const auto server = manager->createServer(
         serverName.trimmed(),
         profile.minecraftVersion, profile.loaderType, profile.loaderVersion);
@@ -2276,8 +2386,12 @@ ServerModpackInstallResult ServerModpackInstaller::createMatchingServer(
     }
 
     QString installationError;
-    if (!copyDirectoryContents(staging.path(), server->serverDirectory(),
-                               &installationError)) {
+    QDir(server->serverDirectory()).removeRecursively();
+    const bool moved = QDir().rename(prepared.preparedDirectory,
+                                     server->serverDirectory());
+    if (!moved && !copyDirectoryContents(prepared.preparedDirectory,
+                                         server->serverDirectory(),
+                                         &installationError)) {
         manager->deleteServer(server->id());
         recordServerModpackFailure(
             &result, ServerModpackFailureCategory::ContentProjection,

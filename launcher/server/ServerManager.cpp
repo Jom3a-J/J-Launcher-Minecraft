@@ -15,6 +15,7 @@
 
 #include "ServerManager.h"
 #include "ServerInstance.h"
+#include "ServerDiagnostics.h"
 #include "FileSystem.h"
 #include <QFile>
 #include <QDir>
@@ -502,6 +503,7 @@ std::shared_ptr<ServerInstance> ServerManager::createServer(const QString &name,
     QDir().mkpath(serverDir);
 
     m_servers[id] = server;
+    attachServerRecording(server);
     save();
 
     emit serverAdded(id);
@@ -606,6 +608,7 @@ bool ServerManager::restoreLastDeletedServer(QString *restoredId)
 
     item.server->setServerDirectory(targetPath);
     m_servers.insert(item.id, item.server);
+    attachServerRecording(item.server);
     if (!save()) {
         m_servers.remove(item.id);
         if (!item.trashPath.isEmpty()) {
@@ -902,10 +905,49 @@ bool ServerManager::load()
         auto server = ServerInstance::fromJson(serverJson, m_dataDir);
         if (server) {
             m_servers[server->id()] = server;
+            attachServerRecording(server);
         }
     }
 
     return true;
+}
+
+QString ServerManager::serversRoot() const
+{
+    return QDir(m_dataDir).filePath(QStringLiteral("servers"));
+}
+
+void ServerManager::attachServerRecording(const std::shared_ptr<ServerInstance> &server)
+{
+    if (!server || server->property("serverManagerRecordingAttached").toBool()) {
+        return;
+    }
+    server->setProperty("serverManagerRecordingAttached", true);
+    ServerInstance *instance = server.get();
+    connect(server.get(), &ServerInstance::serverCrashed, this,
+            [this, instance](const QString &message, const QString &details) {
+        const QString prefix = QStringLiteral("ServerDiagnostics/%1/").arg(instance->id());
+        QSettings settings;
+        settings.setValue(prefix + QStringLiteral("lastCrash"),
+                          ServerDiagnostics::crashSummary(message, details));
+        settings.setValue(prefix + QStringLiteral("details"),
+                          ServerDiagnostics::structuredCrashDetails(*instance, message, details));
+        emit serverDiagnosticsRecorded(instance->id());
+    });
+    connect(server.get(), &ServerInstance::playerActivity, this,
+            [this, instance](const QString &player, bool joined) {
+        QSettings settings;
+        const QString key = QStringLiteral("ServerPlayerHistory/%1/events").arg(instance->id());
+        QStringList events = settings.value(key).toStringList();
+        events.append(QStringLiteral("%1 — %2 %3")
+            .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm")),
+                 player, joined ? tr("joined") : tr("left")));
+        while (events.size() > 100) {
+            events.removeFirst();
+        }
+        settings.setValue(key, events);
+        emit playerHistoryRecorded(instance->id());
+    });
 }
 
 QString ServerManager::generateId() const
