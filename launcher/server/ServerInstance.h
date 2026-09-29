@@ -95,6 +95,8 @@ public:
     bool start();
     bool stop();
     bool restart();
+    void requestShutdownForExit();
+    bool waitForShutdown(int timeoutMs);
     bool isRunning() const;
     bool prepareServerSoftware();
     bool hasInstalledLaunchTarget() const { return hasLaunchTarget(); }
@@ -168,6 +170,8 @@ private slots:
 
 private:
     void setStatus(ServerStatus status);
+    void scheduleStopEscalation(int graceMs);
+    void forceKillProcessTree();
     bool createServerProperties();
     void syncPortFromServerProperties();
     bool acceptEULA();
@@ -205,6 +209,7 @@ private:
     ServerStatus m_status = ServerStatus::Stopped;
 
     std::unique_ptr<QProcess> m_process;
+    quint64 m_processGeneration = 0;
     ServerDownloader *m_downloader = nullptr;
     std::shared_ptr<const ServerProviderEndpoints> m_providerEndpoints;
     Task::Ptr m_javaInstallTask;

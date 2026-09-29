@@ -1206,6 +1206,9 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
 #endif
 
     connect(this, &Application::aboutToQuit, this, [this]() {
+        if (m_serverManager) {
+            m_serverManager->shutdownAllServers();
+        }
         if (m_instances) {
             // save any remaining instance state
             m_instances->saveNow();

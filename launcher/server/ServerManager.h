@@ -55,6 +55,7 @@ public:
                                                  const QString &loaderVersion = QString());
     bool deleteServer(const QString &id);
     bool deleteServerPermanently(const QString &id);
+    void shutdownAllServers();
     bool hasDeletedServer() const { return !m_trashHistory.isEmpty(); }
     bool restoreLastDeletedServer(QString *restoredId = nullptr);
     bool createServerBackup(const QString &id, const QString &requestedName,

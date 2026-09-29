@@ -2500,6 +2500,37 @@ class ServerManagerTest : public QObject {
         QVERIFY(!backups.first().validationError.isEmpty());
     }
 
+    void restoreRollsBackWhenClearingFails()
+    {
+#ifndef Q_OS_WIN
+        QSKIP("Locked-file deletion behavior is Windows-specific.");
+#endif
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        ServerManager manager(temporaryRoot.path());
+        const auto server = manager.createServer("Locked restore server", "1.21.8");
+        QVERIFY(server);
+        const QDir serverDirectory(server->serverDirectory());
+        QVERIFY(writeFile(serverDirectory.filePath("a-world/level.dat"), "original world"));
+        QVERIFY(writeFile(serverDirectory.filePath("z-locked.txt"), "locked original"));
+
+        QString error;
+        ServerBackupInfo backup;
+        QVERIFY2(manager.createServerBackup(server->id(), "Restore source", &backup, &error),
+                 qPrintable(error));
+        QVERIFY(backup.valid);
+
+        QFile lockedFile(serverDirectory.filePath("z-locked.txt"));
+        QVERIFY(lockedFile.open(QIODevice::ReadOnly));
+        QVERIFY(!manager.restoreServerBackup(server->id(), backup.path, &error));
+        QVERIFY(error.contains("automatic", Qt::CaseInsensitive));
+        QVERIFY(error.contains("backup", Qt::CaseInsensitive));
+        QFile restoredWorld(serverDirectory.filePath("a-world/level.dat"));
+        QVERIFY(restoredWorld.open(QIODevice::ReadOnly));
+        QCOMPARE(restoredWorld.readAll(), QByteArray("original world"));
+        lockedFile.close();
+    }
+
     void prunesOnlyValidatedAutomaticBackups()
     {
         QTemporaryDir temporaryRoot;

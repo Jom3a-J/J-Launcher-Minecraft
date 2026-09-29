@@ -40,6 +40,7 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTimer>
+#include <QProcessEnvironment>
 
 ServerInstance::ServerInstance(const QString &id, const QString &name, QObject *parent)
     : QObject(parent)
@@ -60,14 +61,12 @@ ServerInstance::ServerInstance(const QString &id, const QString &name, QObject *
         emit errorReceived(message);
         emit serverError(message);
         emit serverCrashed(message, m_consoleLog.right(6000));
-        setStatus(ServerStatus::Error);
         if (m_process && m_process->state() != QProcess::NotRunning) {
-            m_process->write("stop\n");
-            QTimer::singleShot(5000, this, [this]() {
-                if (m_process && m_process->state() != QProcess::NotRunning) {
-                    m_process->terminate();
-                }
-            });
+            setStatus(ServerStatus::Stopping);
+            writeStdin(QStringLiteral("stop"));
+            scheduleStopEscalation(5000);
+        } else {
+            setStatus(ServerStatus::Error);
         }
     });
 }
@@ -82,9 +81,14 @@ ServerInstance::ServerInstance(const QString &id, const QString &name,
 
 ServerInstance::~ServerInstance()
 {
-    if (m_process && m_process->state() != QProcess::NotRunning) {
-        m_process->terminate();
-        m_process->waitForFinished(5000);
+    if (m_process) {
+        m_process->disconnect(this);
+        if (m_process->state() != QProcess::NotRunning) {
+            if (m_status != ServerStatus::Stopping) {
+                writeStdin(QStringLiteral("stop"));
+            }
+            waitForShutdown(m_gracefulStopTimeoutSeconds * 1000);
+        }
     }
 }
 
@@ -305,6 +309,7 @@ bool ServerInstance::start()
     // with the required module and argument-file setup, so launching a JAR
     // directly is not reliable for those server types.
     m_process.reset(new QProcess());
+    ++m_processGeneration;
     connect(m_process.get(), &QProcess::started, this, &ServerInstance::onProcessStarted);
     connect(m_process.get(), &QProcess::readyReadStandardOutput, this, &ServerInstance::onProcessReadyReadStandardOutput);
     connect(m_process.get(), &QProcess::readyReadStandardError, this, &ServerInstance::onProcessReadyReadStandardError);
@@ -457,24 +462,86 @@ bool ServerInstance::stop()
 
     setStatus(ServerStatus::Stopping);
 
-    // Request a clean shutdown without blocking the launcher UI. If the
-    // process ignores the command, terminate it after a grace period.
+    // Request a clean shutdown without blocking the launcher UI.
     if (m_process && m_process->state() != QProcess::NotRunning) {
-        m_process->write("stop\n");
-        const int gracePeriodMs = m_gracefulStopTimeoutSeconds * 1000;
-        QTimer::singleShot(gracePeriodMs, this, [this]() {
-            if (m_process && m_process->state() != QProcess::NotRunning) {
-                m_process->terminate();
-                QTimer::singleShot(5000, this, [this]() {
-                    if (m_process && m_process->state() != QProcess::NotRunning) {
-                        m_process->kill();
-                    }
-                });
-            }
-        });
+        writeStdin(QStringLiteral("stop"));
+        scheduleStopEscalation(m_gracefulStopTimeoutSeconds * 1000);
     }
 
     return true;
+}
+
+void ServerInstance::requestShutdownForExit()
+{
+    if (m_status == ServerStatus::Downloading) {
+        cancelDownload();
+    }
+    if (m_process && m_process->state() != QProcess::NotRunning
+        && m_status != ServerStatus::Stopping) {
+        setStatus(ServerStatus::Stopping);
+        writeStdin(QStringLiteral("stop"));
+        appendLog(tr("[INFO] Stopping server because J Launcher is closing."));
+    }
+}
+
+bool ServerInstance::waitForShutdown(int timeoutMs)
+{
+    if (!m_process || m_process->state() == QProcess::NotRunning) {
+        return true;
+    }
+    m_process->waitForFinished(qMax(0, timeoutMs));
+    if (m_process->state() != QProcess::NotRunning) {
+        forceKillProcessTree();
+        m_process->waitForFinished(5000);
+    }
+    return m_process->state() == QProcess::NotRunning;
+}
+
+void ServerInstance::scheduleStopEscalation(int graceMs)
+{
+    const quint64 generation = m_processGeneration;
+    QTimer::singleShot(graceMs, this, [this, generation]() {
+        if (generation != m_processGeneration || !m_process
+            || m_process->state() == QProcess::NotRunning) {
+            return;
+        }
+        m_process->terminate();
+        QTimer::singleShot(5000, this, [this, generation]() {
+            if (generation == m_processGeneration && m_process
+                && m_process->state() != QProcess::NotRunning) {
+                forceKillProcessTree();
+            }
+        });
+    });
+}
+
+void ServerInstance::forceKillProcessTree()
+{
+    if (!m_process || m_process->state() == QProcess::NotRunning) {
+        return;
+    }
+#ifdef Q_OS_WIN
+    const QString systemRoot = qEnvironmentVariable("SystemRoot");
+    QString taskkillPath;
+    if (!systemRoot.isEmpty()) {
+        taskkillPath = QDir(systemRoot).filePath(QStringLiteral("System32/taskkill.exe"));
+        if (!QFileInfo::exists(taskkillPath)) {
+            taskkillPath.clear();
+        }
+    }
+    if (taskkillPath.isEmpty()) {
+        taskkillPath = QStandardPaths::findExecutable(QStringLiteral("taskkill"));
+    }
+    const qint64 pid = m_process->processId();
+    if (!taskkillPath.isEmpty() && pid > 0) {
+        QProcess taskkill;
+        taskkill.start(taskkillPath,
+                       { QStringLiteral("/PID"), QString::number(pid),
+                         QStringLiteral("/T"), QStringLiteral("/F") });
+        taskkill.waitForFinished(5000);
+    }
+#endif
+    m_process->kill();
 }
 
 bool ServerInstance::restart()
@@ -1331,7 +1398,8 @@ void ServerInstance::onProcessFinished(int exitCode, QProcess::ExitStatus exitSt
     const bool keepErrorState = m_status == ServerStatus::Error;
     const bool abnormalExit = exitStatus == QProcess::CrashExit || exitCode != 0;
     m_startedAt = QDateTime();
-    setStatus(expectedStop || restart ? ServerStatus::Stopped
+    setStatus(m_startupTimedOut ? ServerStatus::Error
+             : expectedStop || restart ? ServerStatus::Stopped
                                      : (exitedBeforeReady || keepErrorState || abnormalExit
                                             ? ServerStatus::Error
                                             : ServerStatus::Stopped));

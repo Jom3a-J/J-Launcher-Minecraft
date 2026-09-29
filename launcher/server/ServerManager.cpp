@@ -28,6 +28,7 @@
 #include <QTemporaryDir>
 #include <QUuid>
 #include <QDateTime>
+#include <QDeadlineTimer>
 #include <QLocale>
 #include <algorithm>
 
@@ -36,7 +37,8 @@ const QString BACKUP_MANIFEST = QStringLiteral(".jlauncher-backup.json");
 constexpr int BACKUP_FORMAT_VERSION = 1;
 
 bool copyDirectoryContents(const QString &sourcePath, const QString &destinationPath,
-                           QString *error, const QSet<QString> &excludedTopLevels = {})
+                           QString *error, const QSet<QString> &excludedTopLevels = {},
+                           bool skipExistingFiles = false)
 {
     const QDir source(sourcePath);
     if (!source.exists() || !QDir().mkpath(destinationPath)) {
@@ -67,10 +69,14 @@ bool copyDirectoryContents(const QString &sourcePath, const QString &destination
         }
         const QString destination = QDir(destinationPath).filePath(entry.fileName());
         if (entry.isDir()) {
-            if (!copyDirectoryContents(entry.absoluteFilePath(), destination, error)) {
+            if (!copyDirectoryContents(entry.absoluteFilePath(), destination, error,
+                                       {}, skipExistingFiles)) {
                 return false;
             }
         } else if (entry.isFile()) {
+            if (skipExistingFiles && QFileInfo::exists(destination)) {
+                continue;
+            }
             if (QFileInfo::exists(destination) && !QFile::remove(destination)) {
                 if (error) {
                     *error = QObject::tr("Could not replace %1.").arg(entry.fileName());
@@ -342,6 +348,29 @@ ServerManager::~ServerManager()
     save();
 }
 
+void ServerManager::shutdownAllServers()
+{
+    const QList<std::shared_ptr<ServerInstance>> servers = getAllServers();
+    int largestGracefulTimeoutSeconds = 0;
+    for (const auto &server : servers) {
+        if (server->status() == ServerStatus::Running
+            || server->status() == ServerStatus::Starting
+            || server->status() == ServerStatus::Stopping) {
+            largestGracefulTimeoutSeconds =
+                qMax(largestGracefulTimeoutSeconds, server->gracefulStopTimeoutSeconds());
+        }
+    }
+    for (const auto &server : servers) {
+        server->requestShutdownForExit();
+    }
+
+    QDeadlineTimer deadline(largestGracefulTimeoutSeconds * 1000);
+    for (const auto &server : servers) {
+        const qint64 remainingTime = qMax<qint64>(0, deadline.remainingTime());
+        server->waitForShutdown(static_cast<int>(remainingTime));
+    }
+}
+
 std::shared_ptr<ServerInstance> ServerManager::createServer(const QString &name, const QString &version,
                                                            const QString &loaderType,
                                                            const QString &loaderVersion)
@@ -571,6 +600,16 @@ bool ServerManager::restoreServerBackup(const QString &id, const QString &backup
     }
 
     if (!clearServerContents(serverDirectory, error)) {
+        QString rollbackError;
+        if (copyDirectoryContents(rollbackBackup.path, serverDirectory, &rollbackError,
+                                  { BACKUP_MANIFEST }, true)) {
+            if (error) {
+                *error += tr(" The previous server files were restored from the automatic '%1' backup.")
+                              .arg(rollbackName);
+            }
+        } else if (error) {
+            *error += tr(" Automatic rollback also failed: %1").arg(rollbackError);
+        }
         return false;
     }
     if (!copyDirectoryContents(stagedReplacement, serverDirectory, error)) {

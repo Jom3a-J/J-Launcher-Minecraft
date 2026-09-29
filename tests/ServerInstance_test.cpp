@@ -1459,6 +1459,78 @@ class ArgumentProbe {
         QTRY_COMPARE_WITH_TIMEOUT(server.processId(), qint64(0), 5000);
     }
 
+    void restartDoesNotKillTheNewProcess()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        ServerInstance server("restart-generation", "Restart generation");
+        QVERIFY(prepareSyntheticServer(server, temporaryRoot.filePath("server")));
+        // The shortest grace period puts the stale kill() 10 s after the stop,
+        // inside the wait below.
+        server.setGracefulStopTimeoutSeconds(5);
+
+        QVERIFY(server.start());
+        QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Running, 5000);
+        QVERIFY(server.restart());
+        QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Running, 5000);
+        const qint64 restartedProcessId = server.processId();
+        QVERIFY(restartedProcessId > 0);
+        QTest::qWait(11000);
+        QCOMPARE(server.status(), ServerStatus::Running);
+        QCOMPARE(server.processId(), restartedProcessId);
+
+        QVERIFY(server.stop());
+        QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Stopped, 5000);
+    }
+
+    void startupTimeoutKillsAServerThatIgnoresStop()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        ServerInstance server("startup-timeout-ignore-stop", "Startup timeout ignore stop");
+        QVERIFY(prepareSyntheticServer(server, temporaryRoot.filePath("server"),
+                                       "-Dfake.no-ready -Dfake.ignore-stop"));
+        server.setStartupTimeoutSeconds(1);
+
+        QVERIFY(server.start());
+        QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Stopping, 5000);
+        QVERIFY(server.processId() > 0);
+        QVERIFY(!server.start());
+        QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Error, 15000);
+        QTRY_COMPARE_WITH_TIMEOUT(server.processId(), qint64(0), 5000);
+    }
+
+    void shutdownForExitSendsStopAndWaits()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        ServerInstance server("shutdown-for-exit", "Shutdown for exit");
+        QVERIFY(prepareSyntheticServer(server, temporaryRoot.filePath("server")));
+
+        QVERIFY(server.start());
+        QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Running, 5000);
+        server.requestShutdownForExit();
+        QVERIFY(server.waitForShutdown(10000));
+        QCOMPARE(server.processId(), qint64(0));
+        QVERIFY(server.consoleLog().contains("[Server thread/INFO]: Stopping server"));
+        QVERIFY(server.consoleLog().contains("Stopping server because J Launcher is closing."));
+    }
+
+    void shutdownForExitForcesAProcessThatIgnoresStop()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        ServerInstance server("shutdown-for-exit-ignore-stop", "Shutdown ignore stop");
+        QVERIFY(prepareSyntheticServer(server, temporaryRoot.filePath("server"),
+                                       "-Dfake.ignore-stop"));
+
+        QVERIFY(server.start());
+        QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Running, 5000);
+        server.requestShutdownForExit();
+        QVERIFY(server.waitForShutdown(1000));
+        QCOMPARE(server.processId(), qint64(0));
+    }
+
     void reportsIncompatibleJavaRequirement()
     {
         QTemporaryDir temporaryRoot;
