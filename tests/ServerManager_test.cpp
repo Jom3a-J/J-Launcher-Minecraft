@@ -10,9 +10,11 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSettings>
+#include <QSignalSpy>
 #include <QTcpServer>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QUuid>
 #include <algorithm>
 #include <utility>
 
@@ -2529,6 +2531,91 @@ class ServerManagerTest : public QObject {
         QVERIFY(restoredWorld.open(QIODevice::ReadOnly));
         QCOMPARE(restoredWorld.readAll(), QByteArray("original world"));
         lockedFile.close();
+    }
+
+    void restoreResynchronizesServerPort()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        ServerManager manager(temporaryRoot.path());
+        const auto server = manager.createServer("Port restore server", "1.21.8");
+        QVERIFY(server);
+        QVERIFY(writeFile(server->serverPropertiesPath(), "server-port=25570\n"));
+        server->syncPortFromServerProperties();
+        QCOMPARE(server->port(), 25570);
+
+        QString error;
+        ServerBackupInfo backup;
+        QVERIFY2(manager.createServerBackup(server->id(), "Port checkpoint", &backup, &error),
+                 qPrintable(error));
+        QVERIFY(backup.valid);
+        server->setPort(25565);
+        QCOMPARE(server->port(), 25565);
+
+        QVERIFY2(manager.restoreServerBackup(server->id(), backup.path, &error),
+                 qPrintable(error));
+        QCOMPARE(server->port(), 25570);
+
+        ServerManager reloaded(temporaryRoot.path());
+        QVERIFY(reloaded.load());
+        const auto restoredServer = reloaded.getServer(server->id());
+        QVERIFY(restoredServer);
+        QCOMPARE(restoredServer->port(), 25570);
+    }
+
+    void runsScheduledAutomationWithoutTheServerWindow()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        struct ApplicationSettingsNames {
+            QString organization;
+            QString application;
+            ~ApplicationSettingsNames()
+            {
+                QCoreApplication::setOrganizationName(organization);
+                QCoreApplication::setApplicationName(application);
+            }
+        } previousNames{ QCoreApplication::organizationName(),
+                         QCoreApplication::applicationName() };
+        QCoreApplication::setOrganizationName(QStringLiteral("JLauncherAutomationTests"));
+        QCoreApplication::setApplicationName(
+            QStringLiteral("ServerManager_%1").arg(QUuid::createUuid().toString(QUuid::WithoutBraces)));
+
+        ServerManager manager(temporaryRoot.path());
+        const auto server = manager.createServer("Automation server", "1.21.8");
+        QVERIFY(server);
+        QVERIFY(writeFile(QDir(server->serverDirectory()).filePath("world/level.dat"),
+                          "synthetic world"));
+
+        const QString prefix = QString("ServerAutomation/%1/").arg(server->id());
+        QSettings settings;
+        settings.setValue(prefix + "enabled", true);
+        settings.setValue(prefix + "action", "backup");
+        settings.setValue(prefix + "time", "12:34");
+        settings.setValue(prefix + "retention", 0);
+        settings.remove(prefix + "lastRun");
+        settings.remove(prefix + "history");
+        settings.sync();
+
+        QSignalSpy recorded(&manager, &ServerManager::automationRecorded);
+        const QDateTime scheduledTime(QDate(2026, 9, 29), QTime(12, 34));
+        manager.runDueAutomations(scheduledTime);
+        QCOMPARE(recorded.size(), 1);
+        QVERIFY(!manager.listServerBackups(server->id()).isEmpty());
+        QCOMPARE(settings.value(prefix + "lastRun").toString(),
+                 scheduledTime.date().toString(Qt::ISODate));
+        const QStringList firstHistory = settings.value(prefix + "history").toStringList();
+        QCOMPARE(firstHistory.size(), 1);
+        QVERIFY(firstHistory.first().contains("BACKUP"));
+        const qsizetype backupCount = manager.listServerBackups(server->id()).size();
+
+        manager.runDueAutomations(scheduledTime);
+        QCOMPARE(recorded.size(), 1);
+        QCOMPARE(settings.value(prefix + "history").toStringList().size(), 1);
+        QCOMPARE(manager.listServerBackups(server->id()).size(), backupCount);
+
+        settings.remove(prefix);
+        settings.sync();
     }
 
     void prunesOnlyValidatedAutomaticBackups()

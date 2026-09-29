@@ -114,13 +114,11 @@ private:
     void rebuildSettingsPage();
     void refreshPlayerList();
     void refreshAutomation();
-    void runAutomation(const std::shared_ptr<ServerInstance> &server, const QString &action, int retentionLimit = 0);
     void refreshDiagnostics();
     void refreshAutomationHistory();
     void setupServerNavigation();
     void syncServerNavigation();
     void applyServerVisualHierarchy();
-    void recordAutomation(const std::shared_ptr<ServerInstance> &server, const QString &action, const QString &result);
     void attachServerTracking(const std::shared_ptr<ServerInstance> &server);
     bool startServerSoftwareUpdate(const std::shared_ptr<ServerInstance> &server,
                                    const QString &targetVersion, bool changeVersion,
@@ -192,7 +190,6 @@ private:
     QPushButton *m_runAutomationButton = nullptr;
     QPushButton *m_viewCrashReportButton = nullptr;
     QListWidget *m_automationHistoryList = nullptr;
-    QTimer m_automationTimer;
     QLineEdit *m_consoleSearchInput = nullptr;
     QPushButton *m_findConsoleButton = nullptr;
     QPushButton *m_copyConsoleErrorsButton = nullptr;

@@ -845,24 +845,6 @@ ServerListPage::ServerListPage(QWidget *parent)
             QTimer::singleShot(0, this, &ServerListPage::refreshCurrentServerTab);
         }
     });
-    m_automationTimer.setInterval(30000);
-    connect(&m_automationTimer, &QTimer::timeout, this, [this]() {
-        if (!m_serverManager) return;
-        const QTime now = QTime::currentTime();
-        const QString date = QDate::currentDate().toString(Qt::ISODate);
-        QSettings settings;
-        for (const auto &server : m_serverManager->getAllServers()) {
-            const QString prefix = QString("ServerAutomation/%1/").arg(server->id());
-            if (!settings.value(prefix + "enabled", false).toBool()) continue;
-            const QTime scheduled = QTime::fromString(settings.value(prefix + "time").toString(), "HH:mm");
-            if (!scheduled.isValid() || scheduled.hour() != now.hour() || scheduled.minute() != now.minute()) continue;
-            if (settings.value(prefix + "lastRun").toString() == date) continue;
-            settings.setValue(prefix + "lastRun", date);
-            runAutomation(server, settings.value(prefix + "action", "start").toString(), settings.value(prefix + "retention", 0).toInt());
-        }
-    });
-    m_automationTimer.start();
-
     connect(ui->createServerButton, &QPushButton::clicked, this, &ServerListPage::onCreateServer);
     connect(ui->createFromModpackButton, &QPushButton::clicked, this, &ServerListPage::onInstallModpack);
     connect(ui->startServerButton, &QPushButton::clicked, this, &ServerListPage::onStartServer);
@@ -1343,6 +1325,20 @@ void ServerListPage::setServerManager(ServerManager *manager)
         connect(m_serverManager, &ServerManager::serverAdded, m_serverTrackingContext, [this](const QString &id) {
             if (m_serverManager) attachServerTracking(m_serverManager->getServer(id));
         });
+        connect(m_serverManager, &ServerManager::automationRecorded, m_serverTrackingContext,
+                [this](const QString &serverId) {
+            if (m_selectedServerId != serverId) {
+                return;
+            }
+            refreshAutomationHistory();
+            QSettings settings;
+            const QStringList history = settings.value(
+                QString("ServerAutomation/%1/history").arg(serverId)).toStringList();
+            if (!history.isEmpty() && history.first().contains(QStringLiteral("BACKUP:"))) {
+                refreshServerBackups();
+                refreshOverview();
+            }
+        });
     }
     updateServerList();
     if (qEnvironmentVariableIsSet("JLAUNCHER_PROFILE_UI")) {
@@ -1513,7 +1509,10 @@ void ServerListPage::onStopServer()
     }
 
     auto server = m_serverManager->getServer(m_selectedServerId);
-    if (server && server->status() == ServerStatus::Downloading) {
+    if (server && server->hasPendingCrashRestart()) {
+        server->cancelPendingCrashRestart();
+        updateUI();
+    } else if (server && server->status() == ServerStatus::Downloading) {
         server->cancelDownload();
         updateUI();
         updateServerList();
@@ -2341,68 +2340,6 @@ void ServerListPage::onSaveAutomation()
     m_automationInfoLabel->setText(tr("Automation saved for %1.").arg(server->name()));
 }
 
-void ServerListPage::runAutomation(const std::shared_ptr<ServerInstance> &server, const QString &action, int retentionLimit)
-{
-    if (!server) return;
-    if (action == "start") {
-        if (server->isRunning()) {
-            recordAutomation(server, action, tr("Skipped — server is already running."));
-        } else if (server->start()) {
-            recordAutomation(server, action, tr("Start requested."));
-        } else {
-            recordAutomation(server, action, tr("Could not start the server."));
-        }
-        return;
-    }
-    if (action == "stop") {
-        if (!server->isRunning()) {
-            recordAutomation(server, action, tr("Skipped — server is already stopped."));
-        } else if (server->stop()) {
-            recordAutomation(server, action, tr("Stop requested."));
-        } else {
-            recordAutomation(server, action, tr("Could not stop the server."));
-        }
-        return;
-    }
-    if (action == "restart") {
-        if (server->restart()) {
-            recordAutomation(server, action, tr("Restart requested."));
-        } else {
-            recordAutomation(server, action, tr("Could not restart the server."));
-        }
-        return;
-    }
-    if (action != "backup") return;
-    if (server->isRunning()) {
-        recordAutomation(server, action, tr("Skipped — backups require a stopped server."));
-        return;
-    }
-    const QString automaticPrefix = QStringLiteral("Automatic backup ");
-    const QString name = automaticPrefix
-        + QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
-    QString error;
-    ServerBackupInfo backup;
-    if (!m_serverManager
-        || !m_serverManager->createServerBackup(server->id(), name, &backup, &error)) {
-        server->appendLog("[BACKUP ERROR] " + error);
-        recordAutomation(server, action, tr("Backup failed: %1").arg(error));
-        return;
-    }
-    server->appendLog("[BACKUP] Created automatic backup: " + backup.name);
-    recordAutomation(server, action, tr("Created backup %1.").arg(backup.name));
-    if (retentionLimit > 0
-        && !m_serverManager->enforceServerBackupRetention(
-            server->id(), automaticPrefix, retentionLimit, &error)) {
-        server->appendLog("[BACKUP ERROR] " + error);
-        recordAutomation(server, action,
-                         tr("Backup was created, but retention failed: %1").arg(error));
-    }
-    if (server->id() == m_selectedServerId) {
-        refreshServerBackups();
-        refreshOverview();
-    }
-}
-
 void ServerListPage::refreshAutomationHistory()
 {
     if (!m_automationHistoryList) return;
@@ -2420,25 +2357,13 @@ void ServerListPage::refreshAutomationHistory()
     m_automationHistoryList->addItems(history);
 }
 
-void ServerListPage::recordAutomation(const std::shared_ptr<ServerInstance> &server, const QString &action, const QString &result)
-{
-    if (!server) return;
-    QSettings settings;
-    const QString key = QString("ServerAutomation/%1/history").arg(server->id());
-    QStringList history = settings.value(key).toStringList();
-    history.prepend(QString("%1 — %2: %3")
-        .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss"), action.toUpper(), result));
-    while (history.size() > 50) history.removeLast();
-    settings.setValue(key, history);
-    if (server->id() == m_selectedServerId) refreshAutomationHistory();
-}
-
 void ServerListPage::onRunAutomationNow()
 {
     if (!m_serverManager || m_selectedServerId.isEmpty()) return;
     const auto server = m_serverManager->getServer(m_selectedServerId);
     if (!server) return;
-    runAutomation(server, m_scheduleActionCombo->currentData().toString(), m_backupRetentionSpin->value());
+    m_serverManager->runAutomation(server, m_scheduleActionCombo->currentData().toString(),
+                                   m_backupRetentionSpin->value());
     m_automationInfoLabel->setText(tr("Ran %1 action for %2.").arg(m_scheduleActionCombo->currentText(), server->name()));
     updateUI();
 }
@@ -3408,6 +3333,9 @@ void ServerListPage::onServerSelectionChanged()
                     updateServerList();
                     QTimer::singleShot(0, this, &ServerListPage::refreshCurrentServerTab);
                 });
+                connect(m_currentConnectedServer.get(),
+                        &ServerInstance::crashRestartPendingChanged, this,
+                        [this](bool) { updateUI(); });
                 connect(m_currentConnectedServer.get(), &ServerInstance::serverCrashed, this,
                         [this](const QString &message, const QString &details) {
                     if (m_selectedServerId.isEmpty()) return;
@@ -3472,17 +3400,20 @@ void ServerListPage::updateUI()
 {
     bool hasSelection = !m_selectedServerId.isEmpty();
     ServerStatus status = ServerStatus::Stopped;
+    bool hasPendingCrashRestart = false;
 
     if (hasSelection && m_serverManager) {
         auto server = m_serverManager->getServer(m_selectedServerId);
         if (server) {
             status = server->status();
+            hasPendingCrashRestart = server->hasPendingCrashRestart();
         }
     }
 
     const bool canStart = status == ServerStatus::Stopped || status == ServerStatus::Error;
     const bool canStop = status == ServerStatus::Starting || status == ServerStatus::Running
-        || status == ServerStatus::Downloading;
+        || status == ServerStatus::Downloading
+        || (status == ServerStatus::Error && hasPendingCrashRestart);
     const bool canEditFiles = status == ServerStatus::Stopped || status == ServerStatus::Error;
     bool supportsContentBrowser = false;
     if (hasSelection && m_serverManager) {
@@ -3495,7 +3426,9 @@ void ServerListPage::updateUI()
 
     ui->startServerButton->setEnabled(hasSelection && canStart);
     ui->stopServerButton->setEnabled(hasSelection && canStop);
-    ui->stopServerButton->setText(status == ServerStatus::Downloading ? tr("Cancel Download") : tr("Stop"));
+    ui->stopServerButton->setText(status == ServerStatus::Downloading
+                                      ? tr("Cancel Download")
+                                      : hasPendingCrashRestart ? tr("Cancel Restart") : tr("Stop"));
     ui->stopServerButton->setIcon(status == ServerStatus::Downloading
                                       ? launcherIcon("status-bad", QStyle::SP_DialogCancelButton)
                                       : launcherIcon("status-bad", QStyle::SP_MediaStop));

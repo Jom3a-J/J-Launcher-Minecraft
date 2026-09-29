@@ -29,6 +29,7 @@
 #include <QUuid>
 #include <QDateTime>
 #include <QDeadlineTimer>
+#include <QSettings>
 #include <QLocale>
 #include <algorithm>
 
@@ -341,6 +342,10 @@ ServerManager::ServerManager(const QString &dataDir, QObject *parent)
     // Ensure servers directory exists
     QDir dir(dataDir);
     dir.mkpath("servers");
+    m_automationTimer.setInterval(30000);
+    connect(&m_automationTimer, &QTimer::timeout, this, [this]() {
+        runDueAutomations(QDateTime::currentDateTime());
+    });
 }
 
 ServerManager::~ServerManager()
@@ -350,6 +355,7 @@ ServerManager::~ServerManager()
 
 void ServerManager::shutdownAllServers()
 {
+    m_automationTimer.stop();
     const QList<std::shared_ptr<ServerInstance>> servers = getAllServers();
     int largestGracefulTimeoutSeconds = 0;
     for (const auto &server : servers) {
@@ -369,6 +375,114 @@ void ServerManager::shutdownAllServers()
         const qint64 remainingTime = qMax<qint64>(0, deadline.remainingTime());
         server->waitForShutdown(static_cast<int>(remainingTime));
     }
+}
+
+void ServerManager::startAutomationScheduler()
+{
+    m_automationTimer.start();
+}
+
+void ServerManager::runDueAutomations(const QDateTime &now)
+{
+    QSettings settings;
+    const QString date = now.date().toString(Qt::ISODate);
+    for (const auto &server : getAllServers()) {
+        const QString prefix = QString("ServerAutomation/%1/").arg(server->id());
+        if (!settings.value(prefix + "enabled", false).toBool()) {
+            continue;
+        }
+        const QTime scheduled = QTime::fromString(settings.value(prefix + "time").toString(),
+                                                  "HH:mm");
+        if (!scheduled.isValid() || scheduled.hour() != now.time().hour()
+            || scheduled.minute() != now.time().minute()
+            || settings.value(prefix + "lastRun").toString() == date) {
+            continue;
+        }
+        settings.setValue(prefix + "lastRun", date);
+        runAutomation(server, settings.value(prefix + "action", "start").toString(),
+                      settings.value(prefix + "retention", 0).toInt());
+    }
+}
+
+void ServerManager::runAutomation(const std::shared_ptr<ServerInstance> &server,
+                                  const QString &action, int retentionLimit)
+{
+    if (!server) {
+        return;
+    }
+    if (action == "start") {
+        if (server->isRunning()) {
+            recordAutomation(server, action, tr("Skipped — server is already running."));
+        } else if (server->start()) {
+            recordAutomation(server, action, tr("Start requested."));
+        } else {
+            recordAutomation(server, action, tr("Could not start the server."));
+        }
+        return;
+    }
+    if (action == "stop") {
+        if (!server->isRunning()) {
+            recordAutomation(server, action, tr("Skipped — server is already stopped."));
+        } else if (server->stop()) {
+            recordAutomation(server, action, tr("Stop requested."));
+        } else {
+            recordAutomation(server, action, tr("Could not stop the server."));
+        }
+        return;
+    }
+    if (action == "restart") {
+        if (server->restart()) {
+            recordAutomation(server, action, tr("Restart requested."));
+        } else {
+            recordAutomation(server, action, tr("Could not restart the server."));
+        }
+        return;
+    }
+    if (action != "backup") {
+        return;
+    }
+    if (server->isRunning()) {
+        recordAutomation(server, action, tr("Skipped — backups require a stopped server."));
+        return;
+    }
+    const QString automaticPrefix = QStringLiteral("Automatic backup ");
+    const QString name = automaticPrefix
+        + QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
+    QString error;
+    ServerBackupInfo backup;
+    if (!createServerBackup(server->id(), name, &backup, &error)) {
+        server->appendLog("[BACKUP ERROR] " + error);
+        recordAutomation(server, action, tr("Backup failed: %1").arg(error));
+        return;
+    }
+    server->appendLog("[BACKUP] Created automatic backup: " + backup.name);
+    recordAutomation(server, action, tr("Created backup %1.").arg(backup.name));
+    if (retentionLimit > 0
+        && !enforceServerBackupRetention(server->id(), automaticPrefix,
+                                         retentionLimit, &error)) {
+        server->appendLog("[BACKUP ERROR] " + error);
+        recordAutomation(server, action,
+                         tr("Backup was created, but retention failed: %1").arg(error));
+    }
+}
+
+void ServerManager::recordAutomation(const std::shared_ptr<ServerInstance> &server,
+                                     const QString &action, const QString &result)
+{
+    if (!server) {
+        return;
+    }
+    QSettings settings;
+    const QString key = QString("ServerAutomation/%1/history").arg(server->id());
+    QStringList history = settings.value(key).toStringList();
+    history.prepend(QString("%1 — %2: %3")
+        .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss"),
+             action.toUpper(), result));
+    while (history.size() > 50) {
+        history.removeLast();
+    }
+    settings.setValue(key, history);
+    emit automationRecorded(server->id());
 }
 
 std::shared_ptr<ServerInstance> ServerManager::createServer(const QString &name, const QString &version,
@@ -622,6 +736,8 @@ bool ServerManager::restoreServerBackup(const QString &id, const QString &backup
         return false;
     }
 
+    server->syncPortFromServerProperties();
+
     const QString previousMinecraftVersion = server->version();
     const QString previousLoaderType = server->loaderType();
     const QString previousLoaderVersion = server->loaderVersion();
@@ -645,6 +761,7 @@ bool ServerManager::restoreServerBackup(const QString &id, const QString &backup
         } else if (error) {
             *error = tr("Could not save restored server metadata. The previous server state was restored.");
         }
+        server->syncPortFromServerProperties();
         save();
         return false;
     }

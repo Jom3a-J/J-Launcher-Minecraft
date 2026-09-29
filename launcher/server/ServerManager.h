@@ -21,6 +21,7 @@
 #include <QMap>
 #include <QStack>
 #include <QDateTime>
+#include <QTimer>
 #include <QStringList>
 #include <memory>
 
@@ -56,6 +57,10 @@ public:
     bool deleteServer(const QString &id);
     bool deleteServerPermanently(const QString &id);
     void shutdownAllServers();
+    void startAutomationScheduler();
+    void runDueAutomations(const QDateTime &now);
+    void runAutomation(const std::shared_ptr<ServerInstance> &server,
+                       const QString &action, int retentionLimit);
     bool hasDeletedServer() const { return !m_trashHistory.isEmpty(); }
     bool restoreLastDeletedServer(QString *restoredId = nullptr);
     bool createServerBackup(const QString &id, const QString &requestedName,
@@ -80,9 +85,12 @@ signals:
     void serverAdded(const QString &id);
     void serverRemoved(const QString &id);
     void serverChanged(const QString &id);
+    void automationRecorded(const QString &serverId);
 
 private:
     QString generateId() const;
+    void recordAutomation(const std::shared_ptr<ServerInstance> &server,
+                          const QString &action, const QString &result);
 
     QString m_dataDir;
     QString m_serversFile;
@@ -94,4 +102,5 @@ private:
         std::shared_ptr<ServerInstance> server;
     };
     QStack<TrashHistoryItem> m_trashHistory;
+    QTimer m_automationTimer;
 };

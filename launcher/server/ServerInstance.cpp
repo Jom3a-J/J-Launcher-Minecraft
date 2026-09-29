@@ -49,6 +49,14 @@ ServerInstance::ServerInstance(const QString &id, const QString &name, QObject *
 {
     m_startupTimeoutTimer.setSingleShot(true);
     m_startupTimeoutTimer.setInterval(120000);
+    m_crashRestartTimer.setSingleShot(true);
+    connect(&m_crashRestartTimer, &QTimer::timeout, this, [this]() {
+        m_crashRestartTimestamps.append(QDateTime::currentDateTime());
+        emit crashRestartPendingChanged(false);
+        m_crashRestartStarting = true;
+        start();
+        m_crashRestartStarting = false;
+    });
     connect(&m_startupTimeoutTimer, &QTimer::timeout, this, [this]() {
         if (m_status != ServerStatus::Starting) {
             return;
@@ -164,6 +172,11 @@ void ServerInstance::setStartupTimeoutSeconds(int seconds)
     m_startupTimeoutOverridden = true;
 }
 
+void ServerInstance::setCrashRestartDelayMs(int ms)
+{
+    m_crashRestartDelayMs = qBound(100, ms, 60000);
+}
+
 void ServerInstance::setServerDirectory(const QString &dir)
 {
     m_serverDirectory = dir;
@@ -172,6 +185,9 @@ void ServerInstance::setServerDirectory(const QString &dir)
 
 bool ServerInstance::start()
 {
+    if (!m_crashRestartStarting) {
+        cancelPendingCrashRestart();
+    }
     if (m_status == ServerStatus::Running || m_status == ServerStatus::Starting ||
         m_status == ServerStatus::Stopping || m_status == ServerStatus::Downloading) {
         return false;
@@ -308,6 +324,8 @@ bool ServerInstance::start()
     // Start server process. Forge and NeoForge 1.17+ generate a run script
     // with the required module and argument-file setup, so launching a JAR
     // directly is not reliable for those server types.
+    m_standardOutputBuffer.clear();
+    m_standardErrorBuffer.clear();
     m_process.reset(new QProcess());
     ++m_processGeneration;
     connect(m_process.get(), &QProcess::started, this, &ServerInstance::onProcessStarted);
@@ -473,6 +491,7 @@ bool ServerInstance::stop()
 
 void ServerInstance::requestShutdownForExit()
 {
+    cancelPendingCrashRestart();
     if (m_status == ServerStatus::Downloading) {
         cancelDownload();
     }
@@ -495,6 +514,17 @@ bool ServerInstance::waitForShutdown(int timeoutMs)
         m_process->waitForFinished(5000);
     }
     return m_process->state() == QProcess::NotRunning;
+}
+
+bool ServerInstance::cancelPendingCrashRestart()
+{
+    if (!m_crashRestartTimer.isActive()) {
+        return false;
+    }
+    m_crashRestartTimer.stop();
+    appendLog(tr("[INFO] Automatic restart cancelled."));
+    emit crashRestartPendingChanged(false);
+    return true;
 }
 
 void ServerInstance::scheduleStopEscalation(int graceMs)
@@ -1314,25 +1344,51 @@ void ServerInstance::onProcessStarted()
 void ServerInstance::onProcessReadyReadStandardOutput()
 {
     if (m_process) {
-        QString line = QString::fromLocal8Bit(m_process->readAllStandardOutput());
-        QStringList lines = line.split("\n");
-        for (const QString &l : lines) {
-            if (!l.trimmed().isEmpty()) {
-                handleConsoleLine(l.trimmed());
-            }
-        }
+        processOutputBuffer(m_standardOutputBuffer, false);
     }
 }
 
 void ServerInstance::onProcessReadyReadStandardError()
 {
     if (m_process) {
-        QString line = QString::fromLocal8Bit(m_process->readAllStandardError());
-        QStringList lines = line.split("\n");
-        for (const QString &l : lines) {
-            if (!l.trimmed().isEmpty()) {
-                handleConsoleLine(l.trimmed(), true);
-            }
+        processOutputBuffer(m_standardErrorBuffer, true);
+    }
+}
+
+QStringList ServerInstance::takeCompleteLines(QByteArray &buffer)
+{
+    QStringList lines;
+    qsizetype newline = buffer.indexOf('\n');
+    while (newline >= 0) {
+        QByteArray line = buffer.left(newline);
+        buffer.remove(0, newline + 1);
+        if (line.endsWith('\r')) {
+            line.chop(1);
+        }
+        lines.append(QString::fromLocal8Bit(line));
+        newline = buffer.indexOf('\n');
+    }
+    if (buffer.size() > 1024 * 1024) {
+        if (buffer.endsWith('\r')) {
+            buffer.chop(1);
+        }
+        lines.append(QString::fromLocal8Bit(buffer));
+        buffer.clear();
+    }
+    return lines;
+}
+
+void ServerInstance::processOutputBuffer(QByteArray &buffer, bool error)
+{
+    if (!m_process) {
+        return;
+    }
+    buffer.append(error ? m_process->readAllStandardError()
+                        : m_process->readAllStandardOutput());
+    const QStringList lines = takeCompleteLines(buffer);
+    for (const QString &line : lines) {
+        if (!line.trimmed().isEmpty()) {
+            handleConsoleLine(line.trimmed(), error);
         }
     }
 }
@@ -1349,15 +1405,28 @@ void ServerInstance::handleConsoleLine(const QString &line, bool error)
         setStatus(ServerStatus::Running);
     }
 
-    static const QRegularExpression joinedPattern("([A-Za-z0-9_]{3,16}) joined the game");
-    static const QRegularExpression leftPattern("([A-Za-z0-9_]{3,16}) left the game");
-    const QRegularExpressionMatch joined = joinedPattern.match(line);
-    if (joined.hasMatch()) {
-        emit playerActivity(joined.captured(1), true);
-        return;
+    QString player;
+    bool joined = false;
+    if (parsePlayerActivity(line, &player, &joined)) {
+        emit playerActivity(player, joined);
     }
-    const QRegularExpressionMatch left = leftPattern.match(line);
-    if (left.hasMatch()) emit playerActivity(left.captured(1), false);
+}
+
+bool ServerInstance::parsePlayerActivity(const QString &line, QString *player, bool *joined)
+{
+    static const QRegularExpression activityPattern(
+        QStringLiteral(R"(^(?:\[[^\]]*\]\s*)+:\s*([A-Za-z0-9_]{3,16}) (joined|left) the game\s*$)"));
+    const QRegularExpressionMatch match = activityPattern.match(line);
+    if (!match.hasMatch()) {
+        return false;
+    }
+    if (player) {
+        *player = match.captured(1);
+    }
+    if (joined) {
+        *joined = match.captured(2) == QStringLiteral("joined");
+    }
+    return true;
 }
 
 bool ServerInstance::isReadyOutput(const QString &line)
@@ -1390,6 +1459,24 @@ bool ServerInstance::isPortAvailable(quint16 port)
 
 void ServerInstance::onProcessFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
+    processOutputBuffer(m_standardOutputBuffer, false);
+    processOutputBuffer(m_standardErrorBuffer, true);
+    const auto flushTail = [this](QByteArray &buffer, bool error) {
+        if (buffer.isEmpty()) {
+            return;
+        }
+        QByteArray tail = buffer;
+        buffer.clear();
+        if (tail.endsWith('\r')) {
+            tail.chop(1);
+        }
+        const QString line = QString::fromLocal8Bit(tail).trimmed();
+        if (!line.isEmpty()) {
+            handleConsoleLine(line, error);
+        }
+    };
+    flushTail(m_standardOutputBuffer, false);
+    flushTail(m_standardErrorBuffer, true);
     m_startupTimeoutTimer.stop();
     const bool restart = m_restartRequested;
     m_restartRequested = false;
@@ -1429,8 +1516,29 @@ void ServerInstance::onProcessFinished(int exitCode, QProcess::ExitStatus exitSt
         emit serverError(message);
         emit serverCrashed(message, details);
         if (m_autoRestartOnCrash && !restart) {
-            appendLog("[INFO] Automatic crash restart scheduled in 5 seconds.");
-            QTimer::singleShot(5000, this, [this]() { start(); });
+            const QDateTime now = QDateTime::currentDateTime();
+            const QDateTime cutoff = now.addSecs(-600);
+            for (qsizetype index = m_crashRestartTimestamps.size(); index > 0; --index) {
+                if (m_crashRestartTimestamps.at(index - 1) < cutoff) {
+                    m_crashRestartTimestamps.removeAt(index - 1);
+                }
+            }
+            if (m_crashRestartTimestamps.size() >= 3) {
+                const QString restartLimitMessage = tr(
+                    "Automatic restart paused after 3 crashes in 10 minutes. Fix the cause and start the server manually.");
+                appendLog("[ERROR] " + restartLimitMessage);
+                emit serverError(restartLimitMessage);
+            } else {
+                if (m_crashRestartDelayMs == 5000) {
+                    appendLog("[INFO] Automatic crash restart scheduled in 5 seconds.");
+                } else {
+                    appendLog(tr("[INFO] Automatic crash restart scheduled in %1 ms.")
+                                  .arg(m_crashRestartDelayMs));
+                }
+                m_crashRestartTimer.setInterval(m_crashRestartDelayMs);
+                m_crashRestartTimer.start();
+                emit crashRestartPendingChanged(true);
+            }
         }
     }
     m_startupTimedOut = false;

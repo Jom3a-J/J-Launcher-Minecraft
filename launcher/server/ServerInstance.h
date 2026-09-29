@@ -16,10 +16,13 @@
 #pragma once
 
 #include <QObject>
+#include <QByteArray>
+#include <QDateTime>
+#include <QList>
 #include <QString>
+#include <QStringList>
 #include <QProcess>
 #include <QTimer>
-#include <QDateTime>
 #include <QJsonObject>
 #include <memory>
 
@@ -68,6 +71,7 @@ public:
     bool autoRestartOnCrash() const { return m_autoRestartOnCrash; }
     bool eulaAccepted() const { return m_eulaAccepted; }
     int gracefulStopTimeoutSeconds() const { return m_gracefulStopTimeoutSeconds; }
+    bool hasPendingCrashRestart() const { return m_crashRestartTimer.isActive(); }
     QString serverDirectory() const { return m_serverDirectory; }
     ServerStatus status() const { return m_status; }
     bool isOnline() const { return m_status == ServerStatus::Running; }
@@ -89,6 +93,7 @@ public:
     void setEulaAccepted(bool accepted);
     void setGracefulStopTimeoutSeconds(int seconds);
     void setStartupTimeoutSeconds(int seconds);
+    void setCrashRestartDelayMs(int ms);
     void setServerDirectory(const QString &dir);
 
     // Server operations
@@ -148,6 +153,10 @@ public:
     static ServerContentType contentTypeForLoader(const QString &loaderType);
     bool addContentFiles(const QStringList &paths, QString *error = nullptr);
     bool invalidateContentCaches(QString *error = nullptr) const;
+    void syncPortFromServerProperties();
+    bool cancelPendingCrashRestart();
+    static QStringList takeCompleteLines(QByteArray &buffer);
+    static bool parsePlayerActivity(const QString &line, QString *player, bool *joined);
 
 signals:
     void statusChanged(ServerStatus status);
@@ -160,6 +169,7 @@ signals:
                                         bool cancelled, const QString &errorMessage);
     void serverCrashed(const QString &message, const QString &details);
     void playerActivity(const QString &playerName, bool joined);
+    void crashRestartPendingChanged(bool pending);
 
 private slots:
     void onProcessStarted();
@@ -173,7 +183,6 @@ private:
     void scheduleStopEscalation(int graceMs);
     void forceKillProcessTree();
     bool createServerProperties();
-    void syncPortFromServerProperties();
     bool acceptEULA();
     bool hasLaunchTarget() const;
     QString loaderScriptPath() const;
@@ -191,6 +200,7 @@ private:
                              bool commitTargetVersion, bool commitTargetLoaderVersion);
     bool sendPlayerAdministrationCommand(const QString &verb, const QString &name,
                                          const QString &reason, QString *error);
+    void processOutputBuffer(QByteArray &buffer, bool error);
 
     QString m_id;
     QString m_name;
@@ -210,6 +220,8 @@ private:
 
     std::unique_ptr<QProcess> m_process;
     quint64 m_processGeneration = 0;
+    QByteArray m_standardOutputBuffer;
+    QByteArray m_standardErrorBuffer;
     ServerDownloader *m_downloader = nullptr;
     std::shared_ptr<const ServerProviderEndpoints> m_providerEndpoints;
     Task::Ptr m_javaInstallTask;
@@ -220,4 +232,8 @@ private:
     bool m_startupTimeoutOverridden = false;
     QDateTime m_startedAt;
     QTimer m_startupTimeoutTimer;
+    QTimer m_crashRestartTimer;
+    QList<QDateTime> m_crashRestartTimestamps;
+    int m_crashRestartDelayMs = 5000;
+    bool m_crashRestartStarting = false;
 };

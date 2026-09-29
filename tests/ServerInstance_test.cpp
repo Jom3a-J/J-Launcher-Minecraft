@@ -654,14 +654,106 @@ class ServerInstanceTest : public QObject {
         QCOMPARE(duplicates.value("motd"), QString("second"));
     }
 
+    void preservesAndEscapesMinecraftServerProperties()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QString path = temporaryRoot.filePath("server.properties");
+        const QByteArray original =
+            "# retained comment\n"
+            "motd=\\u00A7aHi\n"
+            "path=C:\\\\new\n"
+            "server-port=25565\n"
+            "removed=gone\n";
+        QVERIFY(writeFile(path, original));
+
+        QString error;
+        QMap<QString, QString> properties = ServerProperties::load(path, &error);
+        QCOMPARE(properties.value("motd"), QString::fromUtf8("\xC2\xA7") + "aHi");
+        QCOMPARE(properties.value("path"), QStringLiteral("C:\\new"));
+        properties["server-port"] = "25570";
+        properties.remove("removed");
+        properties.insert("z-new", QString::fromUtf8("\xC2\xA7") + "aWelcome");
+        QVERIFY2(ServerProperties::save(path, properties, &error), qPrintable(error));
+
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const QByteArray saved = file.readAll();
+        QVERIFY(saved.startsWith("# retained comment\nmotd=\\u00A7aHi\npath=C:\\\\new\n"));
+        QVERIFY(saved.contains("server-port=25570\n"));
+        QVERIFY(!saved.contains("removed="));
+        QVERIFY(saved.endsWith("z-new=\\u00A7aWelcome\n"));
+        const QMap<QString, QString> loaded = ServerProperties::load(path, &error);
+        QCOMPARE(loaded.value("motd"), properties.value("motd"));
+        QCOMPARE(loaded.value("path"), properties.value("path"));
+        QCOMPARE(loaded.value("z-new"), properties.value("z-new"));
+
+        const QString escapedValuePath = temporaryRoot.filePath("escaped-value.properties");
+        QVERIFY2(ServerProperties::save(escapedValuePath,
+                                        { { "motd", QString::fromUtf8("\xC2\xA7") + "x" },
+                                          { "other", "first\nsecond" } },
+                                        &error),
+                 qPrintable(error));
+        QFile escapedValueFile(escapedValuePath);
+        QVERIFY(escapedValueFile.open(QIODevice::ReadOnly));
+        const QByteArray escapedValueText = escapedValueFile.readAll();
+        QVERIFY(escapedValueText.contains("motd=\\u00A7x"));
+        QVERIFY(escapedValueText.contains("other=first\\nsecond"));
+        QCOMPARE(ServerProperties::load(escapedValuePath, &error).value("other"),
+                 QString("first\nsecond"));
+
+        const QString backslashPath = temporaryRoot.filePath("backslash.properties");
+        QVERIFY(writeFile(backslashPath, "path=C:\\\\new\n"));
+        QCOMPARE(ServerProperties::load(backslashPath, &error).value("path"),
+                 QStringLiteral("C:\\new"));
+
+        const QString continuationPath = temporaryRoot.filePath("continuation.properties");
+        QVERIFY(writeFile(continuationPath, "motd=joined\\\n  value\n"));
+        QCOMPARE(ServerProperties::load(continuationPath, &error).value("motd"),
+                 QStringLiteral("joinedvalue"));
+    }
+
+    void takesCompleteConsoleLines()
+    {
+        QByteArray buffer("readiness prefix ");
+        QVERIFY(ServerInstance::takeCompleteLines(buffer).isEmpty());
+        buffer.append("readiness suffix\r\npartial tail");
+        const QStringList lines = ServerInstance::takeCompleteLines(buffer);
+        QCOMPARE(lines, QStringList{ "readiness prefix readiness suffix" });
+        QCOMPARE(buffer, QByteArray("partial tail"));
+    }
+
+    void parsesOnlyLoggerPlayerActivityLines()
+    {
+        const QList<QPair<QString, QPair<QString, bool>>> matchingLines{
+            { "[12:00:00] [Server thread/INFO]: Steve joined the game", { "Steve", true } },
+            { "[12:00:00] [Server thread/INFO] [minecraft/MinecraftServer]: Steve left the game", { "Steve", false } },
+            { "[12:00:00 INFO]: Steve joined the game", { "Steve", true } },
+        };
+        for (const auto &entry : matchingLines) {
+            QString player;
+            bool joined = false;
+            QVERIFY(ServerInstance::parsePlayerActivity(entry.first, &player, &joined));
+            QCOMPARE(player, entry.second.first);
+            QCOMPARE(joined, entry.second.second);
+        }
+        const QStringList rejectedLines{
+            "[12:00:00] [Server thread/INFO]: <Steve> Notch joined the game",
+            "[12:00:00] [Server thread/INFO]: [Server] Notch joined the game",
+            "[12:00:00] [Server thread/INFO]: Steve joined the game and left",
+        };
+        for (const QString &line : rejectedLines) {
+            QVERIFY(!ServerInstance::parsePlayerActivity(line, nullptr, nullptr));
+        }
+    }
+
     void rejectsUnsafeServerProperties()
     {
         QString error;
         QVERIFY(!ServerProperties::validate({ { "bad=key", "value" } }, &error));
         QVERIFY(error.contains("option name"));
         error.clear();
-        QVERIFY(!ServerProperties::validate({ { "motd", "first\nsecond" } }, &error));
-        QVERIFY(error.contains("line break"));
+        QVERIFY(ServerProperties::validate({ { "motd", "first\nsecond" } }, &error));
         error.clear();
         QVERIFY(!ServerProperties::validate({ { "server-port", "70000" } }, &error));
         QVERIFY(error.contains("between 1 and 65535"));
@@ -1529,6 +1621,52 @@ class ArgumentProbe {
         server.requestShutdownForExit();
         QVERIFY(server.waitForShutdown(1000));
         QCOMPARE(server.processId(), qint64(0));
+    }
+
+    void cancelsPendingCrashRestart()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        ServerInstance server("cancel-crash-restart", "Cancel crash restart");
+        QVERIFY(prepareSyntheticServer(server, temporaryRoot.filePath("server"),
+                                       "-Dfake.crash-memory"));
+        server.setAutoRestartOnCrash(true);
+        QSignalSpy started(&server, &ServerInstance::started);
+
+        QVERIFY(server.start());
+        QTRY_VERIFY_WITH_TIMEOUT(server.hasPendingCrashRestart(), 5000);
+        QCOMPARE(started.size(), 1);
+        QVERIFY(server.cancelPendingCrashRestart());
+        QVERIFY(!server.hasPendingCrashRestart());
+        QTest::qWait(6000);
+        QCOMPARE(server.status(), ServerStatus::Error);
+        QCOMPARE(started.size(), 1);
+    }
+
+    void pausesCrashRestartsAfterThreeAutomaticRestarts()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        ServerInstance server("crash-restart-limit", "Crash restart limit");
+        QVERIFY(prepareSyntheticServer(server, temporaryRoot.filePath("server"),
+                                       "-Dfake.crash-memory"));
+        server.setAutoRestartOnCrash(true);
+        server.setCrashRestartDelayMs(100);
+        QSignalSpy crashes(&server, &ServerInstance::serverCrashed);
+        QSignalSpy errors(&server, &ServerInstance::serverError);
+
+        QVERIFY(server.start());
+        QTRY_COMPARE_WITH_TIMEOUT(crashes.size(), 4, 15000);
+        QTRY_VERIFY_WITH_TIMEOUT(!server.hasPendingCrashRestart(), 5000);
+        QCOMPARE(server.status(), ServerStatus::Error);
+        bool foundRestartLimitMessage = false;
+        for (const QList<QVariant> &arguments : errors) {
+            if (arguments.first().toString().contains("Automatic restart paused")) {
+                foundRestartLimitMessage = true;
+                break;
+            }
+        }
+        QVERIFY(foundRestartLimitMessage);
     }
 
     void reportsIncompatibleJavaRequirement()

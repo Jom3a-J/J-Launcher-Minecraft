@@ -5,42 +5,170 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QSet>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QObject>
 #include <QRegularExpression>
 #include <QSaveFile>
-#include <QTextStream>
 
 namespace {
-QString unescapeProperty(QString value)
+struct LogicalPropertyLine {
+    QByteArray original;
+    QString text;
+};
+
+bool hasContinuation(const QByteArray &line)
 {
-    value.replace(QStringLiteral("\\n"), QStringLiteral("\n"));
-    value.replace(QStringLiteral("\\r"), QStringLiteral("\r"));
-    value.replace(QStringLiteral("\\t"), QStringLiteral("\t"));
-    value.replace(QStringLiteral("\\="), QStringLiteral("="));
-    value.replace(QStringLiteral("\\:"), QStringLiteral(":"));
-    value.replace(QStringLiteral("\\\\"), QStringLiteral("\\"));
-    return value;
+    int trailingBackslashes = 0;
+    for (qsizetype index = line.size() - 1; index >= 0 && line.at(index) == '\\'; --index) {
+        ++trailingBackslashes;
+    }
+    return trailingBackslashes % 2 != 0;
 }
 
-QString escapeProperty(QString value)
+QList<LogicalPropertyLine> logicalPropertyLines(const QByteArray &contents)
 {
-    value.replace(QStringLiteral("\\"), QStringLiteral("\\\\"));
-    value.replace(QStringLiteral("\t"), QStringLiteral("\\t"));
-    return value;
+    QList<LogicalPropertyLine> lines;
+    qsizetype offset = 0;
+    while (offset < contents.size()) {
+        LogicalPropertyLine logical;
+        bool continuing = false;
+        do {
+            const qsizetype newline = contents.indexOf('\n', offset);
+            const qsizetype physicalEnd = newline < 0 ? contents.size() : newline;
+            const qsizetype contentEnd = physicalEnd > offset && contents.at(physicalEnd - 1) == '\r'
+                ? physicalEnd - 1 : physicalEnd;
+            const QByteArray physical = contents.mid(offset, physicalEnd - offset);
+            const QByteArray text = contents.mid(offset, contentEnd - offset);
+            logical.original.append(physical);
+            if (newline >= 0) {
+                logical.original.append('\n');
+            }
+            offset = newline < 0 ? contents.size() : newline + 1;
+
+            if (continuing) {
+                qsizetype leadingWhitespace = 0;
+                while (leadingWhitespace < text.size()
+                       && (text.at(leadingWhitespace) == ' ' || text.at(leadingWhitespace) == '\t'
+                           || text.at(leadingWhitespace) == '\f')) {
+                    ++leadingWhitespace;
+                }
+                logical.text.append(QString::fromUtf8(text.mid(leadingWhitespace)));
+            } else {
+                logical.text = QString::fromUtf8(text);
+            }
+            continuing = hasContinuation(text);
+            if (continuing) {
+                logical.text.chop(1);
+            }
+        } while (continuing && offset < contents.size());
+        lines.append(logical);
+    }
+    return lines;
 }
 
-int propertySeparator(const QString &line)
+QString unescapeProperty(const QString &value)
 {
-    bool escaped = false;
-    for (int index = 0; index < line.size(); ++index) {
-        const QChar character = line.at(index);
-        if (!escaped && (character == QLatin1Char('=') || character == QLatin1Char(':'))) {
-            return index;
+    QString result;
+    result.reserve(value.size());
+    for (qsizetype index = 0; index < value.size(); ++index) {
+        const QChar character = value.at(index);
+        if (character != QLatin1Char('\\') || index + 1 >= value.size()) {
+            result.append(character);
+            continue;
         }
-        if (!escaped && character.isSpace()) {
-            return index;
+        const QChar escaped = value.at(index + 1);
+        if (escaped == QLatin1Char('u') && index + 5 < value.size()) {
+            ushort codeUnit = 0;
+            bool validEscape = true;
+            for (qsizetype digitIndex = index + 2; digitIndex <= index + 5; ++digitIndex) {
+                const ushort hexCharacter = value.at(digitIndex).unicode();
+                const int digit = hexCharacter >= '0' && hexCharacter <= '9'
+                    ? hexCharacter - '0'
+                    : hexCharacter >= 'a' && hexCharacter <= 'f'
+                    ? hexCharacter - 'a' + 10
+                    : hexCharacter >= 'A' && hexCharacter <= 'F'
+                    ? hexCharacter - 'A' + 10
+                    : -1;
+                if (digit < 0 || digit > 15) {
+                    validEscape = false;
+                    break;
+                }
+                codeUnit = static_cast<ushort>((codeUnit << 4) | digit);
+            }
+            if (validEscape) {
+                result.append(QChar(codeUnit));
+                index += 5;
+                continue;
+            }
+        }
+        if (escaped == QLatin1Char('u')) {
+            result.append(character);
+            continue;
+        }
+        switch (escaped.unicode()) {
+            case 't': result.append(QLatin1Char('\t')); break;
+            case 'n': result.append(QLatin1Char('\n')); break;
+            case 'r': result.append(QLatin1Char('\r')); break;
+            case 'f': result.append(QLatin1Char('\f')); break;
+            default: result.append(escaped); break;
+        }
+        ++index;
+    }
+    return result;
+}
+
+QString escapeProperty(const QString &value)
+{
+    QString escaped;
+    escaped.reserve(value.size());
+    for (qsizetype index = 0; index < value.size(); ++index) {
+        const QChar character = value.at(index);
+        switch (character.unicode()) {
+            case '\\': escaped.append(QStringLiteral("\\\\")); continue;
+            case '\t': escaped.append(QStringLiteral("\\t")); continue;
+            case '\n': escaped.append(QStringLiteral("\\n")); continue;
+            case '\r': escaped.append(QStringLiteral("\\r")); continue;
+            case '\f': escaped.append(QStringLiteral("\\f")); continue;
+            case ' ':
+                if (index == 0) {
+                    escaped.append(QStringLiteral("\\ "));
+                } else {
+                    escaped.append(character);
+                }
+                continue;
+            default: break;
+        }
+        if (character.unicode() < 0x20 || character.unicode() > 0x7e) {
+            escaped.append(QStringLiteral("\\u"));
+            escaped.append(QString::number(character.unicode(), 16).rightJustified(4, QLatin1Char('0')).toUpper());
+        } else {
+            escaped.append(character);
+        }
+    }
+    return escaped;
+}
+
+bool parseProperty(const QString &line, QString *key, QString *value)
+{
+    qsizetype first = 0;
+    while (first < line.size() && line.at(first).isSpace()) {
+        ++first;
+    }
+    if (first == line.size() || line.at(first) == QLatin1Char('#')
+        || line.at(first) == QLatin1Char('!')) {
+        return false;
+    }
+
+    qsizetype separator = -1;
+    bool escaped = false;
+    for (qsizetype index = first; index < line.size(); ++index) {
+        const QChar character = line.at(index);
+        if (!escaped && (character == QLatin1Char('=') || character == QLatin1Char(':')
+                         || character.isSpace())) {
+            separator = index;
+            break;
         }
         if (character == QLatin1Char('\\') && !escaped) {
             escaped = true;
@@ -48,7 +176,30 @@ int propertySeparator(const QString &line)
             escaped = false;
         }
     }
-    return -1;
+
+    const QString parsedKey = unescapeProperty(
+        separator < 0 ? line.mid(first) : line.mid(first, separator - first));
+    if (parsedKey.isEmpty()) {
+        return false;
+    }
+    qsizetype valueStart = separator < 0 ? line.size() : separator;
+    if (separator >= 0 && line.at(separator).isSpace()) {
+        while (valueStart < line.size() && line.at(valueStart).isSpace()) {
+            ++valueStart;
+        }
+        if (valueStart < line.size()
+            && (line.at(valueStart) == QLatin1Char('=') || line.at(valueStart) == QLatin1Char(':'))) {
+            ++valueStart;
+        }
+    } else if (separator >= 0) {
+        ++valueStart;
+    }
+    while (valueStart < line.size() && line.at(valueStart).isSpace()) {
+        ++valueStart;
+    }
+    *key = parsedKey;
+    *value = unescapeProperty(line.mid(valueStart));
+    return true;
 }
 }
 
@@ -66,20 +217,12 @@ QMap<QString, QString> ServerProperties::load(const QString &path, QString *erro
         return values;
     }
 
-    QTextStream stream(&file);
-    while (!stream.atEnd()) {
-        const QString originalLine = stream.readLine();
-        const QString line = originalLine.trimmed();
-        if (line.isEmpty() || line.startsWith(QLatin1Char('#'))
-            || line.startsWith(QLatin1Char('!'))) {
-            continue;
-        }
-        const int separator = propertySeparator(line);
-        const QString key = unescapeProperty(
-            separator < 0 ? line : line.left(separator)).trimmed();
-        QString value = separator < 0 ? QString() : line.mid(separator + 1).trimmed();
-        if (!key.isEmpty()) {
-            values.insert(key, unescapeProperty(value));
+    const QList<LogicalPropertyLine> lines = logicalPropertyLines(file.readAll());
+    for (const LogicalPropertyLine &line : lines) {
+        QString key;
+        QString value;
+        if (parseProperty(line.text, &key, &value)) {
+            values.insert(key, value);
         }
     }
     return values;
@@ -176,14 +319,6 @@ bool ServerProperties::validate(const QMap<QString, QString> &values, QString *e
             }
             return false;
         }
-        if (iterator.value().contains(QLatin1Char('\n'))
-            || iterator.value().contains(QLatin1Char('\r'))) {
-            if (error) {
-                *error = QObject::tr("The value for %1 contains a line break.")
-                             .arg(iterator.key());
-            }
-            return false;
-        }
     }
 
     if (values.contains(QStringLiteral("server-port"))) {
@@ -211,20 +346,62 @@ bool ServerProperties::save(const QString &path, const QMap<QString, QString> &v
         }
         return false;
     }
+    const bool exists = QFileInfo::exists(path);
+    QByteArray existingContents;
+    if (exists) {
+        QFile existingFile(path);
+        if (!existingFile.open(QIODevice::ReadOnly)) {
+            if (error) {
+                *error = QObject::tr("Could not read server.properties.");
+            }
+            return false;
+        }
+        existingContents = existingFile.readAll();
+    }
+
+    QByteArray output;
+    if (!exists) {
+        output.append("#Minecraft server properties managed by J Launcher\n");
+    }
+    QSet<QString> writtenKeys;
+    const QList<LogicalPropertyLine> lines = logicalPropertyLines(existingContents);
+    for (const LogicalPropertyLine &line : lines) {
+        QString key;
+        QString value;
+        if (!parseProperty(line.text, &key, &value)) {
+            output.append(line.original);
+            continue;
+        }
+        if (!values.contains(key) || writtenKeys.contains(key)) {
+            continue;
+        }
+        writtenKeys.insert(key);
+        if (value == values.value(key)) {
+            output.append(line.original);
+        } else {
+            output.append(key.toUtf8());
+            output.append('=');
+            output.append(escapeProperty(values.value(key)).toUtf8());
+            output.append('\n');
+        }
+    }
+    for (auto iterator = values.constBegin(); iterator != values.constEnd(); ++iterator) {
+        if (!writtenKeys.contains(iterator.key())) {
+            output.append(iterator.key().toUtf8());
+            output.append('=');
+            output.append(escapeProperty(iterator.value()).toUtf8());
+            output.append('\n');
+        }
+    }
+
     QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+    if (!file.open(QIODevice::WriteOnly)) {
         if (error) {
             *error = QObject::tr("Could not write server.properties.");
         }
         return false;
     }
-    QTextStream stream(&file);
-    stream << "#Minecraft server properties managed by J Launcher\n";
-    for (auto iterator = values.constBegin(); iterator != values.constEnd(); ++iterator) {
-        stream << iterator.key() << '=' << escapeProperty(iterator.value()) << '\n';
-    }
-    stream.flush();
-    if (stream.status() != QTextStream::Ok || !file.commit()) {
+    if (file.write(output) != output.size() || !file.commit()) {
         file.cancelWriting();
         if (error) {
             *error = QObject::tr("Could not finalize server.properties.");
