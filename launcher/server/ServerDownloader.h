@@ -131,6 +131,7 @@ private:
     // Purpur
     void fetchPurpurBuilds();
     void onPurpurBuildsFetched(const QByteArray &data);
+    void onPurpurBuildInfoFetched(const QByteArray &data);
 
     // Forge
     void fetchForgeVersions();
@@ -140,6 +141,8 @@ private:
     QString resolveForgeMavenVersion(const QByteArray &data, const QString &forgeVersion) const;
     void prepareForgeInstaller(const QString &forgeVersion, const QString &mavenVersion);
     void beginForgeInstallerDownload(const QString &forgeVersion, const QString &mavenVersion);
+    void fetchForgeInstallerChecksum(const QUrl &installerUrl, const QString &installerPath);
+    void onForgeInstallerChecksumFetched(const QByteArray &data);
     void onForgeInstallerDownloaded();
     bool prefetchModernInstallerLibraries(const QString &installerPath, const QString &loaderName);
     void onInstallerLibrariesPrefetched();
@@ -149,6 +152,8 @@ private:
     void fetchNeoForgeVersions();
     void onNeoForgeVersionsFetched(const QByteArray &data);
     void downloadNeoForgeInstaller(const QString &neoForgeVersion);
+    void fetchNeoForgeInstallerChecksum(const QUrl &installerUrl, const QString &installerPath);
+    void onNeoForgeInstallerChecksumFetched(const QByteArray &data);
     void onNeoForgeInstallerDownloaded();
 
     // Version manifest fetching
@@ -184,13 +189,16 @@ private:
         FetchingFabricLoaderList,
         // Purpur
         FetchingPurpurBuilds,
+        FetchingPurpurBuildInfo,
         // Forge
         FetchingForgeVersions,
         ResolvingForgeInstallerMetadata,
+        FetchingForgeInstallerChecksum,
         DownloadingForgeInstaller,
         DownloadingLegacyForgeServerJar,
         // NeoForge
         FetchingNeoForgeVersions,
+        FetchingNeoForgeInstallerChecksum,
         DownloadingNeoForgeInstaller,
         DownloadingInstallerLibraries,
         // Final download
@@ -210,13 +218,16 @@ private:
     QString m_buildsType;
     QString m_buildsVersion;
     QString m_fabricInstallerVer; // cached for Fabric two-step
+    bool m_fabricJarPendingValidation = false;
+    QString m_pendingInstallerPath;
+    QUrl m_pendingInstallerUrl;
+    QString m_pendingPurpurBuild;
     QString m_pendingForgeVersion;
     QString m_pendingForgeMavenVersion;
     QString m_legacyForgeServerJarPath;
     bool m_fetchingLegacyForgeServerJar = false;
     bool m_downloadingLegacyForgeServerJar = false;
     QString m_pendingInstallerLoader;
-    QString m_pendingInstallerPath;
     QStringList m_prefetchLibraryPaths;
     QHash<QString, QByteArray> m_prefetchLibraryHashes;
 

@@ -48,6 +48,17 @@ QByteArray readFile(const QString& path)
     return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
 }
 
+bool writeInstallerChecksum(const QString& installerPath, const QByteArray& checksum = {})
+{
+    const QByteArray installer = readFile(installerPath);
+    const QByteArray sha1 = checksum.isEmpty()
+        ? QCryptographicHash::hash(installer, QCryptographicHash::Sha1).toHex()
+        : checksum;
+    return !installer.isEmpty()
+        && writeFile(installerPath + QStringLiteral(".sha1"),
+                     sha1 + "  " + QFileInfo(installerPath).fileName().toLatin1());
+}
+
 QUrl writeVanillaFileFixture(const QString& rootPath, const QString& version,
                              const QByteArray& serverJar)
 {
@@ -91,6 +102,13 @@ bool writeArchive(const QString& path, const QList<QPair<QString, QByteArray>>& 
     return archive.close();
 }
 
+QByteArray fabricServerJarFixture(const QString& path)
+{
+    return writeArchive(path, {
+        { "META-INF/MANIFEST.MF", "Main-Class: net.fabricmc.loader.impl.launch.server.FabricServerLauncher\n" },
+    }) ? readFile(path) : QByteArray();
+}
+
 QJsonObject installerLibrary(const QString& name, const QString& path,
                              const QUrl& url, const QByteArray& contents)
 {
@@ -123,7 +141,7 @@ bool writeModernInstaller(const QString& path, const QJsonArray& profileLibrarie
     return writeArchive(path, {
         { "install_profile.json", profile },
         { "version.json", version },
-    });
+    }) && writeInstallerChecksum(path);
 }
 
 class ScopedEnvironmentVariable
@@ -1038,6 +1056,36 @@ class ServerInstanceTest : public QObject {
         QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Stopped, 5000);
     }
 
+    void startsCustomForgeWrapperWithExplicitRelativePath()
+    {
+#ifndef Q_OS_WIN
+        QSKIP("The cmd.exe custom-wrapper path is Windows-specific.");
+#else
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QString serverDirectory = temporaryRoot.filePath("server");
+        QVERIFY(writeFile(QDir(serverDirectory).filePath(QStringLiteral("run.bat")),
+                          "@echo off\r\necho [Server thread/INFO]: Done (0.1s)! For help, type \"help\"\r\nset /p line=\r\n"));
+
+        ServerInstance server("custom-forge-wrapper-env", "Custom Forge wrapper environment");
+        server.setServerDirectory(serverDirectory);
+        server.setVersion("1.21.1");
+        server.setLoaderType("forge");
+        server.setPort(unusedPort());
+        server.setEulaAccepted(true);
+        server.setJavaPath(fakeMinecraftServerPath());
+
+        ScopedEnvironmentVariable currentDirectorySearch(
+            "NoDefaultCurrentDirectoryInExePath", "1");
+        QVERIFY(server.start());
+        QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Running, 5000);
+        QVERIFY(server.consoleLog().contains(
+            "[Server thread/INFO]: Done (0.1s)! For help, type \"help\""));
+        QVERIFY(server.stop());
+        QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Stopped, 5000);
+#endif
+    }
+
     void filtersJava21OnlyOptionsByDetectedRuntime()
     {
         const QString content = QStringLiteral(
@@ -1500,8 +1548,8 @@ class ArgumentProbe {
     {
         QCOMPARE(ServerDiagnostics::classifyCrash("Error: Unrecognized VM option 'ZGenerational'"),
                  ServerCrashCause::JavaVersion);
-        QVERIFY(ServerDiagnostics::crashCauseExplanation(ServerCrashCause::JavaVersion)
-                    .contains("Java", Qt::CaseInsensitive));
+        QCOMPARE(ServerDiagnostics::crashCauseExplanation(ServerCrashCause::JavaVersion),
+                 QString("The selected Java version, or a Java option, does not match what this server needs. It may be too old or too new."));
     }
 
     void reportsProcessExitBeforeReadiness()
@@ -1774,17 +1822,25 @@ class ArgumentProbe {
             R"([{"loader":{"version":"0.17.0"}},{"loader":{"version":"0.16.10"}}])");
         fixtureHttp.addRoute(
             "/fabric/versions/loader/1.21.1/0.16.10/1.0.0/server/jar",
-            "exact fabric server");
+            fabricServerJarFixture(root.filePath("fixtures/exact-fabric-server.jar")));
         fixtureHttp.addRoute("/purpur/purpur/1.21.1",
                              R"({"builds":{"latest":"2412","all":[2400,2412]}})");
+        const QByteArray exactPurpurServer("exact purpur server");
+        fixtureHttp.addRoute("/purpur/purpur/1.21.1/2400",
+            QJsonDocument(QJsonObject{{ "md5", QString::fromLatin1(
+                QCryptographicHash::hash(exactPurpurServer, QCryptographicHash::Md5).toHex()) }})
+                .toJson(QJsonDocument::Compact));
         fixtureHttp.addRoute("/purpur/purpur/1.21.1/2400/download",
-                             "exact purpur server");
+                             exactPurpurServer);
 
         QVERIFY(writeFile(
             root.filePath(
                 "forge-maven/net/minecraftforge/forge/1.12.2-14.23.5.2860/"
                 "forge-1.12.2-14.23.5.2860-installer.jar"),
             "exact forge installer"));
+        QVERIFY(writeInstallerChecksum(root.filePath(
+            "forge-maven/net/minecraftforge/forge/1.12.2-14.23.5.2860/"
+            "forge-1.12.2-14.23.5.2860-installer.jar")));
         QVERIFY(!QFileInfo::exists(
             root.filePath("forge-maven/net/minecraftforge/forge/maven-metadata.xml")));
         QVERIFY(writeFile(
@@ -1792,6 +1848,9 @@ class ArgumentProbe {
                 "neoforge-maven/net/neoforged/neoforge/21.1.233/"
                 "neoforge-21.1.233-installer.jar"),
             "exact neoforge installer"));
+        QVERIFY(writeInstallerChecksum(root.filePath(
+            "neoforge-maven/net/neoforged/neoforge/21.1.233/"
+            "neoforge-21.1.233-installer.jar")));
 
         ServerProviderEndpoints endpoints{
             legacyVanillaManifest,
@@ -1842,6 +1901,7 @@ class ArgumentProbe {
             QStringLiteral("legacy-forge-maven/net/minecraftforge/forge/%1/forge-%1-installer.jar")
                 .arg(legacyMavenVersion));
         QVERIFY(writeFile(legacyInstaller, "suffixed legacy Forge installer"));
+        QVERIFY(writeInstallerChecksum(legacyInstaller));
         QVERIFY(writeFile(
             root.filePath("legacy-forge-maven/net/minecraftforge/forge/maven-metadata.xml"),
             QStringLiteral("<metadata><versioning><versions><version>%1</version>"
@@ -1884,6 +1944,9 @@ class ArgumentProbe {
                 QStringLiteral("net/minecraftforge/forge/%1/forge-%1-installer.jar")
                     .arg(modernMavenVersion)),
             "unsuffixed modern Forge installer"));
+        QVERIFY(writeInstallerChecksum(QDir(modernMavenRoot).filePath(
+            QStringLiteral("net/minecraftforge/forge/%1/forge-%1-installer.jar")
+                .arg(modernMavenVersion))));
         QVERIFY(writeFile(
             QDir(modernMavenRoot).filePath("net/minecraftforge/forge/maven-metadata.xml"),
             QStringLiteral("<metadata><versioning><versions><version>%1</version>"
@@ -2095,6 +2158,7 @@ class ArgumentProbe {
                 http.url("/libraries/legacy.jar"), libraryBytes) } },
         }).toJson(QJsonDocument::Compact);
         QVERIFY(writeArchive(installerPath, { { "install_profile.json", profile } }));
+        QVERIFY(writeInstallerChecksum(installerPath));
 
         const QString destination = root.filePath("forge-server");
         const QString countPath = root.filePath("installer-count");
@@ -2168,6 +2232,9 @@ class ArgumentProbe {
                 "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/"
                 "forge-1.21.1-52.0.1-installer.jar"),
             "synthetic forge installer"));
+        QVERIFY(writeInstallerChecksum(root.filePath(
+            "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/"
+            "forge-1.21.1-52.0.1-installer.jar")));
 
         ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
         endpoints.forgeMavenBase = directoryUrl(root.filePath("forge-maven"));
@@ -2227,6 +2294,9 @@ class ArgumentProbe {
                 "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/"
                 "forge-1.21.1-52.0.1-installer.jar"),
             "synthetic forge installer"));
+        QVERIFY(writeInstallerChecksum(root.filePath(
+            "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/"
+            "forge-1.21.1-52.0.1-installer.jar")));
 
         ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
         endpoints.forgeMavenBase = directoryUrl(root.filePath("forge-maven"));
@@ -2306,6 +2376,9 @@ class ArgumentProbe {
                 "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/"
                 "forge-1.21.1-52.0.1-installer.jar"),
             "synthetic incomplete forge installer"));
+        QVERIFY(writeInstallerChecksum(root.filePath(
+            "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/"
+            "forge-1.21.1-52.0.1-installer.jar")));
 
         ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
         endpoints.forgeMavenBase = directoryUrl(root.filePath("forge-maven"));
@@ -2342,6 +2415,9 @@ class ArgumentProbe {
                 "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/"
                 "forge-1.21.1-52.0.1-installer.jar"),
             "synthetic incomplete forge update installer"));
+        QVERIFY(writeInstallerChecksum(root.filePath(
+            "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/"
+            "forge-1.21.1-52.0.1-installer.jar")));
 
         const QString destination = root.filePath("existing-forge");
 #ifdef Q_OS_WIN
@@ -2383,6 +2459,9 @@ class ArgumentProbe {
                 "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/"
                 "forge-1.21.1-52.0.1-installer.jar"),
             "synthetic incomplete forge update installer"));
+        QVERIFY(writeInstallerChecksum(root.filePath(
+            "forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/"
+            "forge-1.21.1-52.0.1-installer.jar")));
 
         const QString destination = root.filePath("partially-updated-forge");
 #ifdef Q_OS_WIN
@@ -2428,6 +2507,9 @@ class ArgumentProbe {
                 "neoforge-maven/net/neoforged/forge/1.20.1-47.1.106/"
                 "forge-1.20.1-47.1.106-installer.jar"),
             "legacy neoforge installer"));
+        QVERIFY(writeInstallerChecksum(root.filePath(
+            "neoforge-maven/net/neoforged/forge/1.20.1-47.1.106/"
+            "forge-1.20.1-47.1.106-installer.jar")));
 
         ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
         endpoints.neoForgeMavenBase = directoryUrl(
@@ -2464,6 +2546,9 @@ class ArgumentProbe {
                 "neoforge-maven/net/neoforged/forge/1.20.1-47.1.106/"
                 "forge-1.20.1-47.1.106-installer.jar"),
             "latest legacy neoforge installer"));
+        QVERIFY(writeInstallerChecksum(root.filePath(
+            "neoforge-maven/net/neoforged/forge/1.20.1-47.1.106/"
+            "forge-1.20.1-47.1.106-installer.jar")));
 
         ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
         endpoints.neoForgeMavenBase = directoryUrl(
@@ -2919,15 +3004,24 @@ class ArgumentProbe {
 
         FixtureHttpServer fixtureHttp;
         QVERIFY(fixtureHttp.start());
+        const QByteArray fabricServerJar = fabricServerJarFixture(
+            root.filePath("fixtures/fabric-server.jar"));
+        QVERIFY(!fabricServerJar.isEmpty());
         fixtureHttp.addRoute("/fabric/versions/installer",
                              R"([{"version":"1.0.0","stable":true}])");
         fixtureHttp.addRoute("/fabric/versions/loader/1.21.8",
                              R"([{"loader":{"version":"0.16.10"}}])");
         fixtureHttp.addRoute(
             "/fabric/versions/loader/1.21.8/0.16.10/1.0.0/server/jar",
-            serverPayload);
+            fabricServerJar);
         fixtureHttp.addRoute("/purpur/purpur/1.21.8",
                              R"({"builds":{"latest":"2412"}})");
+        fixtureHttp.addRoute("/purpur/purpur/1.21.8/2412",
+                             R"({"md5":"00000000000000000000000000000000"})");
+        fixtureHttp.addRoute("/purpur/purpur/1.21.8/2412",
+            QJsonDocument(QJsonObject{{ "md5", QString::fromLatin1(
+                QCryptographicHash::hash(serverPayload, QCryptographicHash::Md5).toHex()) }})
+                .toJson(QJsonDocument::Compact));
         fixtureHttp.addRoute("/purpur/purpur/1.21.8/2412/download",
                              serverPayload);
 
@@ -2940,6 +3034,9 @@ class ArgumentProbe {
                 "fixtures/forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/"
                 "forge-1.21.1-52.0.1-installer.jar"),
             "synthetic forge installer"));
+        QVERIFY(writeInstallerChecksum(root.filePath(
+            "fixtures/forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/"
+            "forge-1.21.1-52.0.1-installer.jar")));
 
         const QString neoForgeVersions = root.filePath("fixtures/neoforge-versions.json");
         QVERIFY(writeFile(neoForgeVersions, R"({"versions":["21.1.50"]})"));
@@ -2948,6 +3045,9 @@ class ArgumentProbe {
                 "fixtures/neoforge-maven/net/neoforged/neoforge/21.1.50/"
                 "neoforge-21.1.50-installer.jar"),
             "synthetic neoforge installer"));
+        QVERIFY(writeInstallerChecksum(root.filePath(
+            "fixtures/neoforge-maven/net/neoforged/neoforge/21.1.50/"
+            "neoforge-21.1.50-installer.jar")));
 
         ServerProviderEndpoints endpoints{
             QUrl::fromLocalFile(vanillaManifest),
@@ -2984,7 +3084,8 @@ class ArgumentProbe {
             } else {
                 QFile installed(QDir(destination).filePath("server.jar"));
                 QVERIFY(installed.open(QIODevice::ReadOnly));
-                QCOMPARE(installed.readAll(), serverPayload);
+                QCOMPARE(installed.readAll(), provider.first == "fabric"
+                    ? fabricServerJar : serverPayload);
             }
         }
     }
@@ -3012,6 +3113,8 @@ class ArgumentProbe {
                              R"([{"loader":{"version":"0.16.10"}}])");
         fixtureHttp.addRoute("/purpur/purpur/1.21.8",
                              R"({"builds":{"latest":"2412"}})");
+        fixtureHttp.addRoute("/purpur/purpur/1.21.8/2412",
+                             R"({"md5":"00000000000000000000000000000000"})");
         fixtureHttp.addRoute(
             "/forge-maven/net/minecraftforge/forge/maven-metadata.xml",
             R"(<?xml version="1.0"?><metadata><versioning><versions><version>1.21.1-52.0.1</version></versions></versioning></metadata>)");
@@ -3053,6 +3156,125 @@ class ArgumentProbe {
             QVERIFY(!QFileInfo::exists(
                 QDir(destination).filePath(provider.first + "-installer.jar")));
         }
+    }
+
+    void rejectsPurpurJarWithMismatchedMd5()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        FixtureHttpServer fixtureHttp;
+        QVERIFY(fixtureHttp.start());
+        fixtureHttp.addRoute("/purpur/purpur/1.21.8",
+                             R"({"builds":{"latest":"2412"}})");
+        fixtureHttp.addRoute("/purpur/purpur/1.21.8/2412", R"({"md5":"00000000000000000000000000000000"})");
+        fixtureHttp.addRoute("/purpur/purpur/1.21.8/2412/download", "wrong bytes");
+
+        ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
+        endpoints.purpurApiBase = fixtureHttp.baseUrl("purpur");
+        ServerDownloader downloader(endpoints);
+        QSignalSpy finished(&downloader, &ServerDownloader::finished);
+        const QString destination = temporaryRoot.filePath("purpur-server");
+        downloader.startDownload("1.21.8", "purpur", destination);
+
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 5000);
+        QVERIFY(!finished.constFirst().at(0).toBool());
+        QVERIFY(!QFileInfo::exists(QDir(destination).filePath("server.jar")));
+    }
+
+    void rejectsForgeInstallerWithMismatchedSha1()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        FixtureHttpServer fixtureHttp;
+        QVERIFY(fixtureHttp.start());
+        fixtureHttp.addRoute(
+            "/forge-maven/net/minecraftforge/forge/maven-metadata.xml",
+            R"(<metadata><versioning><versions><version>1.21.1-52.0.1</version></versions></versioning></metadata>)");
+        fixtureHttp.addRoute(
+            "/forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/forge-1.21.1-52.0.1-installer.jar",
+            "synthetic forge installer");
+        fixtureHttp.addRoute(
+            "/forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/forge-1.21.1-52.0.1-installer.jar.sha1",
+            QByteArray(40, '0'));
+
+        ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
+        endpoints.forgeMavenBase = fixtureHttp.baseUrl("forge-maven");
+        ServerDownloader downloader(endpoints);
+        QSignalSpy finished(&downloader, &ServerDownloader::finished);
+        const QString destination = temporaryRoot.filePath("forge-server");
+        downloader.startDownload("1.21.1", "forge", destination,
+                                 fakeMinecraftServerPath(), "52.0.1");
+
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 10000);
+        QVERIFY(!finished.constFirst().at(0).toBool());
+        QVERIFY(!QFileInfo::exists(QDir(destination).filePath("server.jar")));
+        QVERIFY(!QFileInfo::exists(QDir(destination).filePath("forge-installer.jar")));
+    }
+
+    void installsForgeInstallerWhenSha1ReturnsHttp404()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        FixtureHttpServer fixtureHttp;
+        QVERIFY(fixtureHttp.start());
+        fixtureHttp.addRoute(
+            "/forge-maven/net/minecraftforge/forge/maven-metadata.xml",
+            R"(<metadata><versioning><versions><version>1.21.1-52.0.1</version></versions></versioning></metadata>)");
+        fixtureHttp.addRoute(
+            "/forge-maven/net/minecraftforge/forge/1.21.1-52.0.1/forge-1.21.1-52.0.1-installer.jar",
+            "synthetic forge installer");
+
+        ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
+        endpoints.forgeMavenBase = fixtureHttp.baseUrl("forge-maven");
+        ServerDownloader downloader(endpoints);
+        QSignalSpy finished(&downloader, &ServerDownloader::finished);
+        QSignalSpy statuses(&downloader, &ServerDownloader::statusMessage);
+        const QString destination = temporaryRoot.filePath("forge-server");
+        downloader.startDownload("1.21.1", "forge", destination,
+                                 fakeMinecraftServerPath(), "52.0.1");
+
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 10000);
+        QVERIFY2(finished.constFirst().at(0).toBool(),
+                 qPrintable(finished.constFirst().at(1).toString()));
+        bool reportedMissingChecksum = false;
+        for (const QList<QVariant>& status : statuses) {
+            if (status.constFirst().toString()
+                == "No checksum is published for this installer; continuing without verification.") {
+                reportedMissingChecksum = true;
+                break;
+            }
+        }
+        QVERIFY(reportedMissingChecksum);
+        QVERIFY(QFileInfo::exists(QDir(destination).filePath("run.bat"))
+                || QFileInfo::exists(QDir(destination).filePath("run.sh")));
+    }
+
+    void rejectsFabricDownloadThatIsNotAJar()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        FixtureHttpServer fixtureHttp;
+        QVERIFY(fixtureHttp.start());
+        fixtureHttp.addRoute("/fabric/versions/installer",
+                             R"([{"version":"1.0.0","stable":true}])");
+        fixtureHttp.addRoute("/fabric/versions/loader/1.21.8",
+                             R"([{"loader":{"version":"0.16.10"}}])");
+        fixtureHttp.addRoute(
+            "/fabric/versions/loader/1.21.8/0.16.10/1.0.0/server/jar",
+            "not a zip archive");
+
+        ServerProviderEndpoints endpoints = ServerProviderEndpoints::production();
+        endpoints.fabricApiBase = fixtureHttp.baseUrl("fabric");
+        ServerDownloader downloader(endpoints);
+        QSignalSpy finished(&downloader, &ServerDownloader::finished);
+        const QString destination = temporaryRoot.filePath("fabric-server");
+        downloader.startDownload("1.21.8", "fabric", destination);
+
+        QTRY_COMPARE_WITH_TIMEOUT(finished.size(), 1, 5000);
+        QVERIFY(!finished.constFirst().at(0).toBool());
+        QCOMPARE(finished.constFirst().at(1).toString(),
+                 QString("The downloaded Fabric server launcher is not a valid jar file."));
+        QVERIFY(!QFileInfo::exists(QDir(destination).filePath("server.jar")));
     }
 
     void installsVerifiedContentUpdateAtomically()

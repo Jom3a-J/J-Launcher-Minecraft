@@ -107,7 +107,7 @@ QString ServerDiagnostics::crashCauseExplanation(ServerCrashCause cause)
 {
     switch (cause) {
         case ServerCrashCause::JavaVersion:
-            return QObject::tr("The selected Java version is too old for this server version.");
+            return QObject::tr("The selected Java version, or a Java option, does not match what this server needs. It may be too old or too new.");
         case ServerCrashCause::LaunchFiles:
             return QObject::tr("The server JAR or a required launch file is missing or cannot be opened.");
         case ServerCrashCause::PortConflict:

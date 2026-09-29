@@ -455,7 +455,8 @@ bool ServerInstance::start()
 #ifdef Q_OS_WIN
             m_process->start("cmd.exe",
                              QStringList() << "/d" << "/c"
-                                           << QFileInfo(loaderScriptPath()).fileName()
+                                           << (QStringLiteral(".\\")
+                                               + QFileInfo(loaderScriptPath()).fileName())
                                            << "nogui");
 #else
             m_process->start(QStringLiteral("/bin/sh"),

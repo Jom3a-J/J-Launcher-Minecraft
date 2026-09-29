@@ -273,6 +273,10 @@ void ServerDownloader::startDownload(const QString &version, const QString &type
     m_resolvedLoaderVersion.clear();
     m_pendingForgeVersion.clear();
     m_pendingForgeMavenVersion.clear();
+    m_fabricJarPendingValidation = false;
+    m_pendingInstallerPath.clear();
+    m_pendingInstallerUrl.clear();
+    m_pendingPurpurBuild.clear();
     m_legacyForgeServerJarPath.clear();
     m_fetchingLegacyForgeServerJar = false;
     m_downloadingLegacyForgeServerJar = false;
@@ -512,9 +516,30 @@ void ServerDownloader::handleReply(QNetworkReply *reply)
 
     if (reply->error() != QNetworkReply::NoError) {
         QString errorStr = reply->errorString();
+        const int statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         reply->deleteLater();
         if (m_step == Step::ResolvingForgeInstallerMetadata) {
             prepareForgeInstaller(m_pendingForgeVersion, QString());
+            return;
+        }
+        if (m_step == Step::FetchingForgeInstallerChecksum
+            || m_step == Step::FetchingNeoForgeInstallerChecksum) {
+            if (statusCode == 404) {
+                emit statusMessage(tr("No checksum is published for this installer; continuing without verification."));
+                const bool forge = m_step == Step::FetchingForgeInstallerChecksum;
+                m_step = forge ? Step::DownloadingForgeInstaller : Step::DownloadingNeoForgeInstaller;
+                startFileDownload(m_pendingInstallerUrl, m_pendingInstallerPath, {},
+                                  QCryptographicHash::Sha1, false);
+                return;
+            }
+            cleanUp();
+            finishDownload(false, tr("Failed to fetch the installer checksum: %1").arg(errorStr));
+            return;
+        }
+        if (m_step == Step::FetchingPurpurBuildInfo) {
+            cleanUp();
+            finishDownload(false, tr("Failed to fetch the Purpur checksum for build %1: %2")
+                                     .arg(m_pendingPurpurBuild, errorStr));
             return;
         }
         cleanUp();
@@ -559,14 +584,23 @@ void ServerDownloader::handleReply(QNetworkReply *reply)
         case Step::FetchingPurpurBuilds:
             onPurpurBuildsFetched(responseData);
             break;
+        case Step::FetchingPurpurBuildInfo:
+            onPurpurBuildInfoFetched(responseData);
+            break;
         case Step::FetchingForgeVersions:
             onForgeVersionsFetched(responseData);
             break;
         case Step::ResolvingForgeInstallerMetadata:
             onForgeInstallerMetadataFetched(responseData);
             break;
+        case Step::FetchingForgeInstallerChecksum:
+            onForgeInstallerChecksumFetched(responseData);
+            break;
         case Step::FetchingNeoForgeVersions:
             onNeoForgeVersionsFetched(responseData);
+            break;
+        case Step::FetchingNeoForgeInstallerChecksum:
+            onNeoForgeInstallerChecksumFetched(responseData);
             break;
         default:
             break;
@@ -655,6 +689,16 @@ void ServerDownloader::onFileDownloadSucceeded()
             onNeoForgeInstallerDownloaded();
             return;
         case Step::DownloadingJar:
+            if (m_fabricJarPendingValidation) {
+                MMCZip::ArchiveReader archive(m_targetJarPath);
+                if (!archive.goToFile(QStringLiteral("META-INF/MANIFEST.MF"))) {
+                    QFile::remove(m_targetJarPath);
+                    m_fabricJarPendingValidation = false;
+                    finishDownload(false, tr("The downloaded Fabric server launcher is not a valid jar file."));
+                    return;
+                }
+                m_fabricJarPendingValidation = false;
+            }
             emit statusMessage(tr("Download complete!"));
             emit progress(100);
             finishDownload(true);
@@ -1402,6 +1446,7 @@ void ServerDownloader::onFabricLoaderFetched(const QString &installerVer, const 
                  .arg(m_version, loaderVer, installerVer)));
 
     emit statusMessage(tr("Downloading Fabric server (loader %1)...").arg(loaderVer));
+    m_fabricJarPendingValidation = true;
     downloadFile(jarUrl.toString(), m_targetJarPath);
 }
 
@@ -1456,11 +1501,31 @@ void ServerDownloader::onPurpurBuildsFetched(const QByteArray &data)
     }
     m_resolvedLoaderVersion = latestBuild;
 
-    const QUrl jarUrl = m_endpoints.purpurApiBase.resolved(
-        QUrl(QString("purpur/%1/%2/download").arg(m_version, latestBuild)));
+    m_pendingPurpurBuild = latestBuild;
+    const QUrl metadataUrl = m_endpoints.purpurApiBase.resolved(
+        QUrl(QString("purpur/%1/%2").arg(m_version, latestBuild)));
+    m_step = Step::FetchingPurpurBuildInfo;
+    emit statusMessage(tr("Fetching Purpur build checksum..."));
+    m_currentReply = m_network->get(createRequest(metadataUrl));
+    connect(m_currentReply, &QNetworkReply::finished, this, [this]() {
+        handleReply(m_currentReply);
+    });
+}
 
-    emit statusMessage(tr("Downloading Purpur build %1...").arg(latestBuild));
-    downloadFile(jarUrl.toString(), m_targetJarPath);
+void ServerDownloader::onPurpurBuildInfoFetched(const QByteArray &data)
+{
+    const QJsonDocument doc = QJsonDocument::fromJson(data);
+    const QByteArray checksum = doc.object().value(QStringLiteral("md5")).toString().toLatin1();
+    static const QRegularExpression md5Pattern(QStringLiteral("^[0-9a-fA-F]{32}$"));
+    if (!doc.isObject() || !md5Pattern.match(QString::fromLatin1(checksum)).hasMatch()) {
+        finishDownload(false, tr("Purpur did not provide a valid checksum for build %1.")
+                                 .arg(m_pendingPurpurBuild));
+        return;
+    }
+    const QUrl jarUrl = m_endpoints.purpurApiBase.resolved(
+        QUrl(QString("purpur/%1/%2/download").arg(m_version, m_pendingPurpurBuild)));
+    emit statusMessage(tr("Downloading Purpur build %1...").arg(m_pendingPurpurBuild));
+    downloadFile(jarUrl.toString(), m_targetJarPath, checksum, QCryptographicHash::Md5);
 }
 
 // ==================== Forge ====================
@@ -1597,11 +1662,40 @@ void ServerDownloader::beginForgeInstallerDownload(const QString &forgeVersion,
 
     QString installerPath = QDir(m_destinationDir).filePath("forge-installer.jar");
 
-    m_step = Step::DownloadingForgeInstaller;
-    emit statusMessage(tr("Downloading Forge %1 installer...").arg(forgeVersion));
-
     cleanUp();
-    startFileDownload(installerUrl, installerPath, {}, QCryptographicHash::Sha256, false);
+    m_pendingInstallerUrl = installerUrl;
+    m_pendingInstallerPath = installerPath;
+    fetchForgeInstallerChecksum(installerUrl, installerPath);
+}
+
+void ServerDownloader::fetchForgeInstallerChecksum(const QUrl &installerUrl,
+                                                    const QString &installerPath)
+{
+    QUrl checksumUrl = installerUrl;
+    checksumUrl.setPath(checksumUrl.path() + QStringLiteral(".sha1"));
+    m_pendingInstallerUrl = installerUrl;
+    m_pendingInstallerPath = installerPath;
+    m_step = Step::FetchingForgeInstallerChecksum;
+    emit statusMessage(tr("Fetching Forge installer checksum..."));
+    m_currentReply = m_network->get(createRequest(checksumUrl));
+    connect(m_currentReply, &QNetworkReply::finished, this, [this]() {
+        handleReply(m_currentReply);
+    });
+}
+
+void ServerDownloader::onForgeInstallerChecksumFetched(const QByteArray &data)
+{
+    const QStringList tokens = QString::fromLatin1(data).split(
+        QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+    const QByteArray token = tokens.isEmpty() ? QByteArray() : tokens.first().toLatin1();
+    if (!isSha1(token)) {
+        finishDownload(false, tr("The Forge installer checksum is malformed."));
+        return;
+    }
+    m_step = Step::DownloadingForgeInstaller;
+    emit statusMessage(tr("Downloading Forge installer..."));
+    startFileDownload(m_pendingInstallerUrl, m_pendingInstallerPath, token,
+                      QCryptographicHash::Sha1, false);
 }
 
 void ServerDownloader::onForgeInstallerDownloaded()
@@ -1913,11 +2007,40 @@ void ServerDownloader::downloadNeoForgeInstaller(const QString &neoforgeVersion)
 
     QString installerPath = QDir(m_destinationDir).filePath("neoforge-installer.jar");
 
-    m_step = Step::DownloadingNeoForgeInstaller;
-    emit statusMessage(tr("Downloading NeoForge %1 installer...").arg(neoforgeVersion));
-
     cleanUp();
-    startFileDownload(installerUrl, installerPath, {}, QCryptographicHash::Sha256, false);
+    m_pendingInstallerUrl = installerUrl;
+    m_pendingInstallerPath = installerPath;
+    fetchNeoForgeInstallerChecksum(installerUrl, installerPath);
+}
+
+void ServerDownloader::fetchNeoForgeInstallerChecksum(const QUrl &installerUrl,
+                                                       const QString &installerPath)
+{
+    QUrl checksumUrl = installerUrl;
+    checksumUrl.setPath(checksumUrl.path() + QStringLiteral(".sha1"));
+    m_pendingInstallerUrl = installerUrl;
+    m_pendingInstallerPath = installerPath;
+    m_step = Step::FetchingNeoForgeInstallerChecksum;
+    emit statusMessage(tr("Fetching NeoForge installer checksum..."));
+    m_currentReply = m_network->get(createRequest(checksumUrl));
+    connect(m_currentReply, &QNetworkReply::finished, this, [this]() {
+        handleReply(m_currentReply);
+    });
+}
+
+void ServerDownloader::onNeoForgeInstallerChecksumFetched(const QByteArray &data)
+{
+    const QStringList tokens = QString::fromLatin1(data).split(
+        QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+    const QByteArray token = tokens.isEmpty() ? QByteArray() : tokens.first().toLatin1();
+    if (!isSha1(token)) {
+        finishDownload(false, tr("The NeoForge installer checksum is malformed."));
+        return;
+    }
+    m_step = Step::DownloadingNeoForgeInstaller;
+    emit statusMessage(tr("Downloading NeoForge installer..."));
+    startFileDownload(m_pendingInstallerUrl, m_pendingInstallerPath, token,
+                      QCryptographicHash::Sha1, false);
 }
 
 void ServerDownloader::onNeoForgeInstallerDownloaded()

@@ -159,6 +159,17 @@ bool readProcessSnapshot(qint64 processId, ProcessSnapshot *snapshot)
 #endif
 
 namespace {
+QStringList modrinthLoadersForServer(const QString &loaderType)
+{
+    const QString loader = loaderType.trimmed().toLower();
+    if (loader == QStringLiteral("paper"))
+        return { QStringLiteral("paper"), QStringLiteral("spigot"), QStringLiteral("bukkit") };
+    if (loader == QStringLiteral("purpur"))
+        return { QStringLiteral("purpur"), QStringLiteral("paper"),
+                 QStringLiteral("spigot"), QStringLiteral("bukkit") };
+    return { loader };
+}
+
 QString formatByteSize(qint64 bytes)
 {
     if (bytes < 1024) return QString::number(bytes) + " B";
@@ -2763,7 +2774,9 @@ void ServerListPage::onCheckContentUpdates()
             query.addQueryItem(QStringLiteral("pageSize"), QStringLiteral("10000"));
             query.addQueryItem(QStringLiteral("gameVersion"), server->version());
         } else {
-            query.addQueryItem("loaders", QString("[\"%1\"]").arg(loader));
+            const QJsonArray loaders = QJsonArray::fromStringList(modrinthLoadersForServer(loader));
+            query.addQueryItem(QStringLiteral("loaders"), QString::fromUtf8(
+                QJsonDocument(loaders).toJson(QJsonDocument::Compact)));
             query.addQueryItem("game_versions", QString("[\"%1\"]").arg(server->version()));
         }
         url.setQuery(query);
