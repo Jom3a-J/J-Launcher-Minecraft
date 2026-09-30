@@ -847,6 +847,10 @@ SET(LAUNCHER_SOURCES
     server/ServerPackImportTransaction.cpp
     server/ServerDiagnostics.h
     server/ServerDiagnostics.cpp
+    server/ServerFiles.h
+    server/ServerFiles.cpp
+    server/ServerProcessStats.h
+    server/ServerProcessStats.cpp
     server/ServerContentUpdater.h
     server/ServerContentUpdater.cpp
     server/ServerPlayerAccess.h
@@ -857,6 +861,14 @@ SET(LAUNCHER_SOURCES
     server/ServerDownloader.cpp
     ui/pages/server/ServerListPage.h
     ui/pages/server/ServerListPage.cpp
+    ui/pages/server/ServerAutomationTab.h
+    ui/pages/server/ServerAutomationTab.cpp
+    ui/pages/server/ServerPlayersTab.h
+    ui/pages/server/ServerPlayersTab.cpp
+    ui/pages/server/ServerUpdatesTab.h
+    ui/pages/server/ServerUpdatesTab.cpp
+    ui/pages/server/ServerPageStyle.h
+    ui/pages/server/ServerPageStyle.cpp
     ui/pages/server/ServerListPage.ui
     ui/pages/server/ServerSettingsPage.h
     ui/pages/server/ServerSettingsPage.cpp

@@ -16,6 +16,7 @@
 #include "ServerManager.h"
 #include "ServerInstance.h"
 #include "ServerDiagnostics.h"
+#include "ServerFiles.h"
 #include "FileSystem.h"
 #include <QFile>
 #include <QDir>
@@ -96,17 +97,6 @@ bool copyDirectoryContents(const QString &sourcePath, const QString &destination
     return true;
 }
 
-qint64 directorySize(const QString &directoryPath)
-{
-    qint64 total = 0;
-    QDirIterator iterator(directoryPath, QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden,
-                          QDirIterator::Subdirectories);
-    while (iterator.hasNext()) {
-        iterator.next();
-        total += iterator.fileInfo().size();
-    }
-    return total;
-}
 
 QStringList includedBackupCategories(const QString &serverDirectory)
 {
@@ -221,7 +211,7 @@ ServerBackupInfo inspectBackup(const std::shared_ptr<ServerInstance> &server,
     ServerBackupInfo info;
     info.path = QFileInfo(backupPath).absoluteFilePath();
     info.name = QFileInfo(backupPath).fileName();
-    info.size = directorySize(backupPath);
+    info.size = ServerFiles::directorySize(backupPath);
 
     QFile manifestFile(QDir(backupPath).filePath(BACKUP_MANIFEST));
     if (!manifestFile.open(QIODevice::ReadOnly)) {

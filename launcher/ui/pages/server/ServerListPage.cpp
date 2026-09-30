@@ -22,6 +22,8 @@
 #include "server/ServerDownloader.h"
 #include "server/ServerDiagnostics.h"
 #include "server/ServerContentUpdater.h"
+#include "server/ServerFiles.h"
+#include "server/ServerProcessStats.h"
 #include "server/ServerModpackInstaller.h"
 #include "server/ServerPlayerAccess.h"
 #include "ui/dialogs/CreateServerDialog.h"
@@ -29,6 +31,10 @@
 #include "ui/dialogs/ProgressDialog.h"
 #include "ui/dialogs/ResourceDownloadDialog.h"
 #include "ui/pages/modplatform/ResourcePage.h"
+#include "ui/pages/server/ServerAutomationTab.h"
+#include "ui/pages/server/ServerPageStyle.h"
+#include "ui/pages/server/ServerPlayersTab.h"
+#include "ui/pages/server/ServerUpdatesTab.h"
 #include "ui/pages/server/ServerSettingsPage.h"
 #include "minecraft/MinecraftInstance.h"
 #include "minecraft/PackProfile.h"
@@ -110,223 +116,14 @@
 #include <QFutureWatcher>
 #include <QtConcurrent/QtConcurrentRun>
 
-#ifdef Q_OS_WIN
-#include <windows.h>
-#include <psapi.h>
-#include <tlhelp32.h>
+using ServerPageStyle::applyMutedLabelPalette;
+using ServerPageStyle::launcherIcon;
 
 namespace {
-struct ProcessSnapshot {
-    quint64 cpuMilliseconds = 0;
-    qint64 workingSetBytes = 0;
-};
-
-quint64 fileTimeMilliseconds(const FILETIME &fileTime)
-{
-    ULARGE_INTEGER value;
-    value.LowPart = fileTime.dwLowDateTime;
-    value.HighPart = fileTime.dwHighDateTime;
-    return value.QuadPart / 10000;
-}
-
-bool readProcessSnapshot(qint64 processId, ProcessSnapshot *snapshot)
-{
-    if (!snapshot || processId <= 0) return false;
-    HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, static_cast<DWORD>(processId));
-    if (!process) return false;
-
-    FILETIME creation, exitTime, kernel, user;
-    const bool haveTimes = GetProcessTimes(process, &creation, &exitTime, &kernel, &user);
-    using GetProcessMemoryInfoFunction = BOOL (WINAPI *)(HANDLE, PPROCESS_MEMORY_COUNTERS, DWORD);
-    static GetProcessMemoryInfoFunction getProcessMemoryInfo = nullptr;
-    static bool memoryFunctionLoaded = false;
-    if (!memoryFunctionLoaded) {
-        HMODULE psapi = GetModuleHandleW(L"psapi.dll");
-        if (!psapi) psapi = LoadLibraryW(L"psapi.dll");
-        if (psapi) getProcessMemoryInfo = reinterpret_cast<GetProcessMemoryInfoFunction>(GetProcAddress(psapi, "GetProcessMemoryInfo"));
-        memoryFunctionLoaded = true;
-    }
-
-    PROCESS_MEMORY_COUNTERS_EX memoryCounters = {};
-    memoryCounters.cb = sizeof(memoryCounters);
-    const bool haveMemory = getProcessMemoryInfo
-        && getProcessMemoryInfo(process, reinterpret_cast<PPROCESS_MEMORY_COUNTERS>(&memoryCounters), sizeof(memoryCounters));
-    CloseHandle(process);
-    if (!haveTimes || !haveMemory) return false;
-
-    snapshot->cpuMilliseconds = fileTimeMilliseconds(kernel) + fileTimeMilliseconds(user);
-    snapshot->workingSetBytes = static_cast<qint64>(memoryCounters.WorkingSetSize);
-    return true;
-}
-
-/*! The process whose load should be shown for a server.
- *
- *  Forge and NeoForge servers start through run.bat, so the launched process is cmd.exe, which
- *  uses almost no CPU or memory. The Java process it starts is the real server; returns that
- *  (searching a couple of levels down) or processId itself when there is none.
- */
-qint64 serverWorkProcessId(qint64 processId)
-{
-    if (processId <= 0) return processId;
-    HANDLE processes = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (processes == INVALID_HANDLE_VALUE) return processId;
-
-    QHash<DWORD, QList<QPair<DWORD, QString>>> children;
-    QString launchedName;
-    PROCESSENTRY32W entry = {};
-    entry.dwSize = sizeof(entry);
-    for (BOOL more = Process32FirstW(processes, &entry); more; more = Process32NextW(processes, &entry)) {
-        const QString name = QString::fromWCharArray(entry.szExeFile).toLower();
-        if (entry.th32ProcessID == static_cast<DWORD>(processId)) {
-            launchedName = name;
-        }
-        children[entry.th32ParentProcessID].append({ entry.th32ProcessID, name });
-    }
-    CloseHandle(processes);
-
-    const auto isJava = [](const QString &name) {
-        return name == QStringLiteral("java.exe") || name == QStringLiteral("javaw.exe");
-    };
-    if (isJava(launchedName)) return processId;
-
-    QList<DWORD> level{ static_cast<DWORD>(processId) };
-    for (int depth = 0; depth < 3 && !level.isEmpty(); ++depth) {
-        QList<DWORD> next;
-        for (const DWORD parent : level) {
-            for (const auto &child : children.value(parent)) {
-                if (isJava(child.second)) return child.first;
-                next.append(child.first);
-            }
-        }
-        level = next;
-    }
-    return processId;
-}
-}
-#endif
-
-namespace {
-/// Whether CurseForge requests can be made. False without the launcher's Application object,
-/// which is how the page runs in tests.
-bool curseForgeAvailable()
-{
-    Application *application = APPLICATION_DYN;
-    return application && (application->capabilities() & Application::SupportsFlame);
-}
-
-QStringList modrinthLoadersForServer(const QString &loaderType)
-{
-    const QString loader = loaderType.trimmed().toLower();
-    if (loader == QStringLiteral("paper"))
-        return { QStringLiteral("paper"), QStringLiteral("spigot"), QStringLiteral("bukkit") };
-    if (loader == QStringLiteral("purpur"))
-        return { QStringLiteral("purpur"), QStringLiteral("paper"),
-                 QStringLiteral("spigot"), QStringLiteral("bukkit") };
-    return { loader };
-}
-
-QString formatByteSize(qint64 bytes)
-{
-    if (bytes < 1024) return QString::number(bytes) + " B";
-    if (bytes < 1024 * 1024) return QString::number(bytes / 1024.0, 'f', 1) + " KB";
-    if (bytes < 1024ll * 1024 * 1024) return QString::number(bytes / (1024.0 * 1024.0), 'f', 1) + " MB";
-    return QString::number(bytes / (1024.0 * 1024.0 * 1024.0), 'f', 1) + " GB";
-}
-
-QNetworkRequest updateRequest(const QUrl &url)
-{
-    QNetworkRequest request(url);
-    request.setRawHeader("User-Agent", "JLauncher/1.0");
-    request.setRawHeader("Accept", "application/json");
-    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
-                         QNetworkRequest::NoLessSafeRedirectPolicy);
-    return request;
-}
-
-QNetworkRequest curseForgeUpdateRequest(const QUrl &url)
-{
-    QNetworkRequest request = updateRequest(url);
-    request.setRawHeader("x-api-key", APPLICATION->getFlameAPIKey().toUtf8());
-    return request;
-}
-
-void showContentUpdate(QTreeWidgetItem *item,
-                       const ServerContentUpdateCandidate &update)
-{
-    if (!item) return;
-    if (!update.available && !update.upToDate) {
-        item->setText(2, QObject::tr("No compatible update"));
-    } else if (update.upToDate) {
-        item->setText(2, QObject::tr("Up to date"));
-    } else {
-        item->setText(2, QObject::tr("Update available: %1").arg(update.versionNumber));
-        item->setData(0, Qt::UserRole, update.url.toString());
-        item->setData(0, Qt::UserRole + 3, update.fileName);
-        item->setData(0, Qt::UserRole + 4, static_cast<int>(update.hashAlgorithm));
-        item->setData(0, Qt::UserRole + 5, update.expectedHash);
-        item->setData(0, Qt::UserRole + 6, update.versionId);
-    }
-}
-
-QStringList installedContentDetails(const QFileInfo &file)
-{
-    QString filename = file.fileName();
-    const bool disabled = filename.endsWith(".disabled", Qt::CaseInsensitive);
-    if (disabled) filename.chop(QString(".disabled").size());
-    if (filename.endsWith(".jar", Qt::CaseInsensitive)) filename.chop(QString(".jar").size());
-
-    int versionStart = -1;
-    for (int index = 1; index < filename.size(); ++index) {
-        if ((filename.at(index - 1) == '-' || filename.at(index - 1) == '_') && filename.at(index).isDigit()) {
-            versionStart = index;
-            break;
-        }
-    }
-
-    QString name = versionStart > 0 ? filename.left(versionStart - 1) : filename;
-    const QString version = versionStart > 0 ? filename.mid(versionStart) : QObject::tr("—");
-    name.replace('-', ' ');
-    name.replace('_', ' ');
-    return { name, version, disabled ? QObject::tr("Disabled") : QObject::tr("Enabled") };
-}
-
-QIcon launcherIcon(const QString &name, QStyle::StandardPixmap fallback)
-{
-    const QIcon icon = QIcon::fromTheme(name);
-    if (!icon.isNull()) {
-        return icon;
-    }
-
-    // Keep this surface in the launcher's icon family even when a custom or
-    // incomplete theme does not provide an icon. The blue pack is the product
-    // default; platform icons are only the final safety fallback.
-    const QIcon defaultIcon(
-        QStringLiteral(":/icons/pe_blue/scalable/%1.svg").arg(name));
-    return defaultIcon.isNull()
-        ? QApplication::style()->standardIcon(fallback)
-        : defaultIcon;
-}
 
 QIcon serverCardIcon()
 {
     return launcherIcon("server", QStyle::SP_ComputerIcon);
-}
-
-void applyMutedLabelPalette(QLabel *label)
-{
-    if (!label) return;
-    QPalette labelPalette = label->palette();
-    const QColor foreground = labelPalette.color(QPalette::WindowText);
-    const QColor background = label->parentWidget()
-        ? label->parentWidget()->palette().color(QPalette::Window)
-        : labelPalette.color(QPalette::Window);
-    const QColor muted(
-        (foreground.red() * 2 + background.red()) / 3,
-        (foreground.green() * 2 + background.green()) / 3,
-        (foreground.blue() * 2 + background.blue()) / 3);
-    labelPalette.setColor(QPalette::WindowText, muted);
-    labelPalette.setColor(QPalette::Text, muted);
-    label->setPalette(labelPalette);
 }
 
 QIcon serverFileIcon(const QFileInfo &file)
@@ -357,80 +154,6 @@ QIcon serverFileIcon(const QFileInfo &file)
     return launcherIcon("notes", QStyle::SP_FileIcon);
 }
 
-QStringList modIdsFromJar(const QString& path)
-{
-    QStringList identifiers;
-    MMCZip::ArchiveReader fabricArchive(path);
-    if (const auto metadata = fabricArchive.goToFile(QStringLiteral("fabric.mod.json"))) {
-        QJsonParseError parseError;
-        const QJsonDocument document = QJsonDocument::fromJson(
-            metadata->readAll(), &parseError);
-        if (parseError.error == QJsonParseError::NoError && document.isObject()) {
-            const QJsonObject object = document.object();
-            identifiers << object.value(QStringLiteral("id")).toString().toLower();
-            for (const QJsonValue& provided :
-                 object.value(QStringLiteral("provides")).toArray()) {
-                identifiers << provided.toString().toLower();
-            }
-        }
-    }
-
-    MMCZip::ArchiveReader quiltArchive(path);
-    if (const auto metadata = quiltArchive.goToFile(QStringLiteral("quilt.mod.json"))) {
-        QJsonParseError parseError;
-        const QJsonDocument document = QJsonDocument::fromJson(
-            metadata->readAll(), &parseError);
-        if (parseError.error == QJsonParseError::NoError && document.isObject()) {
-            identifiers << document.object()
-                               .value(QStringLiteral("quilt_loader"))
-                               .toObject()
-                               .value(QStringLiteral("id"))
-                               .toString()
-                               .toLower();
-        }
-    }
-
-    for (const QString& metadataPath : {
-             QStringLiteral("META-INF/mods.toml"),
-             QStringLiteral("META-INF/neoforge.mods.toml") }) {
-        MMCZip::ArchiveReader forgeArchive(path);
-        if (const auto metadata = forgeArchive.goToFile(metadataPath)) {
-            const QString contents = QString::fromUtf8(metadata->readAll());
-            static const QRegularExpression modIdExpression(
-                QStringLiteral(R"((?im)^\s*modId\s*=\s*[\"']([a-z0-9_.-]+)[\"'])"));
-            auto matches = modIdExpression.globalMatch(contents);
-            while (matches.hasNext()) {
-                identifiers << matches.next().captured(1).toLower();
-            }
-        }
-    }
-    identifiers.removeAll(QString());
-    identifiers.removeDuplicates();
-    return identifiers;
-}
-
-QStringList suspectedModFiles(const std::shared_ptr<ServerInstance>& server,
-                              const QString& rawLog)
-{
-    if (!server) return {};
-    const QStringList suspectedIds = ServerDiagnostics::suspectedModIds(rawLog);
-    if (suspectedIds.isEmpty()) return {};
-
-    QStringList matches;
-    const QDir directory(server->modsDirectory());
-    for (const QFileInfo& jar : directory.entryInfoList(
-             QStringList() << QStringLiteral("*.jar"), QDir::Files)) {
-        const QStringList ids = modIdsFromJar(jar.absoluteFilePath());
-        for (const QString& suspectedId : suspectedIds) {
-            if (ids.contains(suspectedId, Qt::CaseInsensitive)) {
-                matches << jar.absoluteFilePath();
-                break;
-            }
-        }
-    }
-    return matches;
-}
-
 void showServerFailureDialog(QWidget *parent,
                              const std::shared_ptr<ServerInstance> &server,
                              const QString &message, const QString &rawLog)
@@ -449,7 +172,8 @@ void showServerFailureDialog(QWidget *parent,
     if (!reportedError.isEmpty()) {
         explanation += QObject::tr("\n\nServer reported:\n%1").arg(reportedError);
     }
-    const QStringList suspectFiles = suspectedModFiles(server, rawLog);
+    const QStringList suspectFiles = server
+        ? ServerDiagnostics::suspectedModFiles(server->modsDirectory(), rawLog) : QStringList();
     if (!suspectFiles.isEmpty()) {
         explanation += QObject::tr(
             "\n\nThe log identifies this installed mod as the likely cause: %1. "
@@ -669,196 +393,24 @@ ServerListPage::ServerListPage(QWidget *parent)
     ui->installedContentTree->header()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
     ui->installedContentTree->header()->setSectionResizeMode(3, QHeaderView::ResizeToContents);
 
-    m_updatesNetwork = new QNetworkAccessManager(this);
     m_maintenanceTab = new QTabWidget(ui->serverTabs);
     m_maintenanceTab->setDocumentMode(true);
-    m_updatesTab = new QWidget(m_maintenanceTab);
-    auto *updatesLayout = new QVBoxLayout(m_updatesTab);
-    m_updatesInfoLabel = new QLabel(tr("Keep the server stopped while applying updates."), m_updatesTab);
-    m_updatesInfoLabel->setWordWrap(true);
-    updatesLayout->addWidget(m_updatesInfoLabel);
-    auto *softwareGroup = new QGroupBox(tr("Server Software"), m_updatesTab);
-    auto *softwareLayout = new QGridLayout(softwareGroup);
-    auto *softwareDescription = new QLabel(
-        tr("Update the current Minecraft version's server build, or explicitly change the Minecraft version."),
-        softwareGroup);
-    softwareDescription->setWordWrap(true);
-    softwareLayout->addWidget(softwareDescription, 0, 0, 1, 3);
-    m_updateServerSoftwareButton = new QPushButton(tr("Update Current Build"), softwareGroup);
-    m_changeMinecraftVersionButton = new QPushButton(tr("Change Minecraft Version"), softwareGroup);
-    m_restoreLatestUpdateBackupButton = new QPushButton(tr("Restore Latest Update Backup"), softwareGroup);
-    m_updateServerSoftwareButton->setObjectName(QStringLiteral("updateServerSoftwareButton"));
-    m_changeMinecraftVersionButton->setObjectName(QStringLiteral("changeMinecraftVersionButton"));
-    m_restoreLatestUpdateBackupButton->setObjectName(
-        QStringLiteral("restoreLatestUpdateBackupButton"));
-    m_restoreLatestUpdateBackupButton->setToolTip(tr("Restore the rollback backup made before the most recent server software update."));
-    softwareLayout->addWidget(m_updateServerSoftwareButton, 1, 0);
-    softwareLayout->addWidget(m_changeMinecraftVersionButton, 1, 1);
-    softwareLayout->addWidget(m_restoreLatestUpdateBackupButton, 1, 2);
-    updatesLayout->addWidget(softwareGroup);
-    auto *contentGroup = new QGroupBox(tr("Mod & Plugin Updates"), m_updatesTab);
-    auto *contentLayout = new QVBoxLayout(contentGroup);
-    m_contentUpdatesTree = new QTreeWidget(contentGroup);
-    m_contentUpdatesTree->setColumnCount(3);
-    m_contentUpdatesTree->setHeaderLabels({tr("Installed file"), tr("Source"), tr("Update status")});
-    m_contentUpdatesTree->setAlternatingRowColors(true);
-    contentLayout->addWidget(m_contentUpdatesTree);
-    auto *contentActions = new QHBoxLayout();
-    m_checkContentUpdatesButton = new QPushButton(tr("Check for Updates"), contentGroup);
-    m_setupCurseForgeButton = new QPushButton(tr("Set Up CurseForge"), contentGroup);
-    m_installContentUpdateButton = new QPushButton(tr("Install Selected Update"), contentGroup);
-    m_checkContentUpdatesButton->setObjectName(QStringLiteral("checkContentUpdatesButton"));
-    m_setupCurseForgeButton->setObjectName(QStringLiteral("setupCurseForgeButton"));
-    m_installContentUpdateButton->setObjectName(QStringLiteral("installContentUpdateButton"));
-    contentActions->addWidget(m_checkContentUpdatesButton);
-    contentActions->addWidget(m_setupCurseForgeButton);
-    contentActions->addWidget(m_installContentUpdateButton);
-    contentActions->addStretch();
-    contentLayout->addLayout(contentActions);
-    updatesLayout->addWidget(contentGroup, 1);
+    m_updatesTab = new ServerUpdatesTab(m_maintenanceTab);
+    connect(m_updatesTab, &ServerUpdatesTab::consoleMessage, this, &ServerListPage::appendConsoleOutput);
+    connect(m_updatesTab, &ServerUpdatesTab::backupsChanged, this, &ServerListPage::refreshServerBackups);
+    connect(m_updatesTab, &ServerUpdatesTab::actionsChanged, this, &ServerListPage::updateUI);
+    connect(m_updatesTab, &ServerUpdatesTab::serverRecordChanged, this, &ServerListPage::updateServerList);
+    connect(m_updatesTab, &ServerUpdatesTab::installedContentChanged, this, &ServerListPage::refreshInstalledContent);
+    connect(m_updatesTab, &ServerUpdatesTab::restoreBackupRequested, this, &ServerListPage::restoreBackupAt);
     m_maintenanceTab->addTab(m_updatesTab, tr("Updates"));
 
-    m_playersTab = new QWidget(ui->serverTabs);
-    auto *playersLayout = new QVBoxLayout(m_playersTab);
-    m_playersInfoLabel = new QLabel(tr("Known players are read from usercache.json. Stop the server before changing whitelist, operator, or ban entries."), m_playersTab);
-    m_playersInfoLabel->setObjectName(QStringLiteral("playersInfoLabel"));
-    m_playersInfoLabel->setWordWrap(true);
-    playersLayout->addWidget(m_playersInfoLabel);
-    m_playersTree = new QTreeWidget(m_playersTab);
-    m_playersTree->setObjectName(QStringLiteral("playersTree"));
-    m_playersTree->setColumnCount(5);
-    m_playersTree->setHeaderLabels({tr("Player"), tr("UUID"), tr("Whitelisted"), tr("Operator"), tr("Banned")});
-    m_playersTree->setAlternatingRowColors(true);
-    m_playersTree->setSelectionMode(QAbstractItemView::SingleSelection);
-    playersLayout->addWidget(m_playersTree, 1);
-    auto *playerActions = new QGridLayout();
-    m_refreshPlayersButton = new QPushButton(tr("Refresh"), m_playersTab);
-    m_whitelistPlayerButton = new QPushButton(tr("Whitelist"), m_playersTab);
-    m_opPlayerButton = new QPushButton(tr("Make Operator"), m_playersTab);
-    m_banPlayerButton = new QPushButton(tr("Ban"), m_playersTab);
-    m_kickPlayerButton = new QPushButton(tr("Kick"), m_playersTab);
-    m_removePlayerAccessButton = new QPushButton(tr("Remove Access"), m_playersTab);
-    m_viewPlayerHistoryButton = new QPushButton(tr("Activity History"), m_playersTab);
-    m_exportPlayerHistoryButton = new QPushButton(tr("Export History"), m_playersTab);
-    m_refreshPlayersButton->setObjectName(QStringLiteral("refreshPlayersButton"));
-    m_whitelistPlayerButton->setObjectName(QStringLiteral("whitelistPlayerButton"));
-    m_opPlayerButton->setObjectName(QStringLiteral("opPlayerButton"));
-    m_banPlayerButton->setObjectName(QStringLiteral("banPlayerButton"));
-    m_kickPlayerButton->setObjectName(QStringLiteral("kickPlayerButton"));
-    m_removePlayerAccessButton->setObjectName(QStringLiteral("removePlayerAccessButton"));
-    playerActions->addWidget(m_refreshPlayersButton, 0, 0);
-    playerActions->addWidget(m_whitelistPlayerButton, 0, 1);
-    playerActions->addWidget(m_opPlayerButton, 0, 2);
-    playerActions->addWidget(m_banPlayerButton, 0, 3);
-    playerActions->addWidget(m_kickPlayerButton, 1, 0);
-    playerActions->addWidget(m_removePlayerAccessButton, 1, 1);
-    playerActions->addWidget(m_viewPlayerHistoryButton, 1, 2);
-    playerActions->addWidget(m_exportPlayerHistoryButton, 1, 3);
-    for (int column = 0; column < 4; ++column) {
-        playerActions->setColumnStretch(column, 1);
-    }
-    playersLayout->addLayout(playerActions);
+    m_playersTab = new ServerPlayersTab(ui->serverTabs);
     ui->serverTabs->insertTab(ui->serverTabs->indexOf(ui->settingsTab), m_playersTab, tr("Players"));
 
-    auto *automationScroll = new QScrollArea(m_maintenanceTab);
-    automationScroll->setObjectName(QStringLiteral("automationHealthScrollArea"));
-    automationScroll->setWidgetResizable(true);
-    automationScroll->setFrameShape(QFrame::NoFrame);
-    m_automationTab = automationScroll;
-    auto *automationContent = new QWidget(automationScroll);
-    automationScroll->setWidget(automationContent);
-    auto *automationLayout = new QVBoxLayout(automationContent);
-    automationLayout->setContentsMargins(10, 10, 10, 10);
-    m_automationInfoLabel = new QLabel(tr("Schedule one daily maintenance action. A scheduled backup runs only while the server is stopped."), automationContent);
-    m_automationInfoLabel->setWordWrap(true);
-    automationLayout->addWidget(m_automationInfoLabel);
-    auto *scheduleGroup = new QGroupBox(tr("Daily Schedule & Backup Retention"), automationContent);
-    auto *scheduleForm = new QFormLayout(scheduleGroup);
-    m_scheduleEnabledCheck = new QCheckBox(tr("Enable daily schedule"), scheduleGroup);
-    m_scheduleActionCombo = new QComboBox(scheduleGroup);
-    m_scheduleActionCombo->addItem(tr("Start"), "start");
-    m_scheduleActionCombo->addItem(tr("Stop"), "stop");
-    m_scheduleActionCombo->addItem(tr("Restart"), "restart");
-    m_scheduleActionCombo->addItem(tr("Backup"), "backup");
-    m_scheduleTimeEdit = new QTimeEdit(QTime::currentTime(), scheduleGroup);
-    m_scheduleTimeEdit->setDisplayFormat("HH:mm");
-    m_backupRetentionSpin = new QSpinBox(scheduleGroup);
-    m_backupRetentionSpin->setRange(0, 100);
-    m_backupRetentionSpin->setSpecialValueText(tr("Keep all backups"));
-    m_backupRetentionSpin->setToolTip(tr("Automatic backups beyond this number are removed, oldest first. 0 keeps all."));
-    m_gracefulStopTimeoutSpin = new QSpinBox(scheduleGroup);
-    m_gracefulStopTimeoutSpin->setRange(5, 120);
-    m_gracefulStopTimeoutSpin->setSuffix(tr(" seconds"));
-    m_gracefulStopTimeoutSpin->setToolTip(tr("How long to wait after sending the stop command before terminating an unresponsive server."));
-    m_autoRestartCheck = new QCheckBox(tr("Restart automatically after a crash (5-second delay)"), scheduleGroup);
-    scheduleForm->addRow(m_scheduleEnabledCheck);
-    scheduleForm->addRow(tr("Action:"), m_scheduleActionCombo);
-    scheduleForm->addRow(tr("Time:"), m_scheduleTimeEdit);
-    scheduleForm->addRow(tr("Keep automatic backups:"), m_backupRetentionSpin);
-    scheduleForm->addRow(tr("Graceful stop timeout:"), m_gracefulStopTimeoutSpin);
-    scheduleForm->addRow(m_autoRestartCheck);
-    auto *scheduleActions = new QHBoxLayout();
-    m_saveAutomationButton = new QPushButton(tr("Save Automation"), scheduleGroup);
-    m_runAutomationButton = new QPushButton(tr("Run Selected Action Now"), scheduleGroup);
-    scheduleActions->addWidget(m_saveAutomationButton);
-    scheduleActions->addWidget(m_runAutomationButton);
-    scheduleActions->addStretch();
-    scheduleForm->addRow(scheduleActions);
-    automationLayout->addWidget(scheduleGroup);
-    auto *alertsGroup = new QGroupBox(tr("Monitoring Warning Thresholds"), automationContent);
-    auto *alertsForm = new QFormLayout(alertsGroup);
-    m_cpuWarningSpin = new QSpinBox(alertsGroup);
-    m_cpuWarningSpin->setRange(50, 100);
-    m_cpuWarningSpin->setSuffix("%");
-    m_cpuWarningSpin->setToolTip(tr("CPU use at or above this value is shown as a warning."));
-    m_ramWarningSpin = new QSpinBox(alertsGroup);
-    m_ramWarningSpin->setRange(50, 100);
-    m_ramWarningSpin->setSuffix("%");
-    m_ramWarningSpin->setToolTip(tr("Configured RAM use at or above this value is shown as a warning."));
-    m_diskWarningSpin = new QSpinBox(alertsGroup);
-    m_diskWarningSpin->setRange(1, 1000);
-    m_diskWarningSpin->setSuffix(tr(" GB free"));
-    m_diskWarningSpin->setToolTip(tr("Free disk space at or below this value is shown as a warning."));
-    alertsForm->addRow(tr("CPU warning:"), m_cpuWarningSpin);
-    alertsForm->addRow(tr("RAM warning:"), m_ramWarningSpin);
-    alertsForm->addRow(tr("Disk warning:"), m_diskWarningSpin);
-    automationLayout->addWidget(alertsGroup);
-    auto *historyGroup = new QGroupBox(tr("Automation Activity"), automationContent);
-    auto *historyLayout = new QVBoxLayout(historyGroup);
-    m_automationHistoryList = new QListWidget(historyGroup);
-    m_automationHistoryList->setSelectionMode(QAbstractItemView::NoSelection);
-    m_automationHistoryList->setAlternatingRowColors(true);
-    m_automationHistoryList->setToolTip(tr("The 50 most recent scheduled or manually run maintenance actions for this server."));
-    m_automationHistoryList->setMinimumHeight(140);
-    historyLayout->addWidget(m_automationHistoryList);
-    automationLayout->addWidget(historyGroup);
-    auto *diagnosticsGroup = new QGroupBox(tr("Crash Diagnostics"), automationContent);
-    auto *diagnosticsLayout = new QVBoxLayout(diagnosticsGroup);
-    m_diagnosticsLabel = new QLabel(tr("No crash report recorded for this server."), diagnosticsGroup);
-    m_diagnosticsLabel->setObjectName(QStringLiteral("diagnosticsLabel"));
-    m_diagnosticsLabel->setWordWrap(true);
-    m_viewCrashReportButton = new QPushButton(tr("View Latest Crash Report"), diagnosticsGroup);
-    m_viewCrashReportButton->setObjectName(QStringLiteral("viewCrashReportButton"));
-    diagnosticsLayout->addWidget(m_diagnosticsLabel);
-    diagnosticsLayout->addWidget(m_viewCrashReportButton, 0, Qt::AlignLeft);
-    automationLayout->addWidget(diagnosticsGroup);
-    automationLayout->addStretch();
+    m_automationTab = new ServerAutomationTab(m_maintenanceTab);
+    connect(m_automationTab, &ServerAutomationTab::automationRun, this, &ServerListPage::updateUI);
     m_maintenanceTab->addTab(m_automationTab, tr("Automation & Health"));
     m_maintenanceTab->setObjectName(QStringLiteral("maintenanceTabs"));
-    m_updatesTab->setObjectName(QStringLiteral("updatesTab"));
-    m_playersTab->setObjectName(QStringLiteral("playersTab"));
-    m_updatesInfoLabel->setObjectName(QStringLiteral("updatesInfoLabel"));
-    m_contentUpdatesTree->setObjectName(QStringLiteral("contentUpdatesTree"));
-    m_automationInfoLabel->setObjectName(QStringLiteral("automationInfoLabel"));
-    m_scheduleEnabledCheck->setObjectName(QStringLiteral("scheduleEnabledCheck"));
-    m_scheduleActionCombo->setObjectName(QStringLiteral("scheduleActionCombo"));
-    m_scheduleTimeEdit->setObjectName(QStringLiteral("scheduleTimeEdit"));
-    m_backupRetentionSpin->setObjectName(QStringLiteral("backupRetentionSpin"));
-    m_cpuWarningSpin->setObjectName(QStringLiteral("cpuWarningSpin"));
-    m_ramWarningSpin->setObjectName(QStringLiteral("ramWarningSpin"));
-    m_diskWarningSpin->setObjectName(QStringLiteral("diskWarningSpin"));
-    m_saveAutomationButton->setObjectName(QStringLiteral("saveAutomationButton"));
-    m_automationHistoryList->setObjectName(QStringLiteral("automationHistoryList"));
     setupServerNavigation();
     connect(ui->serverTabs, &QTabWidget::currentChanged, this, [this](int) {
         QTimer::singleShot(0, this, &ServerListPage::refreshCurrentServerTab);
@@ -898,9 +450,6 @@ ServerListPage::ServerListPage(QWidget *parent)
     connect(ui->sendCommandButton, &QPushButton::clicked, this, &ServerListPage::onSendCommand);
     connect(m_exportProfileButton, &QPushButton::clicked, this, &ServerListPage::onExportProfile);
     connect(m_importProfileButton, &QPushButton::clicked, this, &ServerListPage::onImportProfile);
-    connect(m_saveAutomationButton, &QPushButton::clicked, this, &ServerListPage::onSaveAutomation);
-    connect(m_runAutomationButton, &QPushButton::clicked, this, &ServerListPage::onRunAutomationNow);
-    connect(m_viewCrashReportButton, &QPushButton::clicked, this, &ServerListPage::onViewCrashReport);
     connect(m_findConsoleButton, &QPushButton::clicked, this, &ServerListPage::onFindConsole);
     connect(m_copyConsoleErrorsButton, &QPushButton::clicked, this, &ServerListPage::onCopyConsoleErrors);
     connect(m_clearConsoleButton, &QPushButton::clicked, ui->consoleOutput, &QPlainTextEdit::clear);
@@ -924,29 +473,6 @@ ServerListPage::ServerListPage(QWidget *parent)
         }
     });
     connect(m_consoleSearchInput, &QLineEdit::returnPressed, this, &ServerListPage::onFindConsole);
-    connect(m_updateServerSoftwareButton, &QPushButton::clicked, this, &ServerListPage::onUpdateServerSoftware);
-    connect(m_changeMinecraftVersionButton, &QPushButton::clicked, this, &ServerListPage::onChangeMinecraftVersion);
-    connect(m_restoreLatestUpdateBackupButton, &QPushButton::clicked, this, &ServerListPage::onRestoreLatestUpdateBackup);
-    connect(m_checkContentUpdatesButton, &QPushButton::clicked, this, &ServerListPage::onCheckContentUpdates);
-    connect(m_setupCurseForgeButton, &QPushButton::clicked, this, [this]() {
-        APPLICATION->ShowGlobalSettings(this, QStringLiteral("apis"));
-        updateUI();
-        if (curseForgeAvailable()) {
-            m_updatesInfoLabel->setText(
-                tr("CurseForge is enabled. Check for updates again to include CurseForge mods."));
-        }
-    });
-    connect(m_installContentUpdateButton, &QPushButton::clicked, this, &ServerListPage::onInstallContentUpdate);
-    connect(m_refreshPlayersButton, &QPushButton::clicked, this, &ServerListPage::onRefreshPlayers);
-    connect(m_whitelistPlayerButton, &QPushButton::clicked, this, &ServerListPage::onWhitelistPlayer);
-    connect(m_opPlayerButton, &QPushButton::clicked, this, &ServerListPage::onOpPlayer);
-    connect(m_banPlayerButton, &QPushButton::clicked, this, &ServerListPage::onBanPlayer);
-    connect(m_kickPlayerButton, &QPushButton::clicked, this, &ServerListPage::onKickPlayer);
-    connect(m_removePlayerAccessButton, &QPushButton::clicked, this, &ServerListPage::onRemovePlayerAccess);
-    connect(m_viewPlayerHistoryButton, &QPushButton::clicked, this, &ServerListPage::onViewPlayerHistory);
-    connect(m_exportPlayerHistoryButton, &QPushButton::clicked, this, &ServerListPage::onExportPlayerHistory);
-    connect(m_playersTree, &QTreeWidget::currentItemChanged, this, [this]() { updateUI(); });
-    connect(m_contentUpdatesTree, &QTreeWidget::currentItemChanged, this, [this]() { updateUI(); });
     connect(ui->serverList, &QListWidget::currentRowChanged, this, &ServerListPage::onServerSelectionChanged);
     connect(ui->serverSearchInput, &QLineEdit::textChanged, this, [this](const QString &) { updateServerList(); });
     connect(ui->serverFilesTree, &QTreeWidget::itemExpanded, this, [this](QTreeWidgetItem *item) {
@@ -1341,6 +867,9 @@ void ServerListPage::setServerManager(ServerManager *manager)
     }
     m_serverTrackingContext = new QObject(this);
     m_serverManager = manager;
+    m_automationTab->setServerManager(manager);
+    m_playersTab->setServerManager(manager);
+    m_updatesTab->setServerManager(manager);
     if (m_serverManager) {
         for (const auto &server : m_serverManager->getAllServers()) {
             attachServerTracking(server);
@@ -1353,7 +882,7 @@ void ServerListPage::setServerManager(ServerManager *manager)
             if (m_selectedServerId != serverId) {
                 return;
             }
-            refreshAutomationHistory();
+            m_automationTab->refreshHistory();
             QSettings settings;
             const QStringList history = settings.value(
                 QString("ServerAutomation/%1/history").arg(serverId)).toStringList();
@@ -1364,13 +893,13 @@ void ServerListPage::setServerManager(ServerManager *manager)
         });
         connect(m_serverManager, &ServerManager::serverDiagnosticsRecorded,
                 m_serverTrackingContext, [this](const QString &serverId) {
-            if (m_selectedServerId == serverId) refreshDiagnostics();
+            if (m_selectedServerId == serverId) m_automationTab->refreshDiagnostics();
         });
         connect(m_serverManager, &ServerManager::playerHistoryRecorded,
                 m_serverTrackingContext, [this](const QString &serverId) {
             if (m_selectedServerId == serverId
                 && ui->serverTabs->currentWidget() == m_playersTab) {
-                refreshPlayerList();
+                m_playersTab->refresh();
             }
         });
     }
@@ -1392,22 +921,11 @@ void ServerListPage::attachServerTracking(const std::shared_ptr<ServerInstance> 
         if (success && m_serverManager) {
             m_serverManager->save();
         }
-        if (m_selectedServerId != serverId || !m_updatesInfoLabel) return;
+        if (m_selectedServerId != serverId) return;
+        m_updatesTab->showSoftwareDownloadResult(server, targetVersion, success, cancelled, errorMessage);
         if (success) {
-            m_updatesInfoLabel->setText(server->loaderVersion().isEmpty()
-                ? tr("Server software for Minecraft %1 was installed successfully. Restart the server to verify the world and content.")
-                      .arg(targetVersion)
-                : tr("Server software build %1 for Minecraft %2 was installed successfully. Restart the server to verify the world and content.")
-                      .arg(server->loaderVersion(), targetVersion));
             updateSelectedServerInfo();
             updateServerList();
-        } else if (cancelled) {
-            m_updatesInfoLabel->setText(
-                tr("Server software download was cancelled. The previous server file and version were kept."));
-        } else {
-            m_updatesInfoLabel->setText(
-                tr("Server software update failed. The previous server file and version were kept: %1")
-                    .arg(errorMessage));
         }
         updateUI();
     });
@@ -1605,7 +1123,7 @@ void ServerListPage::onDeleteServer()
             disconnect(m_currentConnectedServer.get(), nullptr, this, nullptr);
             m_currentConnectedServer = nullptr;
         }
-        m_selectedServerId.clear();
+        setSelectedServerId(QString());
         ui->consoleOutput->clear();
         updateServerList();
         updateUI();
@@ -1622,7 +1140,7 @@ void ServerListPage::onUndoDelete()
         QMessageBox::warning(this, tr("Undo Delete"), tr("The deleted server could not be restored."));
         return;
     }
-    m_selectedServerId = restoredId;
+    setSelectedServerId(restoredId);
     updateServerList();
     updateUI();
 }
@@ -1871,7 +1389,7 @@ void ServerListPage::onInstallModpack()
         return;
     }
 
-    m_selectedServerId = result.serverId;
+    setSelectedServerId(result.serverId);
     updateServerList();
     updateUI();
 
@@ -2325,114 +1843,9 @@ void ServerListPage::onImportProfile()
     server->setExtraJvmArguments(profile.value("extraJvmArguments").toString());
     server->setAutoRestartOnCrash(profile.value("autoRestartOnCrash").toBool(false));
     m_serverManager->save();
-    m_selectedServerId = server->id();
+    setSelectedServerId(server->id());
     updateServerList();
     QMessageBox::information(this, tr("Profile Imported"), tr("Created %1. Start it to download its server software.").arg(name));
-}
-
-void ServerListPage::refreshAutomation()
-{
-    if (!m_automationTab) return;
-    if (!m_serverManager || m_selectedServerId.isEmpty()) {
-        m_automationInfoLabel->setText(tr("Select a server to configure automated maintenance."));
-        return;
-    }
-    const auto server = m_serverManager->getServer(m_selectedServerId);
-    if (!server) return;
-    QSettings settings;
-    const QString prefix = QString("ServerAutomation/%1/").arg(server->id());
-    m_scheduleEnabledCheck->setChecked(settings.value(prefix + "enabled", false).toBool());
-    const QString action = settings.value(prefix + "action", "start").toString();
-    const int actionIndex = m_scheduleActionCombo->findData(action);
-    m_scheduleActionCombo->setCurrentIndex(actionIndex >= 0 ? actionIndex : 0);
-    const QTime time = QTime::fromString(settings.value(prefix + "time", "03:00").toString(), "HH:mm");
-    m_scheduleTimeEdit->setTime(time.isValid() ? time : QTime(3, 0));
-    m_backupRetentionSpin->setValue(settings.value(prefix + "retention", 0).toInt());
-    m_gracefulStopTimeoutSpin->setValue(server->gracefulStopTimeoutSeconds());
-    m_autoRestartCheck->setChecked(server->autoRestartOnCrash());
-    const QString monitoringPrefix = QString("ServerMonitoring/%1/").arg(server->id());
-    m_cpuWarningSpin->setValue(settings.value(monitoringPrefix + "cpuWarning", 85).toInt());
-    m_ramWarningSpin->setValue(settings.value(monitoringPrefix + "ramWarning", 90).toInt());
-    m_diskWarningSpin->setValue(settings.value(monitoringPrefix + "diskWarningGb", 2).toInt());
-    m_automationInfoLabel->setText(tr("Daily schedules are checked every 30 seconds. The server must be stopped for an automatic backup."));
-    refreshAutomationHistory();
-}
-
-void ServerListPage::onSaveAutomation()
-{
-    if (!m_serverManager || m_selectedServerId.isEmpty()) return;
-    const auto server = m_serverManager->getServer(m_selectedServerId);
-    if (!server || server->isRunning()) return;
-    QSettings settings;
-    const QString prefix = QString("ServerAutomation/%1/").arg(server->id());
-    settings.setValue(prefix + "enabled", m_scheduleEnabledCheck->isChecked());
-    settings.setValue(prefix + "action", m_scheduleActionCombo->currentData().toString());
-    settings.setValue(prefix + "time", m_scheduleTimeEdit->time().toString("HH:mm"));
-    settings.setValue(prefix + "retention", m_backupRetentionSpin->value());
-    const QString monitoringPrefix = QString("ServerMonitoring/%1/").arg(server->id());
-    settings.setValue(monitoringPrefix + "cpuWarning", m_cpuWarningSpin->value());
-    settings.setValue(monitoringPrefix + "ramWarning", m_ramWarningSpin->value());
-    settings.setValue(monitoringPrefix + "diskWarningGb", m_diskWarningSpin->value());
-    server->setAutoRestartOnCrash(m_autoRestartCheck->isChecked());
-    server->setGracefulStopTimeoutSeconds(m_gracefulStopTimeoutSpin->value());
-    m_serverManager->save();
-    m_automationInfoLabel->setText(tr("Automation saved for %1.").arg(server->name()));
-}
-
-void ServerListPage::refreshAutomationHistory()
-{
-    if (!m_automationHistoryList) return;
-    m_automationHistoryList->clear();
-    if (m_selectedServerId.isEmpty()) {
-        m_automationHistoryList->addItem(tr("Select a server to view automation activity."));
-        return;
-    }
-    QSettings settings;
-    const QStringList history = settings.value(QString("ServerAutomation/%1/history").arg(m_selectedServerId)).toStringList();
-    if (history.isEmpty()) {
-        m_automationHistoryList->addItem(tr("No automated actions have run for this server yet."));
-        return;
-    }
-    m_automationHistoryList->addItems(history);
-}
-
-void ServerListPage::onRunAutomationNow()
-{
-    if (!m_serverManager || m_selectedServerId.isEmpty()) return;
-    const auto server = m_serverManager->getServer(m_selectedServerId);
-    if (!server) return;
-    m_serverManager->runAutomation(server, m_scheduleActionCombo->currentData().toString(),
-                                   m_backupRetentionSpin->value());
-    m_automationInfoLabel->setText(tr("Ran %1 action for %2.").arg(m_scheduleActionCombo->currentText(), server->name()));
-    updateUI();
-}
-
-void ServerListPage::refreshDiagnostics()
-{
-    if (!m_diagnosticsLabel) return;
-    if (m_selectedServerId.isEmpty()) {
-        m_diagnosticsLabel->setText(tr("No server selected."));
-        return;
-    }
-    QSettings settings;
-    const QString crash = settings.value(QString("ServerDiagnostics/%1/lastCrash").arg(m_selectedServerId)).toString();
-    m_diagnosticsLabel->setText(crash.isEmpty() ? tr("No crash report recorded for this server.") : tr("Latest crash: %1").arg(crash));
-    // The button follows the label; waiting for the next full button refresh left it disabled.
-    m_viewCrashReportButton->setEnabled(!crash.isEmpty());
-}
-
-void ServerListPage::onViewCrashReport()
-{
-    if (m_selectedServerId.isEmpty()) return;
-    QSettings settings;
-    const QString details = settings.value(QString("ServerDiagnostics/%1/details").arg(m_selectedServerId)).toString();
-    if (details.isEmpty()) return;
-    QMessageBox dialog(this);
-    dialog.setWindowTitle(tr("Latest Crash Report"));
-    dialog.setIcon(QMessageBox::Critical);
-    dialog.setText(m_diagnosticsLabel->text());
-    dialog.setDetailedText(details);
-    dialog.exec();
 }
 
 void ServerListPage::onFindConsole()
@@ -2454,274 +1867,8 @@ void ServerListPage::onCopyConsoleErrors()
     QApplication::clipboard()->setText(errors.isEmpty() ? tr("No errors found in this console log.") : errors.join('\n'));
 }
 
-void ServerListPage::onUpdateServerSoftware()
+void ServerListPage::restoreBackupAt(const QString &backupPath)
 {
-    if (!m_serverManager || m_selectedServerId.isEmpty()) return;
-    const auto server = m_serverManager->getServer(m_selectedServerId);
-    if (!server || server->isRunning()) return;
-
-    if (server->loaderType().compare(QStringLiteral("vanilla"), Qt::CaseInsensitive) == 0) {
-        QMessageBox::information(
-            this, tr("Vanilla Server Builds"),
-            tr("Mojang publishes one official server JAR for each Minecraft version, so Vanilla has no separate build numbers. "
-               "J Launcher can download a fresh verified copy of the official JAR."));
-        startServerSoftwareUpdate(server, server->version(), false);
-        return;
-    }
-
-    QDialog dialog(this);
-    dialog.setWindowTitle(tr("Update Current Build"));
-    dialog.setMinimumWidth(520);
-    auto *layout = new QVBoxLayout(&dialog);
-    auto *description = new QLabel(
-        tr("Minecraft %1 · %2\nCurrent build: %3")
-            .arg(server->version(), server->loaderType(),
-                 server->loaderVersion().isEmpty() ? tr("Not recorded") : server->loaderVersion()),
-        &dialog);
-    description->setWordWrap(true);
-    layout->addWidget(description);
-
-    auto *form = new QFormLayout();
-    auto *build = new QComboBox(&dialog);
-    build->setObjectName(QStringLiteral("updateServerBuildCombo"));
-    form->addRow(tr("Provider build:"), build);
-    layout->addLayout(form);
-    auto *status = new QLabel(
-        tr("Loading builds published by %1 for Minecraft %2...")
-            .arg(server->loaderType(), server->version()), &dialog);
-    status->setWordWrap(true);
-    applyMutedLabelPalette(status);
-    layout->addWidget(status);
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    buttons->button(QDialogButtonBox::Ok)->setText(tr("Install Build"));
-    buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
-    layout->addWidget(buttons);
-
-    ServerDownloader downloader(&dialog);
-    connect(&downloader, &ServerDownloader::buildsReady, &dialog,
-            [&](const QStringList &builds) {
-        build->clear();
-        build->addItems(builds);
-        const bool different = !build->currentText().isEmpty()
-            && build->currentText() != server->loaderVersion();
-        buttons->button(QDialogButtonBox::Ok)->setEnabled(different);
-        status->setText(different
-            ? tr("%1 builds available. Newest provider build is selected.").arg(builds.size())
-            : tr("%1 builds available. Select a build different from the installed build.").arg(builds.size()));
-    });
-    connect(&downloader, &ServerDownloader::buildsFailed, &dialog,
-            [&](const QString &error) {
-        status->setText(tr("Could not load builds: %1").arg(error));
-        buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
-    });
-    connect(build, &QComboBox::currentTextChanged, &dialog, [&](const QString &selected) {
-        buttons->button(QDialogButtonBox::Ok)->setEnabled(
-            !selected.isEmpty() && selected != server->loaderVersion());
-    });
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    downloader.fetchAvailableBuilds(server->version(), server->loaderType());
-
-    if (dialog.exec() != QDialog::Accepted) return;
-    const QString targetBuild = build->currentText().trimmed();
-    if (targetBuild.isEmpty() || targetBuild == server->loaderVersion()) return;
-    startServerSoftwareUpdate(server, server->version(), false, targetBuild);
-}
-
-void ServerListPage::onChangeMinecraftVersion()
-{
-    if (!m_serverManager || m_selectedServerId.isEmpty()) return;
-    const auto server = m_serverManager->getServer(m_selectedServerId);
-    if (!server || server->isRunning()) return;
-
-    const QString loader = server->loaderType().trimmed().toLower();
-    if (loader == QStringLiteral("fabric") || loader == QStringLiteral("forge")
-        || loader == QStringLiteral("neoforge")) {
-        QMessageBox::information(
-            this, tr("Modded Version Change Blocked"),
-            tr("J Launcher will not automatically move a modded server to another Minecraft version. "
-               "The loader and every server mod must be compatible with the target version.\n\n"
-               "Create a new compatible modpack server, verify it, and then migrate the world. "
-               "Updating the current build remains available."));
-        return;
-    }
-
-    QDialog dialog(this);
-    dialog.setWindowTitle(tr("Change Minecraft Version"));
-    dialog.setMinimumWidth(520);
-    auto *layout = new QVBoxLayout(&dialog);
-    auto *warning = new QLabel(
-        tr("Current version: %1. Changing Minecraft versions can make worlds or plugins incompatible. "
-           "A rollback backup will be created before downloading.").arg(server->version()),
-        &dialog);
-    warning->setWordWrap(true);
-    layout->addWidget(warning);
-
-    auto *form = new QFormLayout();
-    auto *channel = new QComboBox(&dialog);
-    channel->setObjectName(QStringLiteral("upgradeVersionChannelCombo"));
-    channel->addItem(tr("Releases"), static_cast<int>(ServerDownloader::VersionChannel::Release));
-    channel->addItem(tr("Snapshots"), static_cast<int>(ServerDownloader::VersionChannel::Snapshot));
-    channel->addItem(tr("Betas"), static_cast<int>(ServerDownloader::VersionChannel::Beta));
-    channel->addItem(tr("All versions"), -1);
-    auto *version = new QComboBox(&dialog);
-    version->setObjectName(QStringLiteral("upgradeMinecraftVersionCombo"));
-    form->addRow(tr("Version channel:"), channel);
-    form->addRow(tr("Target version:"), version);
-    layout->addLayout(form);
-
-    auto *status = new QLabel(tr("Loading versions published by %1...").arg(server->loaderType()), &dialog);
-    status->setWordWrap(true);
-    applyMutedLabelPalette(status);
-    layout->addWidget(status);
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    buttons->button(QDialogButtonBox::Ok)->setText(tr("Change Version"));
-    buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
-    layout->addWidget(buttons);
-
-    QStringList availableVersions;
-    const auto applyFilter = [&]() {
-        const int selectedChannel = channel->currentData().toInt();
-        const QString previous = version->currentText();
-        QStringList filtered;
-        for (const QString &candidate : std::as_const(availableVersions)) {
-            if (selectedChannel < 0
-                || static_cast<int>(ServerDownloader::versionChannel(candidate)) == selectedChannel) {
-                filtered.append(candidate);
-            }
-        }
-        const QSignalBlocker blocker(version);
-        version->clear();
-        version->addItems(filtered);
-        if (filtered.contains(previous)) version->setCurrentText(previous);
-        buttons->button(QDialogButtonBox::Ok)->setEnabled(
-            !version->currentText().isEmpty() && version->currentText() != server->version());
-        status->setText(tr("%1 versions shown. Select a version different from %2.")
-                            .arg(filtered.size()).arg(server->version()));
-    };
-
-    ServerDownloader downloader(&dialog);
-    connect(&downloader, &ServerDownloader::versionsReady, &dialog,
-            [&](const QStringList &versions) {
-        availableVersions = versions;
-        applyFilter();
-    });
-    connect(&downloader, &ServerDownloader::versionsFailed, &dialog,
-            [&](const QString &error) {
-        status->setText(tr("Could not load versions: %1").arg(error));
-        buttons->button(QDialogButtonBox::Ok)->setEnabled(false);
-    });
-    connect(channel, QOverload<int>::of(&QComboBox::currentIndexChanged), &dialog,
-            [&](int) { applyFilter(); });
-    connect(version, &QComboBox::currentTextChanged, &dialog, [&](const QString &selected) {
-        buttons->button(QDialogButtonBox::Ok)->setEnabled(
-            !selected.isEmpty() && selected != server->version());
-    });
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    downloader.fetchAvailableVersions(server->loaderType());
-
-    if (dialog.exec() != QDialog::Accepted) return;
-    const QString targetVersion = version->currentText().trimmed();
-    if (targetVersion.isEmpty() || targetVersion == server->version()) return;
-    startServerSoftwareUpdate(server, targetVersion, true);
-}
-
-bool ServerListPage::startServerSoftwareUpdate(
-    const std::shared_ptr<ServerInstance> &server, const QString &targetVersion,
-    bool changeVersion, const QString &targetBuild)
-{
-    if (!server || server->isRunning() || targetVersion.trimmed().isEmpty()) return false;
-    const QString prompt = changeVersion
-        ? tr("Change this %1 server from Minecraft %2 to %3?\n\n"
-             "A complete rollback backup will be created first. Verify the world and all plugins before deleting that backup.")
-              .arg(server->loaderType(), server->version(), targetVersion)
-        : (targetBuild.isEmpty()
-            ? tr("Download a fresh %1 server for Minecraft %2?\n\n"
-                 "A complete rollback backup will be created first.")
-                  .arg(server->loaderType(), server->version())
-            : tr("Install %1 build %2 for Minecraft %3?\n\n"
-                 "A complete rollback backup will be created first.")
-                  .arg(server->loaderType(), targetBuild, server->version()));
-    if (QMessageBox::question(this,
-                              changeVersion ? tr("Change Minecraft Version")
-                                            : tr("Update Current Build"),
-                              prompt, QMessageBox::Yes | QMessageBox::No)
-        != QMessageBox::Yes) {
-        return false;
-    }
-
-    QString backupError;
-    ServerBackupInfo rollbackBackup;
-    if (!m_serverManager->createServerBackup(
-            server->id(), tr("Before update"), &rollbackBackup, &backupError)) {
-        QMessageBox::warning(this, tr("Update Cancelled"), tr("Could not create the rollback backup:\n%1").arg(backupError));
-        return false;
-    }
-    const QString backupFolderName = QFileInfo(rollbackBackup.path).fileName();
-    QSettings historySettings;
-    const QString historyKey = QString("ServerUpdates/%1/history").arg(server->id());
-    QStringList history = historySettings.value(historyKey).toStringList();
-    const QString updateSource = changeVersion ? server->version() : server->loaderVersion();
-    const QString updateTarget = targetBuild.isEmpty() ? targetVersion : targetBuild;
-    history.append(QString("%1 — %2 %3 -> %4; rollback backup %5")
-                       .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm"),
-                            changeVersion ? tr("version change") : tr("build update"),
-                            updateSource, updateTarget, backupFolderName));
-    while (history.size() > 30) history.removeFirst();
-    historySettings.setValue(historyKey, history);
-    historySettings.setValue(QString("ServerUpdates/%1/latestRollbackBackup").arg(server->id()),
-                             backupFolderName);
-    historySettings.setValue(QString("ServerUpdates/%1/latestRollbackBackupPath").arg(server->id()),
-                             rollbackBackup.path);
-    const bool started = changeVersion
-        ? server->downloadServerJarForVersion(targetVersion, server->javaPath(), false)
-        : (targetBuild.isEmpty()
-            ? server->downloadServerJar(server->javaPath(), false)
-            : server->downloadServerBuild(targetBuild, server->javaPath(), false));
-    if (started) {
-        m_updatesInfoLabel->setText(
-            targetBuild.isEmpty()
-                ? tr("Created rollback backup %1. Downloading server software for Minecraft %2; follow progress in Console.")
-                      .arg(rollbackBackup.name, targetVersion)
-                : tr("Created rollback backup %1. Downloading %2 build %3; follow progress in Console.")
-                      .arg(rollbackBackup.name, server->loaderType(), targetBuild));
-        appendConsoleOutput(
-            tr("[INFO] Created rollback backup %1, then downloading server software for Minecraft %2 without starting the server.")
-                .arg(backupFolderName, targetVersion));
-        refreshServerBackups();
-        updateUI();
-        updateServerList();
-        return true;
-    }
-    m_updatesInfoLabel->setText(tr("The server software download could not be started. The rollback backup was kept."));
-    return false;
-}
-
-void ServerListPage::onRestoreLatestUpdateBackup()
-{
-    if (!m_serverManager || m_selectedServerId.isEmpty()) return;
-    const auto server = m_serverManager->getServer(m_selectedServerId);
-    if (!server || server->isRunning()) return;
-    QSettings updateSettings;
-    QString backupPath = updateSettings.value(
-        QString("ServerUpdates/%1/latestRollbackBackupPath").arg(server->id())).toString();
-    if (backupPath.isEmpty()) {
-        const QString backupName = updateSettings.value(
-            QString("ServerUpdates/%1/latestRollbackBackup").arg(server->id())).toString();
-        if (!backupName.isEmpty()) {
-            backupPath = QDir(QDir(server->serverDirectory()).filePath("backups"))
-                             .filePath(backupName);
-        }
-    }
-    if (backupPath.isEmpty()) {
-        QMessageBox::information(this, tr("No Update Backup"), tr("No rollback backup has been recorded for this server yet."));
-        return;
-    }
-    if (!QFileInfo(backupPath).isDir()) {
-        QMessageBox::warning(this, tr("Update Backup Missing"), tr("The latest recorded rollback backup could not be found."));
-        return;
-    }
     for (int index = 0; index < ui->backupsTree->topLevelItemCount(); ++index) {
         QTreeWidgetItem *item = ui->backupsTree->topLevelItem(index);
         if (QDir::cleanPath(item->data(0, Qt::UserRole).toString()) == QDir::cleanPath(backupPath)) {
@@ -2731,525 +1878,6 @@ void ServerListPage::onRestoreLatestUpdateBackup()
         }
     }
     QMessageBox::warning(this, tr("Update Backup Missing"), tr("The latest rollback backup is not available in the backup list."));
-}
-
-void ServerListPage::onCheckContentUpdates()
-{
-    if (!m_serverManager || m_selectedServerId.isEmpty()) return;
-    const auto server = m_serverManager->getServer(m_selectedServerId);
-    if (!server || server->isRunning()) return;
-
-    const QString loader = server->loaderType().toLower();
-    if (server->contentType() == ServerContentType::None) return;
-
-    m_contentUpdatesTree->clear();
-    const QString contentDirectory = server->contentDirectory();
-    const QFileInfoList files = QDir(contentDirectory).entryInfoList(QStringList() << "*.jar", QDir::Files);
-    QSettings settings;
-    const QString sourcePrefix = QString("ServerContentSources/%1/").arg(server->id());
-    int requests = 0;
-    int untracked = 0;
-    int curseForgeNeedsKey = 0;
-    int recoveredTracking = 0;
-    // Each instance's metadata is read at most once, and only if an untracked file needs it.
-    QHash<QString, ContentMetadataIndex> instanceMetadata;
-    for (const QFileInfo &installed : files) {
-        QString source = settings.value(sourcePrefix + installed.fileName()).toString();
-        if (source.isEmpty() && APPLICATION_DYN && APPLICATION->instances()) {
-            for (int instanceIndex = 0;
-                 instanceIndex < APPLICATION->instances()->count(); ++instanceIndex) {
-                MinecraftInstance *instance = APPLICATION->instances()->at(instanceIndex);
-                if (!instance) continue;
-                const QString gameRoot = instance->gameRoot();
-                auto metadata = instanceMetadata.find(gameRoot);
-                if (metadata == instanceMetadata.end()) {
-                    metadata = instanceMetadata.insert(
-                        gameRoot, ServerModpackInstaller::loadContentMetadata(gameRoot));
-                }
-                source = ServerModpackInstaller::contentTrackingSource(
-                    gameRoot, *metadata, installed.absoluteFilePath());
-                if (!source.isEmpty()) {
-                    settings.setValue(sourcePrefix + installed.fileName(), source);
-                    ++recoveredTracking;
-                    break;
-                }
-            }
-        }
-        const QString provider = source.section(':', 0, 0).toLower();
-        const QString projectId = source.section(':', 1, 1);
-        const QString installedVersionId = source.section(':', 2, 2);
-        auto *item = new QTreeWidgetItem(m_contentUpdatesTree);
-        item->setText(0, installed.fileName());
-        item->setText(1, source.isEmpty() ? tr("Not tracked")
-            : provider == QStringLiteral("curseforge") ? tr("CurseForge") : tr("Modrinth"));
-        item->setData(0, Qt::UserRole + 1, installed.absoluteFilePath());
-        item->setData(0, Qt::UserRole + 2, source);
-        if (source.isEmpty() || projectId.isEmpty()) {
-            item->setText(2, source.isEmpty()
-                ? tr("Downloaded before update tracking")
-                : tr("Check from the content browser"));
-            ++untracked;
-            continue;
-        }
-        if (provider == QStringLiteral("curseforge") && !curseForgeAvailable()) {
-            item->setText(2, tr("CurseForge API key required — use Set Up CurseForge"));
-            ++curseForgeNeedsKey;
-            continue;
-        }
-        if (provider != QStringLiteral("modrinth")
-            && provider != QStringLiteral("curseforge")) {
-            item->setText(2, tr("Unknown update provider"));
-            ++untracked;
-            continue;
-        }
-
-        QUrl url(provider == QStringLiteral("curseforge")
-            ? QString(BuildConfig.FLAME_BASE_URL + "/mods/%1/files").arg(projectId)
-            : QString("https://api.modrinth.com/v2/project/%1/version").arg(projectId));
-        QUrlQuery query;
-        if (provider == QStringLiteral("curseforge")) {
-            query.addQueryItem(QStringLiteral("pageSize"), QStringLiteral("10000"));
-            query.addQueryItem(QStringLiteral("gameVersion"), server->version());
-        } else {
-            const QJsonArray loaders = QJsonArray::fromStringList(modrinthLoadersForServer(loader));
-            query.addQueryItem(QStringLiteral("loaders"), QString::fromUtf8(
-                QJsonDocument(loaders).toJson(QJsonDocument::Compact)));
-            query.addQueryItem("game_versions", QString("[\"%1\"]").arg(server->version()));
-        }
-        url.setQuery(query);
-        item->setText(2, tr("Checking…"));
-        ++requests;
-        QNetworkReply *reply = m_updatesNetwork->get(
-            provider == QStringLiteral("curseforge")
-                ? curseForgeUpdateRequest(url) : updateRequest(url));
-        const QString installedName = installed.fileName();
-        connect(reply, &QNetworkReply::finished, this,
-                [this, reply, source, provider, projectId, installedVersionId,
-                 installedName, loader]() {
-            QTreeWidgetItem *item = nullptr;
-            for (int row = 0; row < m_contentUpdatesTree->topLevelItemCount(); ++row) {
-                QTreeWidgetItem *candidate = m_contentUpdatesTree->topLevelItem(row);
-                if (candidate->text(0) == installedName && candidate->data(0, Qt::UserRole + 2).toString() == source) {
-                    item = candidate;
-                    break;
-                }
-            }
-            if (!item) { reply->deleteLater(); return; }
-            if (reply->error() != QNetworkReply::NoError) {
-                item->setText(2, tr("Could not check — %1").arg(reply->errorString()));
-                reply->deleteLater();
-                return;
-            }
-            QString metadataError;
-            ServerContentUpdateCandidate update = provider == QStringLiteral("curseforge")
-                ? ServerContentUpdater::parseCurseForgeFilesResponse(
-                      reply->readAll(), installedName, loader, &metadataError)
-                : ServerContentUpdater::parseModrinthVersionResponse(
-                      reply->readAll(), installedName, &metadataError);
-            if (!installedVersionId.isEmpty() && update.versionId == installedVersionId) {
-                update.available = false;
-                update.upToDate = true;
-            }
-            if (!metadataError.isEmpty()) {
-                item->setText(2, tr("Could not check — %1").arg(metadataError));
-            } else if (provider == QStringLiteral("curseforge") && update.available
-                       && update.url.isEmpty()) {
-                item->setText(2, tr("Resolving CurseForge download…"));
-                const QUrl downloadUrlEndpoint =
-                    FlameAPI::fileDownloadUrlEndpoint(projectId, update.providerFileId);
-                QNetworkReply *downloadReply = m_updatesNetwork->get(
-                    curseForgeUpdateRequest(downloadUrlEndpoint));
-                connect(downloadReply, &QNetworkReply::finished, this,
-                        [this, downloadReply, source, installedName, update]() mutable {
-                    QTreeWidgetItem *currentItem = nullptr;
-                    for (int row = 0; row < m_contentUpdatesTree->topLevelItemCount(); ++row) {
-                        QTreeWidgetItem *candidate = m_contentUpdatesTree->topLevelItem(row);
-                        if (candidate->text(0) == installedName
-                            && candidate->data(0, Qt::UserRole + 2).toString() == source) {
-                            currentItem = candidate;
-                            break;
-                        }
-                    }
-                    if (!currentItem) {
-                        downloadReply->deleteLater();
-                        return;
-                    }
-                    if (downloadReply->error() != QNetworkReply::NoError) {
-                        currentItem->setText(
-                            2, tr("CurseForge download unavailable — %1")
-                                   .arg(downloadReply->errorString()));
-                    } else {
-                        QString urlError;
-                        update.url = FlameAPI::loadFileDownloadUrl(
-                            downloadReply->readAll(), &urlError);
-                        if (update.url.isEmpty()) {
-                            currentItem->setText(
-                                2, tr("CurseForge download unavailable — %1").arg(urlError));
-                        } else {
-                            showContentUpdate(currentItem, update);
-                        }
-                    }
-                    downloadReply->deleteLater();
-                    updateUI();
-                });
-            } else {
-                showContentUpdate(item, update);
-            }
-            reply->deleteLater();
-            updateUI();
-        });
-    }
-    if (requests) {
-        m_updatesInfoLabel->setText(
-            tr("Checking %1 tracked file(s) from Modrinth and CurseForge. Recovered tracking for %2 old file(s); %3 file(s) still need manual source selection; %4 CurseForge file(s) need an API key.")
-                .arg(requests).arg(recoveredTracking).arg(untracked)
-                .arg(curseForgeNeedsKey));
-    } else if (curseForgeNeedsKey) {
-        m_updatesInfoLabel->setText(
-            tr("CurseForge updates need an API key. Use Set Up CurseForge, save a valid key in Services, then check again."));
-    } else {
-        m_updatesInfoLabel->setText(
-            tr("No tracked files were found. Mods imported by new modpack servers and files downloaded from the Mods or Plugins tab are tracked automatically."));
-    }
-    updateUI();
-}
-
-void ServerListPage::onInstallContentUpdate()
-{
-    if (m_activeContentUpdater) {
-        m_activeContentUpdater->cancel();
-        m_installContentUpdateButton->setEnabled(false);
-        m_updatesInfoLabel->setText(
-            tr("Cancelling content update; the installed file will be kept."));
-        return;
-    }
-    auto *item = m_contentUpdatesTree ? m_contentUpdatesTree->currentItem() : nullptr;
-    if (!item || !m_serverManager || m_selectedServerId.isEmpty()) return;
-    const auto server = m_serverManager->getServer(m_selectedServerId);
-    if (!server || server->isRunning()) return;
-    const QUrl url(item->data(0, Qt::UserRole).toString());
-    const QString replacementName = item->data(0, Qt::UserRole + 3).toString();
-    const QString oldPath = item->data(0, Qt::UserRole + 1).toString();
-    const QString source = item->data(0, Qt::UserRole + 2).toString();
-    const auto hashAlgorithm = static_cast<QCryptographicHash::Algorithm>(item->data(0, Qt::UserRole + 4).toInt());
-    const QByteArray expectedHash = item->data(0, Qt::UserRole + 5).toByteArray();
-    const QString versionId = item->data(0, Qt::UserRole + 6).toString();
-    if (!url.isValid() || replacementName.isEmpty() || oldPath.isEmpty() || expectedHash.isEmpty()) return;
-
-    const QString serverId = m_selectedServerId;
-    auto *updater = new ServerContentUpdater(this);
-    m_activeContentUpdater = updater;
-    item->setText(2, tr("Downloading…"));
-    m_installContentUpdateButton->setText(tr("Cancel Update"));
-    m_installContentUpdateButton->setEnabled(true);
-    connect(updater, &ServerContentUpdater::progress, this,
-            [this, oldPath](qint64 received, qint64 total) {
-        if (total <= 0) return;
-        for (int row = 0; row < m_contentUpdatesTree->topLevelItemCount(); ++row) {
-            QTreeWidgetItem* candidate = m_contentUpdatesTree->topLevelItem(row);
-            if (candidate->data(0, Qt::UserRole + 1).toString() == oldPath) {
-                candidate->setText(
-                    2, tr("Downloading… %1%").arg(received * 100 / total));
-                break;
-            }
-        }
-    });
-    connect(updater, &ServerContentUpdater::finished, this,
-            [this, updater, hashAlgorithm, expectedHash, versionId, oldPath, source,
-             serverId](const ServerContentUpdateResult& result) {
-        QTreeWidgetItem *target = nullptr;
-        for (int row = 0; row < m_contentUpdatesTree->topLevelItemCount(); ++row) {
-            QTreeWidgetItem *candidate = m_contentUpdatesTree->topLevelItem(row);
-            if (candidate->data(0, Qt::UserRole + 1).toString() == oldPath) {
-                target = candidate;
-                break;
-            }
-        }
-        if (result.success) {
-            if (const auto updatedServer = m_serverManager
-                    ? m_serverManager->getServer(serverId) : nullptr) {
-                QString cacheError;
-                if (!updatedServer->invalidateContentCaches(&cacheError)) {
-                    QMessageBox::warning(this, tr("Content Cache Could Not Be Cleared"),
-                                         cacheError);
-                }
-            }
-            QSettings settings;
-            const QString prefix = QString("ServerContentSources/%1/").arg(serverId);
-            const QString updatedSource = QStringLiteral("%1:%2")
-                .arg(source.section(':', 0, 1), versionId);
-            settings.remove(prefix + QFileInfo(oldPath).fileName());
-            settings.setValue(prefix + QFileInfo(result.destinationPath).fileName(), updatedSource);
-            const QString metadataPrefix = QString("ServerContentMetadata/%1/%2/")
-                .arg(serverId, QFileInfo(result.destinationPath).fileName());
-            settings.setValue(metadataPrefix + "versionId", versionId);
-            settings.setValue(metadataPrefix + "url", result.finalUrl.toString());
-            settings.setValue(metadataPrefix + "hashAlgorithm", static_cast<int>(hashAlgorithm));
-            settings.setValue(metadataPrefix + "hash", QString::fromLatin1(expectedHash.toHex()));
-            settings.setValue(metadataPrefix + "installedAt", QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
-            if (target) {
-                target->setText(0, QFileInfo(result.destinationPath).fileName());
-                target->setText(2, tr("Updated — restart server to load it"));
-                target->setData(0, Qt::UserRole, QString());
-                target->setData(0, Qt::UserRole + 1, result.destinationPath);
-            }
-            if (m_selectedServerId == serverId) refreshInstalledContent();
-        } else {
-            if (target) target->setText(2, result.message);
-        }
-        m_updatesInfoLabel->setText(result.message);
-        if (m_activeContentUpdater == updater) m_activeContentUpdater = nullptr;
-        updater->deleteLater();
-        m_installContentUpdateButton->setText(tr("Install Selected Update"));
-        updateUI();
-    });
-
-    ServerContentUpdateRequest request;
-    request.url = url;
-    request.installedPath = oldPath;
-    request.replacementName = replacementName;
-    request.hashAlgorithm = hashAlgorithm;
-    request.expectedHash = expectedHash;
-    QString error;
-    if (!updater->start(server, request, &error)) {
-        m_activeContentUpdater = nullptr;
-        updater->deleteLater();
-        item->setText(2, tr("Update blocked — %1").arg(error));
-        m_updatesInfoLabel->setText(error);
-        m_installContentUpdateButton->setText(tr("Install Selected Update"));
-        updateUI();
-    }
-}
-
-void ServerListPage::onRefreshPlayers()
-{
-    refreshPlayerList();
-}
-
-void ServerListPage::onWhitelistPlayer()
-{
-    auto *item = m_playersTree ? m_playersTree->currentItem() : nullptr;
-    if (!item || !m_serverManager) return;
-    const auto server = m_serverManager->getServer(m_selectedServerId);
-    const QString uuid = item->data(0, Qt::UserRole).toString();
-    if (!server || uuid.isEmpty()) return;
-    QString error;
-    if (server->status() == ServerStatus::Running) {
-        if (!server->setPlayerWhitelistedLive(item->text(0), true, &error)) {
-            QMessageBox::warning(this, tr("Whitelist"), error);
-            return;
-        }
-        item->setText(2, tr("Yes"));
-        m_playersInfoLabel->setText(
-            tr("Sent live whitelist command for %1. The Players tab and selection were kept.")
-                .arg(item->text(0)));
-        updateUI();
-        return;
-    }
-    if (!ServerPlayerAccess::setWhitelisted(server, uuid, item->text(0), true, &error)) {
-        QMessageBox::warning(this, tr("Whitelist"), error);
-        return;
-    }
-    refreshPlayerList();
-}
-
-void ServerListPage::onOpPlayer()
-{
-    auto *item = m_playersTree ? m_playersTree->currentItem() : nullptr;
-    if (!item || !m_serverManager) return;
-    const auto server = m_serverManager->getServer(m_selectedServerId);
-    const QString uuid = item->data(0, Qt::UserRole).toString();
-    if (!server || uuid.isEmpty()) return;
-
-    if (server->status() == ServerStatus::Running) {
-        QString error;
-        if (!server->setPlayerOperatorLive(item->text(0), true, &error)) {
-            QMessageBox::warning(this, tr("Operators"), error);
-            return;
-        }
-        item->setText(3, tr("Yes (server default level)"));
-        m_playersInfoLabel->setText(
-            tr("Sent live operator command for %1. The permission level comes from server.properties while running.")
-                .arg(item->text(0)));
-        updateUI();
-        return;
-    }
-
-    QMenu levelMenu(this);
-    const QList<QPair<int, QString>> levels = {
-        {1, tr("Level 1 — bypass spawn protection")},
-        {2, tr("Level 2 — use command blocks")},
-        {3, tr("Level 3 — manage players")},
-        {4, tr("Level 4 — full server control")}
-    };
-    for (const auto &level : levels) {
-        QAction *action = levelMenu.addAction(level.second);
-        action->setData(level.first);
-    }
-    QAction *selected = levelMenu.exec(QCursor::pos());
-    if (!selected) return;
-
-    QString error;
-    if (!ServerPlayerAccess::setOperator(server, uuid, item->text(0),
-                                         selected->data().toInt(), &error)) {
-        QMessageBox::warning(this, tr("Operators"), error);
-        return;
-    }
-    refreshPlayerList();
-}
-
-void ServerListPage::onBanPlayer()
-{
-    auto *item = m_playersTree ? m_playersTree->currentItem() : nullptr;
-    if (!item || !m_serverManager) return;
-    const auto server = m_serverManager->getServer(m_selectedServerId);
-    const QString uuid = item->data(0, Qt::UserRole).toString();
-    if (!server || uuid.isEmpty()) return;
-    if (QMessageBox::question(this, tr("Ban Player"),
-                              tr("Ban %1 from this server?").arg(item->text(0)))
-        != QMessageBox::Yes) {
-        return;
-    }
-    QString error;
-    if (server->status() == ServerStatus::Running) {
-        if (!server->setPlayerBannedLive(item->text(0), true,
-                                         tr("Banned from J Launcher"), &error)) {
-            QMessageBox::warning(this, tr("Ban Player"), error);
-            return;
-        }
-        item->setText(4, tr("Yes"));
-        m_playersInfoLabel->setText(
-            tr("Sent live ban command for %1. The Players tab and selection were kept.")
-                .arg(item->text(0)));
-        updateUI();
-        return;
-    }
-    if (!ServerPlayerAccess::setBanned(server, uuid, item->text(0), true,
-                                       tr("Banned from J Launcher"), &error)) {
-        QMessageBox::warning(this, tr("Ban Player"), error);
-        return;
-    }
-    refreshPlayerList();
-}
-
-void ServerListPage::onKickPlayer()
-{
-    auto *item = m_playersTree ? m_playersTree->currentItem() : nullptr;
-    if (!item || !m_serverManager) return;
-    const auto server = m_serverManager->getServer(m_selectedServerId);
-    if (!server) return;
-
-    bool accepted = false;
-    const QString reason = QInputDialog::getText(
-        this, tr("Kick Player"), tr("Reason:"), QLineEdit::Normal,
-        tr("Removed by server operator"), &accepted);
-    if (!accepted) return;
-
-    QString error;
-    if (!server->kickPlayer(item->text(0), reason, &error)) {
-        QMessageBox::warning(this, tr("Kick Player"), error);
-    }
-}
-
-void ServerListPage::onRemovePlayerAccess()
-{
-    auto *item = m_playersTree ? m_playersTree->currentItem() : nullptr;
-    if (!item || !m_serverManager) return;
-    const auto server = m_serverManager->getServer(m_selectedServerId);
-    const QString uuid = item->data(0, Qt::UserRole).toString();
-    if (!server || uuid.isEmpty()) return;
-    QString error;
-    if (server->status() == ServerStatus::Running) {
-        if (!server->clearPlayerAccessLive(item->text(0), &error)) {
-            QMessageBox::warning(this, tr("Remove Access"), error);
-            return;
-        }
-        item->setText(2, tr("No"));
-        item->setText(3, tr("No"));
-        item->setText(4, tr("No"));
-        m_playersInfoLabel->setText(
-            tr("Sent live whitelist removal, de-op, and pardon commands for %1.")
-                .arg(item->text(0)));
-        updateUI();
-        return;
-    }
-    if (!ServerPlayerAccess::clearAccess(server, uuid, &error)) {
-        QMessageBox::warning(this, tr("Remove Access"), error);
-        return;
-    }
-    refreshPlayerList();
-}
-
-void ServerListPage::onViewPlayerHistory()
-{
-    if (!m_serverManager || m_selectedServerId.isEmpty()) return;
-    const auto server = m_serverManager->getServer(m_selectedServerId);
-    if (!server) return;
-    const QStringList history = QSettings().value(QString("ServerPlayerHistory/%1/events").arg(server->id())).toStringList();
-
-    QDialog dialog(this);
-    dialog.setWindowTitle(tr("Player Activity - %1").arg(server->name()));
-    dialog.setMinimumSize(620, 400);
-    auto *layout = new QVBoxLayout(&dialog);
-    auto *filter = new QLineEdit(&dialog);
-    filter->setPlaceholderText(tr("Search player activity..."));
-    auto *list = new QListWidget(&dialog);
-    list->setAlternatingRowColors(true);
-    list->setSelectionMode(QAbstractItemView::NoSelection);
-    const auto populate = [list, history](const QString &term) {
-        list->clear();
-        for (const QString &event : history) {
-            if (term.isEmpty() || event.contains(term, Qt::CaseInsensitive)) list->addItem(event);
-        }
-        if (list->count() == 0) list->addItem(QObject::tr("No matching activity."));
-    };
-    populate(QString());
-    connect(filter, &QLineEdit::textChanged, &dialog, populate);
-    layout->addWidget(filter);
-    layout->addWidget(list, 1);
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    layout->addWidget(buttons);
-    dialog.exec();
-}
-
-void ServerListPage::onExportPlayerHistory()
-{
-    if (!m_serverManager || m_selectedServerId.isEmpty()) return;
-    const auto server = m_serverManager->getServer(m_selectedServerId);
-    if (!server) return;
-    const QStringList history = QSettings().value(QString("ServerPlayerHistory/%1/events").arg(server->id())).toStringList();
-    const QString suggested = QDir::home().filePath(server->name().simplified().replace(' ', '-') + "-player-history.json");
-    const QString path = QFileDialog::getSaveFileName(this, tr("Export Player Activity"), suggested,
-                                                       tr("JSON files (*.json);;CSV files (*.csv)"));
-    if (path.isEmpty()) return;
-
-    QSaveFile output(path);
-    if (!output.open(QIODevice::WriteOnly)) {
-        QMessageBox::warning(this, tr("Export Player Activity"), tr("Could not create the selected export file."));
-        return;
-    }
-    if (path.endsWith(".csv", Qt::CaseInsensitive)) {
-        auto quote = [](QString value) {
-            value.replace('"', "\"\"");
-            return '"' + value + '"';
-        };
-        QString csv = "event\n";
-        for (const QString &event : history) csv += quote(event) + '\n';
-        output.write(csv.toUtf8());
-    } else {
-        QJsonArray events;
-        for (const QString &event : history) events.append(event);
-        QJsonObject document{{"serverId", server->id()}, {"serverName", server->name()},
-                             {"exportedAt", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
-                             {"events", events}};
-        output.write(QJsonDocument(document).toJson(QJsonDocument::Indented));
-    }
-    if (!output.commit()) {
-        QMessageBox::warning(this, tr("Export Player Activity"), tr("Could not finish writing the export file."));
-        return;
-    }
-    QMessageBox::information(this, tr("Player Activity Exported"), tr("Saved player activity to %1.").arg(QDir::toNativeSeparators(path)));
 }
 
 void ServerListPage::onImportServerPack()
@@ -3388,7 +2016,7 @@ void ServerListPage::onServerSelectionChanged()
 
     int row = ui->serverList->currentRow();
     if (row >= 0) {
-        m_selectedServerId = ui->serverList->item(row)->data(Qt::UserRole).toString();
+        setSelectedServerId(ui->serverList->item(row)->data(Qt::UserRole).toString());
 
         if (m_serverManager) {
             m_currentConnectedServer = m_serverManager->getServer(m_selectedServerId);
@@ -3430,18 +2058,13 @@ void ServerListPage::onServerSelectionChanged()
             }
         }
     } else {
-        m_selectedServerId.clear();
+        setSelectedServerId(QString());
         ui->consoleOutput->clear();
     }
     updateSelectedServerInfo();
     updateUI();
     QTimer::singleShot(0, this, &ServerListPage::refreshCurrentServerTab);
-    if (m_contentUpdatesTree) {
-        m_contentUpdatesTree->clear();
-        m_updatesInfoLabel->setText(m_selectedServerId.isEmpty()
-            ? tr("Select a server to check for updates.")
-            : tr("Check tracked Modrinth and CurseForge content for compatible updates. New modpack servers import mod tracking automatically."));
-    }
+    m_updatesTab->clearUpdateList();
 
     for (int i = 0; i < ui->serverList->count(); ++i) {
         QWidget *card = ui->serverList->itemWidget(ui->serverList->item(i));
@@ -3561,68 +2184,11 @@ void ServerListPage::updateUI()
     m_consoleSearchInput->setEnabled(hasSelection);
     m_findConsoleButton->setEnabled(hasSelection);
     m_copyConsoleErrorsButton->setEnabled(hasSelection);
-    if (m_maintenanceTab) {
-        ui->serverTabs->setTabEnabled(ui->serverTabs->indexOf(m_maintenanceTab), hasSelection);
-        m_updateServerSoftwareButton->setEnabled(hasSelection && canEditFiles);
-        m_changeMinecraftVersionButton->setEnabled(hasSelection && canEditFiles);
-        bool hasRollbackBackup = false;
-        if (hasSelection && m_serverManager) {
-            const auto server = m_serverManager->getServer(m_selectedServerId);
-            QSettings updateSettings;
-            QString backupPath = server ? updateSettings.value(
-                QString("ServerUpdates/%1/latestRollbackBackupPath").arg(server->id())).toString() : QString();
-            if (backupPath.isEmpty() && server) {
-                const QString backupName = updateSettings.value(
-                    QString("ServerUpdates/%1/latestRollbackBackup").arg(server->id())).toString();
-                if (!backupName.isEmpty()) {
-                    backupPath = QDir(QDir(server->serverDirectory()).filePath("backups"))
-                                     .filePath(backupName);
-                }
-            }
-            hasRollbackBackup = !backupPath.isEmpty() && QFileInfo(backupPath).isDir();
-        }
-        m_restoreLatestUpdateBackupButton->setEnabled(hasRollbackBackup && canEditFiles);
-        m_checkContentUpdatesButton->setEnabled(hasSelection && canEditFiles && supportsContentBrowser);
-        m_setupCurseForgeButton->setVisible(!curseForgeAvailable());
-        m_setupCurseForgeButton->setEnabled(hasSelection && canEditFiles && supportsContentBrowser);
-        const bool hasContentUpdate = m_contentUpdatesTree->currentItem()
-            && !m_contentUpdatesTree->currentItem()->data(0, Qt::UserRole).toString().isEmpty();
-        if (m_activeContentUpdater) {
-            m_installContentUpdateButton->setText(tr("Cancel Update"));
-            m_installContentUpdateButton->setEnabled(true);
-        } else {
-            m_installContentUpdateButton->setText(tr("Install Selected Update"));
-            m_installContentUpdateButton->setEnabled(
-                hasContentUpdate && canEditFiles && supportsContentBrowser);
-        }
-    }
-    if (m_playersTab) {
-        ui->serverTabs->setTabEnabled(ui->serverTabs->indexOf(m_playersTab), hasSelection);
-        m_refreshPlayersButton->setEnabled(hasSelection);
-        const bool hasPlayer = m_playersTree->currentItem()
-            && !m_playersTree->currentItem()->data(0, Qt::UserRole).toString().isEmpty();
-        const bool canManagePlayerAccess = canEditFiles || status == ServerStatus::Running;
-        m_whitelistPlayerButton->setEnabled(hasPlayer && canManagePlayerAccess);
-        m_opPlayerButton->setEnabled(hasPlayer && canManagePlayerAccess);
-        m_banPlayerButton->setEnabled(hasPlayer && canManagePlayerAccess);
-        m_kickPlayerButton->setEnabled(hasPlayer && status == ServerStatus::Running);
-        m_removePlayerAccessButton->setEnabled(hasPlayer && canManagePlayerAccess);
-        m_viewPlayerHistoryButton->setEnabled(hasSelection);
-        m_exportPlayerHistoryButton->setEnabled(hasSelection);
-    }
-    if (m_automationTab) {
-        m_scheduleEnabledCheck->setEnabled(hasSelection);
-        m_scheduleActionCombo->setEnabled(hasSelection);
-        m_scheduleTimeEdit->setEnabled(hasSelection);
-        m_backupRetentionSpin->setEnabled(hasSelection);
-        m_cpuWarningSpin->setEnabled(hasSelection && canEditFiles);
-        m_ramWarningSpin->setEnabled(hasSelection && canEditFiles);
-        m_diskWarningSpin->setEnabled(hasSelection && canEditFiles);
-        m_autoRestartCheck->setEnabled(hasSelection && canEditFiles);
-        m_saveAutomationButton->setEnabled(hasSelection && canEditFiles);
-        m_runAutomationButton->setEnabled(hasSelection);
-        m_viewCrashReportButton->setEnabled(hasSelection && !m_diagnosticsLabel->text().startsWith(tr("No crash")));
-    }
+    ui->serverTabs->setTabEnabled(ui->serverTabs->indexOf(m_maintenanceTab), hasSelection);
+    m_updatesTab->updateActions();
+    ui->serverTabs->setTabEnabled(ui->serverTabs->indexOf(m_playersTab), hasSelection);
+    m_playersTab->updateActions();
+    m_automationTab->updateActions();
     syncServerNavigation();
 }
 
@@ -3810,7 +2376,7 @@ void ServerListPage::refreshCurrentServerTab()
     } else if (page == ui->installedContentTab) {
         refreshInstalledContent();
     } else if (page == m_playersTab) {
-        refreshPlayerList();
+        m_playersTab->refresh();
     } else if (page == ui->filesTab) {
         refreshServerFiles();
     } else if (page == ui->backupsTab) {
@@ -3818,8 +2384,7 @@ void ServerListPage::refreshCurrentServerTab()
     } else if (page == ui->settingsTab) {
         rebuildSettingsPage();
     } else if (page == m_maintenanceTab && m_maintenanceTab->currentWidget() == m_automationTab) {
-        refreshAutomation();
-        refreshDiagnostics();
+        m_automationTab->refresh();
     }
 }
 
@@ -3925,7 +2490,7 @@ void ServerListPage::refreshOverview()
         if (!m_serverManager) return;
         const auto currentServer = m_serverManager->getServer(selectedServerId);
         if (!currentServer) return;
-        ui->overviewContentValue->setText(formatByteSize(sizes.first));
+        ui->overviewContentValue->setText(ServerFiles::formatByteSize(sizes.first));
         if (m_overviewSummaryLabel) {
             m_overviewSummaryLabel->setText(
                 tr("<b>Version:</b> %1 &nbsp;&bull;&nbsp; <b>Type:</b> %2 &nbsp;&bull;&nbsp; <b>Port:</b> %3<br>"
@@ -3935,13 +2500,13 @@ void ServerListPage::refreshOverview()
                     .arg(contentSummary.toHtmlEscaped())
                     .arg(backupCount)
                     .arg(worldCount)
-                    .arg(formatByteSize(sizes.second).toHtmlEscaped()));
+                    .arg(ServerFiles::formatByteSize(sizes.second).toHtmlEscaped()));
         }
     });
     watcher->setFuture(QtConcurrent::run([serverDirectoryPath, worldPaths]() {
         qint64 worldSize = 0;
-        for (const QString &worldPath : worldPaths) worldSize += ServerListPage::directorySize(worldPath);
-        return qMakePair(ServerListPage::directorySize(serverDirectoryPath), worldSize);
+        for (const QString &worldPath : worldPaths) worldSize += ServerFiles::directorySize(worldPath);
+        return qMakePair(ServerFiles::directorySize(serverDirectoryPath), worldSize);
     }));
 }
 
@@ -4001,9 +2566,9 @@ void ServerListPage::refreshLiveStatistics()
     }
 
 #ifdef Q_OS_WIN
-    ProcessSnapshot snapshot;
-    const qint64 processId = serverWorkProcessId(server->processId());
-    if (!readProcessSnapshot(processId, &snapshot)) {
+    ServerProcessSnapshot snapshot;
+    const qint64 processId = ServerProcessStats::workProcessId(server->processId());
+    if (!ServerProcessStats::read(processId, &snapshot)) {
         ServerHealthInput input;
         input.running = true;
         const ServerHealthAssessment assessment = ServerDiagnostics::assessHealth(input);
@@ -4132,72 +2697,21 @@ void ServerListPage::refreshInstalledContent()
     }
 
     for (const QFileInfo &file : files) {
-        const QStringList details = installedContentDetails(file);
-        auto *item = new QTreeWidgetItem({details.at(0), details.at(1), details.at(2),
-                                           QLocale().formattedDataSize(file.size())});
+        const ServerContentFileDetails details = ServerFiles::describeContentFile(file.fileName());
+        auto *item = new QTreeWidgetItem({details.name,
+                                          details.version.isEmpty() ? tr("—") : details.version,
+                                          details.enabled ? tr("Enabled") : tr("Disabled"),
+                                          QLocale().formattedDataSize(file.size())});
         item->setData(0, Qt::UserRole, file.absoluteFilePath());
         item->setIcon(0, launcherIcon("loadermods", QStyle::SP_FileIcon));
         item->setToolTip(0, file.fileName());
-        if (details.at(2) == tr("Disabled")) {
+        if (!details.enabled) {
             for (int column = 0; column < item->columnCount(); ++column) {
                 item->setForeground(column, palette().brush(QPalette::Mid));
             }
         }
         ui->installedContentTree->addTopLevelItem(item);
     }
-}
-
-void ServerListPage::refreshPlayerList()
-{
-    if (!m_playersTree || !m_playersInfoLabel) return;
-    const QString selectedUuid = m_playersTree->currentItem()
-        ? m_playersTree->currentItem()->data(0, Qt::UserRole).toString() : QString();
-    const QSignalBlocker selectionBlocker(m_playersTree);
-    m_playersTree->clear();
-    if (!m_serverManager || m_selectedServerId.isEmpty()) {
-        m_playersInfoLabel->setText(tr("Select a server to view known players and manage access."));
-        return;
-    }
-    const auto server = m_serverManager->getServer(m_selectedServerId);
-    if (!server) return;
-
-    QString error;
-    const QList<ServerPlayerInfo> players = ServerPlayerAccess::listPlayers(server, &error);
-    if (!error.isEmpty()) {
-        m_playersInfoLabel->setText(tr("Could not read player access files: %1").arg(error));
-        updateUI();
-        return;
-    }
-
-    for (const ServerPlayerInfo &player : players) {
-        auto *item = new QTreeWidgetItem(m_playersTree);
-        item->setText(0, player.name.isEmpty() ? tr("Unknown player") : player.name);
-        item->setText(1, player.uuid);
-        item->setText(2, player.whitelisted ? tr("Yes") : tr("No"));
-        item->setText(3, player.operatorEnabled
-                         ? tr("Yes (level %1)").arg(player.operatorLevel) : tr("No"));
-        item->setText(4, player.banned ? tr("Yes") : tr("No"));
-        item->setData(0, Qt::UserRole, player.uuid);
-        if (!selectedUuid.isEmpty() && player.uuid == selectedUuid) {
-            m_playersTree->setCurrentItem(item);
-        }
-    }
-    if (!m_playersTree->currentItem() && m_playersTree->topLevelItemCount() > 0) {
-        m_playersTree->setCurrentItem(m_playersTree->topLevelItem(0));
-    }
-    m_playersTree->resizeColumnToContents(0);
-    m_playersTree->resizeColumnToContents(2);
-    m_playersTree->resizeColumnToContents(3);
-    m_playersTree->resizeColumnToContents(4);
-    const QStringList history = QSettings().value(QString("ServerPlayerHistory/%1/events").arg(server->id())).toStringList();
-    const QString activity = history.isEmpty() ? QString() : tr(" Latest activity: %1").arg(history.last());
-    const QString managementMode = server->status() == ServerStatus::Running
-        ? tr(" Live actions are sent through the server console; operator level uses server.properties.")
-        : tr(" Access files can be edited safely while the server is stopped.");
-    m_playersInfoLabel->setText((players.isEmpty()
-        ? tr("No known players yet. Players appear after they connect, or when listed in whitelist, ops, or bans.")
-        : tr("%1 known player(s).").arg(players.size())) + managementMode + activity);
-    updateUI();
 }
 
 void ServerListPage::refreshServerBackups()
@@ -4212,12 +2726,6 @@ void ServerListPage::refreshServerBackups()
     const auto server = m_serverManager->getServer(m_selectedServerId);
     if (!server) return;
 
-    const auto sizeText = [](qint64 bytes) {
-        if (bytes < 1024) return QString::number(bytes) + " B";
-        if (bytes < 1024 * 1024) return QString::number(bytes / 1024.0, 'f', 1) + " KB";
-        return QString::number(bytes / (1024.0 * 1024.0), 'f', 1) + " MB";
-    };
-
     int count = 0;
     for (const ServerBackupInfo &backup : m_serverManager->listServerBackups(m_selectedServerId)) {
         auto *item = new QTreeWidgetItem(ui->backupsTree);
@@ -4225,7 +2733,7 @@ void ServerListPage::refreshServerBackups()
         item->setText(1, backup.createdAt.isValid()
                              ? backup.createdAt.toLocalTime().toString("yyyy-MM-dd HH:mm")
                              : tr("Invalid"));
-        item->setText(2, sizeText(backup.size));
+        item->setText(2, ServerFiles::formatByteSize(backup.size));
         item->setData(0, Qt::UserRole, backup.path);
         item->setData(0, Qt::UserRole + 1, backup.valid);
         item->setToolTip(
@@ -4241,43 +2749,6 @@ void ServerListPage::refreshServerBackups()
     ui->backupsTree->resizeColumnToContents(2);
     ui->backupsInfoLabel->setText(tr("%1 complete server backup(s) saved for %2. Enter a name to create a new backup.")
         .arg(count).arg(server->name()));
-}
-
-bool ServerListPage::copyDirectory(const QString &source, const QString &destination, QString *error,
-                                   const QString &excludedTopLevel)
-{
-    if (!QDir().mkpath(destination)) {
-        if (error) *error = tr("Could not create the backup folder.");
-        return false;
-    }
-    const QDir sourceDir(source);
-    if (!sourceDir.exists()) return true;
-
-    const QFileInfoList entries = sourceDir.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden);
-    for (const QFileInfo &entry : entries) {
-        if (!excludedTopLevel.isEmpty() && entry.fileName().compare(excludedTopLevel, Qt::CaseInsensitive) == 0) continue;
-        const QString targetPath = QDir(destination).filePath(entry.fileName());
-        if (entry.isDir()) {
-            if (!copyDirectory(entry.absoluteFilePath(), targetPath, error)) {
-                return false;
-            }
-        } else if (!QFile::copy(entry.absoluteFilePath(), targetPath)) {
-            if (error) *error = tr("Could not copy %1.").arg(entry.fileName());
-            return false;
-        }
-    }
-    return true;
-}
-
-qint64 ServerListPage::directorySize(const QString &directory)
-{
-    qint64 total = 0;
-    QDirIterator iterator(directory, QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden, QDirIterator::Subdirectories);
-    while (iterator.hasNext()) {
-        iterator.next();
-        total += iterator.fileInfo().size();
-    }
-    return total;
 }
 
 void ServerListPage::rebuildSettingsPage()
@@ -4378,18 +2849,11 @@ void ServerListPage::populateServerFileItem(QTreeWidgetItem *item)
     const QDir directory(parentInfo.absoluteFilePath());
     const QFileInfoList entries = directory.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden,
                                                           QDir::DirsFirst | QDir::Name | QDir::IgnoreCase);
-    const auto sizeText = [](qint64 bytes) {
-        if (bytes < 1024) return QString::number(bytes) + " B";
-        if (bytes < 1024 * 1024) return QString::number(bytes / 1024.0, 'f', 1) + " KB";
-        if (bytes < 1024ll * 1024 * 1024) return QString::number(bytes / (1024.0 * 1024.0), 'f', 1) + " MB";
-        return QString::number(bytes / (1024.0 * 1024.0 * 1024.0), 'f', 1) + " GB";
-    };
-
     for (const QFileInfo &entry : entries) {
         auto *child = new QTreeWidgetItem(item);
         child->setText(0, entry.fileName());
         child->setText(1, entry.isDir() ? tr("Folder") : tr("File"));
-        child->setText(2, entry.isDir() ? QString() : sizeText(entry.size()));
+        child->setText(2, entry.isDir() ? QString() : ServerFiles::formatByteSize(entry.size()));
         child->setData(0, Qt::UserRole, entry.absoluteFilePath());
         child->setIcon(0, serverFileIcon(entry));
         if (entry.isDir()) {
@@ -4424,6 +2888,14 @@ void ServerListPage::updateSelectedServerInfo()
         .arg(type.toHtmlEscaped(), server->version().toHtmlEscaped()).arg(server->port())
         .arg(memoryText(server->minMemory()), memoryText(server->maxMemory()))
         .arg(getStatusString(static_cast<int>(server->status()))));
+}
+
+void ServerListPage::setSelectedServerId(const QString &serverId)
+{
+    m_selectedServerId = serverId;
+    m_automationTab->setServerId(serverId);
+    m_playersTab->setServerId(serverId);
+    m_updatesTab->setServerId(serverId);
 }
 
 void ServerListPage::appendConsoleOutput(const QString &text)

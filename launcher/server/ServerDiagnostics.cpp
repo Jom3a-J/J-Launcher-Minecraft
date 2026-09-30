@@ -2,11 +2,15 @@
 
 #include "ServerDiagnostics.h"
 #include "ServerInstance.h"
+#include "archive/ArchiveReader.h"
 #include "logs/Privacy.h"
 
 #include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QObject>
 #include <QRegularExpression>
 #include <QSet>
@@ -261,4 +265,76 @@ QString ServerDiagnostics::structuredCrashDetails(const ServerInstance &server,
            << (finalLines.isEmpty() ? QObject::tr("No server output was captured.")
                                     : finalLines.join('\n'));
     return report.join('\n');
+}
+
+QStringList ServerDiagnostics::modIdsFromJar(const QString& path)
+{
+    QStringList identifiers;
+    MMCZip::ArchiveReader fabricArchive(path);
+    if (const auto metadata = fabricArchive.goToFile(QStringLiteral("fabric.mod.json"))) {
+        QJsonParseError parseError;
+        const QJsonDocument document = QJsonDocument::fromJson(
+            metadata->readAll(), &parseError);
+        if (parseError.error == QJsonParseError::NoError && document.isObject()) {
+            const QJsonObject object = document.object();
+            identifiers << object.value(QStringLiteral("id")).toString().toLower();
+            for (const QJsonValue& provided :
+                 object.value(QStringLiteral("provides")).toArray()) {
+                identifiers << provided.toString().toLower();
+            }
+        }
+    }
+
+    MMCZip::ArchiveReader quiltArchive(path);
+    if (const auto metadata = quiltArchive.goToFile(QStringLiteral("quilt.mod.json"))) {
+        QJsonParseError parseError;
+        const QJsonDocument document = QJsonDocument::fromJson(
+            metadata->readAll(), &parseError);
+        if (parseError.error == QJsonParseError::NoError && document.isObject()) {
+            identifiers << document.object()
+                               .value(QStringLiteral("quilt_loader"))
+                               .toObject()
+                               .value(QStringLiteral("id"))
+                               .toString()
+                               .toLower();
+        }
+    }
+
+    for (const QString& metadataPath : {
+             QStringLiteral("META-INF/mods.toml"),
+             QStringLiteral("META-INF/neoforge.mods.toml") }) {
+        MMCZip::ArchiveReader forgeArchive(path);
+        if (const auto metadata = forgeArchive.goToFile(metadataPath)) {
+            const QString contents = QString::fromUtf8(metadata->readAll());
+            static const QRegularExpression modIdExpression(
+                QStringLiteral(R"((?im)^\s*modId\s*=\s*[\"']([a-z0-9_.-]+)[\"'])"));
+            auto matches = modIdExpression.globalMatch(contents);
+            while (matches.hasNext()) {
+                identifiers << matches.next().captured(1).toLower();
+            }
+        }
+    }
+    identifiers.removeAll(QString());
+    identifiers.removeDuplicates();
+    return identifiers;
+}
+
+QStringList ServerDiagnostics::suspectedModFiles(const QString& modsDirectory, const QString& log)
+{
+    const QStringList suspectedIds = suspectedModIds(log);
+    if (suspectedIds.isEmpty()) return {};
+
+    QStringList matches;
+    const QDir directory(modsDirectory);
+    for (const QFileInfo& jar : directory.entryInfoList(
+             QStringList() << QStringLiteral("*.jar"), QDir::Files)) {
+        const QStringList ids = modIdsFromJar(jar.absoluteFilePath());
+        for (const QString& suspectedId : suspectedIds) {
+            if (ids.contains(suspectedId, Qt::CaseInsensitive)) {
+                matches << jar.absoluteFilePath();
+                break;
+            }
+        }
+    }
+    return matches;
 }

@@ -23,6 +23,9 @@ class ServerManager;
 class ServerInstance;
 class ServerSettingsPage;
 class ServerContentUpdater;
+class ServerAutomationTab;
+class ServerPlayersTab;
+class ServerUpdatesTab;
 class QProgressBar;
 class QLabel;
 class QListWidget;
@@ -78,24 +81,8 @@ private slots:
     void onSettingsClicked();
     void onServerSelectionChanged();
     void onServerStatusChanged(ServerInstance *server);
-    void onUpdateServerSoftware();
-    void onChangeMinecraftVersion();
-    void onRestoreLatestUpdateBackup();
-    void onCheckContentUpdates();
-    void onInstallContentUpdate();
-    void onRefreshPlayers();
-    void onWhitelistPlayer();
-    void onOpPlayer();
-    void onBanPlayer();
-    void onKickPlayer();
-    void onRemovePlayerAccess();
-    void onViewPlayerHistory();
-    void onExportPlayerHistory();
     void onExportProfile();
     void onImportProfile();
-    void onSaveAutomation();
-    void onRunAutomationNow();
-    void onViewCrashReport();
     void onFindConsole();
     void onCopyConsoleErrors();
 
@@ -105,6 +92,8 @@ private:
     void updateUI();
     void updateServerList();
     void updateSelectedServerInfo();
+    /// Selects a server for the page and every tab; does not refresh them.
+    void setSelectedServerId(const QString &serverId);
     void refreshCurrentServerTab();
     void refreshInstalledContent();
     void refreshOverview();
@@ -112,17 +101,12 @@ private:
     void refreshServerBackups();
     void refreshServerFiles();
     void rebuildSettingsPage();
-    void refreshPlayerList();
-    void refreshAutomation();
-    void refreshDiagnostics();
-    void refreshAutomationHistory();
     void setupServerNavigation();
     void syncServerNavigation();
     void applyServerVisualHierarchy();
     void attachServerTracking(const std::shared_ptr<ServerInstance> &server);
-    bool startServerSoftwareUpdate(const std::shared_ptr<ServerInstance> &server,
-                                   const QString &targetVersion, bool changeVersion,
-                                   const QString &targetBuild = QString());
+    /// Selects and restores the backup at backupPath from the Backups list.
+    void restoreBackupAt(const QString &backupPath);
     void populateServerFileItem(class QTreeWidgetItem *item);
     void appendConsoleOutput(const QString &text);
     void browseServerContent(const QString &initialSearch = QString());
@@ -130,9 +114,6 @@ private:
     void offerDependencyRepair(const QStringList &missingIds,
                                const QString &introduction);
     QString getStatusString(int status) const;
-    static bool copyDirectory(const QString &source, const QString &destination, QString *error,
-                              const QString &excludedTopLevel = QString());
-    static qint64 directorySize(const QString &directory);
 
     Ui::ServerListPage *ui;
     ServerManager *m_serverManager = nullptr;
@@ -150,46 +131,11 @@ private:
     QLabel *m_overviewSummaryLabel = nullptr;
     QLabel *m_overviewUpdatedLabel = nullptr;
     QTabWidget *m_maintenanceTab = nullptr;
-    QWidget *m_updatesTab = nullptr;
-    QLabel *m_updatesInfoLabel = nullptr;
-    QTreeWidget *m_contentUpdatesTree = nullptr;
-    QPushButton *m_updateServerSoftwareButton = nullptr;
-    QPushButton *m_changeMinecraftVersionButton = nullptr;
-    QPushButton *m_restoreLatestUpdateBackupButton = nullptr;
-    QPushButton *m_checkContentUpdatesButton = nullptr;
-    QPushButton *m_setupCurseForgeButton = nullptr;
-    QPushButton *m_installContentUpdateButton = nullptr;
-    QNetworkAccessManager *m_updatesNetwork = nullptr;
-    ServerContentUpdater *m_activeContentUpdater = nullptr;
-    QWidget *m_playersTab = nullptr;
-    QLabel *m_playersInfoLabel = nullptr;
-    QTreeWidget *m_playersTree = nullptr;
-    QPushButton *m_refreshPlayersButton = nullptr;
-    QPushButton *m_whitelistPlayerButton = nullptr;
-    QPushButton *m_opPlayerButton = nullptr;
-    QPushButton *m_banPlayerButton = nullptr;
-    QPushButton *m_kickPlayerButton = nullptr;
-    QPushButton *m_removePlayerAccessButton = nullptr;
-    QPushButton *m_viewPlayerHistoryButton = nullptr;
-    QPushButton *m_exportPlayerHistoryButton = nullptr;
+    ServerUpdatesTab *m_updatesTab = nullptr;
+    ServerPlayersTab *m_playersTab = nullptr;
     QPushButton *m_exportProfileButton = nullptr;
     QPushButton *m_importProfileButton = nullptr;
-    QWidget *m_automationTab = nullptr;
-    QLabel *m_automationInfoLabel = nullptr;
-    QLabel *m_diagnosticsLabel = nullptr;
-    QComboBox *m_scheduleActionCombo = nullptr;
-    QTimeEdit *m_scheduleTimeEdit = nullptr;
-    QSpinBox *m_backupRetentionSpin = nullptr;
-    QSpinBox *m_gracefulStopTimeoutSpin = nullptr;
-    QSpinBox *m_cpuWarningSpin = nullptr;
-    QSpinBox *m_ramWarningSpin = nullptr;
-    QSpinBox *m_diskWarningSpin = nullptr;
-    QCheckBox *m_scheduleEnabledCheck = nullptr;
-    QCheckBox *m_autoRestartCheck = nullptr;
-    QPushButton *m_saveAutomationButton = nullptr;
-    QPushButton *m_runAutomationButton = nullptr;
-    QPushButton *m_viewCrashReportButton = nullptr;
-    QListWidget *m_automationHistoryList = nullptr;
+    ServerAutomationTab *m_automationTab = nullptr;
     QLineEdit *m_consoleSearchInput = nullptr;
     QPushButton *m_findConsoleButton = nullptr;
     QPushButton *m_copyConsoleErrorsButton = nullptr;
