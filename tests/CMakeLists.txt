@@ -101,6 +101,10 @@ add_dependencies(ServerInstance FakeMinecraftServer)
 ecm_add_test(ServerSettingsPage_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME ServerSettingsPage)
 
+ecm_add_test(ServerListPage_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME ServerListPage)
+set_tests_properties(ServerListPage PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 ecm_add_test(SecretEncryption_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME SecretEncryption)
 

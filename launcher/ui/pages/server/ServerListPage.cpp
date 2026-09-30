@@ -206,6 +206,14 @@ qint64 serverWorkProcessId(qint64 processId)
 #endif
 
 namespace {
+/// Whether CurseForge requests can be made. False without the launcher's Application object,
+/// which is how the page runs in tests.
+bool curseForgeAvailable()
+{
+    Application *application = APPLICATION_DYN;
+    return application && (application->capabilities() & Application::SupportsFlame);
+}
+
 QStringList modrinthLoadersForServer(const QString &loaderType)
 {
     const QString loader = loaderType.trimmed().toLower();
@@ -836,6 +844,21 @@ ServerListPage::ServerListPage(QWidget *parent)
     automationLayout->addWidget(diagnosticsGroup);
     automationLayout->addStretch();
     m_maintenanceTab->addTab(m_automationTab, tr("Automation & Health"));
+    m_maintenanceTab->setObjectName(QStringLiteral("maintenanceTabs"));
+    m_updatesTab->setObjectName(QStringLiteral("updatesTab"));
+    m_playersTab->setObjectName(QStringLiteral("playersTab"));
+    m_updatesInfoLabel->setObjectName(QStringLiteral("updatesInfoLabel"));
+    m_contentUpdatesTree->setObjectName(QStringLiteral("contentUpdatesTree"));
+    m_automationInfoLabel->setObjectName(QStringLiteral("automationInfoLabel"));
+    m_scheduleEnabledCheck->setObjectName(QStringLiteral("scheduleEnabledCheck"));
+    m_scheduleActionCombo->setObjectName(QStringLiteral("scheduleActionCombo"));
+    m_scheduleTimeEdit->setObjectName(QStringLiteral("scheduleTimeEdit"));
+    m_backupRetentionSpin->setObjectName(QStringLiteral("backupRetentionSpin"));
+    m_cpuWarningSpin->setObjectName(QStringLiteral("cpuWarningSpin"));
+    m_ramWarningSpin->setObjectName(QStringLiteral("ramWarningSpin"));
+    m_diskWarningSpin->setObjectName(QStringLiteral("diskWarningSpin"));
+    m_saveAutomationButton->setObjectName(QStringLiteral("saveAutomationButton"));
+    m_automationHistoryList->setObjectName(QStringLiteral("automationHistoryList"));
     setupServerNavigation();
     connect(ui->serverTabs, &QTabWidget::currentChanged, this, [this](int) {
         QTimer::singleShot(0, this, &ServerListPage::refreshCurrentServerTab);
@@ -908,7 +931,7 @@ ServerListPage::ServerListPage(QWidget *parent)
     connect(m_setupCurseForgeButton, &QPushButton::clicked, this, [this]() {
         APPLICATION->ShowGlobalSettings(this, QStringLiteral("apis"));
         updateUI();
-        if (APPLICATION->capabilities() & Application::SupportsFlame) {
+        if (curseForgeAvailable()) {
             m_updatesInfoLabel->setText(
                 tr("CurseForge is enabled. Check for updates again to include CurseForge mods."));
         }
@@ -2394,6 +2417,8 @@ void ServerListPage::refreshDiagnostics()
     QSettings settings;
     const QString crash = settings.value(QString("ServerDiagnostics/%1/lastCrash").arg(m_selectedServerId)).toString();
     m_diagnosticsLabel->setText(crash.isEmpty() ? tr("No crash report recorded for this server.") : tr("Latest crash: %1").arg(crash));
+    // The button follows the label; waiting for the next full button refresh left it disabled.
+    m_viewCrashReportButton->setEnabled(!crash.isEmpty());
 }
 
 void ServerListPage::onViewCrashReport()
@@ -2730,7 +2755,7 @@ void ServerListPage::onCheckContentUpdates()
     QHash<QString, ContentMetadataIndex> instanceMetadata;
     for (const QFileInfo &installed : files) {
         QString source = settings.value(sourcePrefix + installed.fileName()).toString();
-        if (source.isEmpty() && APPLICATION->instances()) {
+        if (source.isEmpty() && APPLICATION_DYN && APPLICATION->instances()) {
             for (int instanceIndex = 0;
                  instanceIndex < APPLICATION->instances()->count(); ++instanceIndex) {
                 MinecraftInstance *instance = APPLICATION->instances()->at(instanceIndex);
@@ -2766,8 +2791,7 @@ void ServerListPage::onCheckContentUpdates()
             ++untracked;
             continue;
         }
-        if (provider == QStringLiteral("curseforge")
-            && !(APPLICATION->capabilities() & Application::SupportsFlame)) {
+        if (provider == QStringLiteral("curseforge") && !curseForgeAvailable()) {
             item->setText(2, tr("CurseForge API key required — use Set Up CurseForge"));
             ++curseForgeNeedsKey;
             continue;
@@ -3559,8 +3583,7 @@ void ServerListPage::updateUI()
         }
         m_restoreLatestUpdateBackupButton->setEnabled(hasRollbackBackup && canEditFiles);
         m_checkContentUpdatesButton->setEnabled(hasSelection && canEditFiles && supportsContentBrowser);
-        m_setupCurseForgeButton->setVisible(
-            !(APPLICATION->capabilities() & Application::SupportsFlame));
+        m_setupCurseForgeButton->setVisible(!curseForgeAvailable());
         m_setupCurseForgeButton->setEnabled(hasSelection && canEditFiles && supportsContentBrowser);
         const bool hasContentUpdate = m_contentUpdatesTree->currentItem()
             && !m_contentUpdatesTree->currentItem()->data(0, Qt::UserRole).toString().isEmpty();
