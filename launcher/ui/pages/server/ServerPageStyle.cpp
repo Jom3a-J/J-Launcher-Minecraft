@@ -5,6 +5,8 @@
 #include <QApplication>
 #include <QLabel>
 
+#include "server/ServerInstance.h"
+
 namespace ServerPageStyle {
 
 QIcon launcherIcon(const QString &name, QStyle::StandardPixmap fallback)
@@ -39,6 +41,32 @@ void applyMutedLabelPalette(QLabel *label)
     labelPalette.setColor(QPalette::WindowText, muted);
     labelPalette.setColor(QPalette::Text, muted);
     label->setPalette(labelPalette);
+}
+
+QString statusText(ServerStatus status)
+{
+    // Kept in the page's translation context, where these strings have always lived.
+    switch (status) {
+        case ServerStatus::Stopped: return QCoreApplication::translate("ServerListPage", "Stopped");
+        case ServerStatus::Starting: return QCoreApplication::translate("ServerListPage", "Starting");
+        case ServerStatus::Running: return QCoreApplication::translate("ServerListPage", "Running");
+        case ServerStatus::Stopping: return QCoreApplication::translate("ServerListPage", "Stopping");
+        case ServerStatus::Error: return QCoreApplication::translate("ServerListPage", "Error");
+        case ServerStatus::Downloading: return QCoreApplication::translate("ServerListPage", "Downloading");
+    }
+    return QCoreApplication::translate("ServerListPage", "Unknown");
+}
+
+QColor statusColor(ServerStatus status)
+{
+    switch (status) {
+        case ServerStatus::Running: return QColor("#43a047");
+        case ServerStatus::Starting:
+        case ServerStatus::Stopping:
+        case ServerStatus::Downloading: return QColor("#f9a825");
+        case ServerStatus::Error: return QColor("#e53935");
+        default: return QColor("#607d8b");
+    }
 }
 
 }  // namespace ServerPageStyle

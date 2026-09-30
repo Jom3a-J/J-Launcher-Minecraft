@@ -863,6 +863,16 @@ SET(LAUNCHER_SOURCES
     ui/pages/server/ServerListPage.cpp
     ui/pages/server/ServerAutomationTab.h
     ui/pages/server/ServerAutomationTab.cpp
+    ui/pages/server/ServerBackupsTab.h
+    ui/pages/server/ServerBackupsTab.cpp
+    ui/pages/server/ServerConsoleTab.h
+    ui/pages/server/ServerConsoleTab.cpp
+    ui/pages/server/ServerContentTab.h
+    ui/pages/server/ServerContentTab.cpp
+    ui/pages/server/ServerOverviewTab.h
+    ui/pages/server/ServerOverviewTab.cpp
+    ui/pages/server/ServerFilesTab.h
+    ui/pages/server/ServerFilesTab.cpp
     ui/pages/server/ServerPlayersTab.h
     ui/pages/server/ServerPlayersTab.cpp
     ui/pages/server/ServerUpdatesTab.h

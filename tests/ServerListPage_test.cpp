@@ -3,8 +3,13 @@
 // Pins down what the Server Manager page shows and saves, so the page can be split into
 // smaller pieces and its data moved without changing what the user sees.
 
+#include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
 #include <QComboBox>
+#include <QMessageBox>
+#include <QPlainTextEdit>
+#include <QTimer>
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -66,6 +71,35 @@ void openAutomationTab(ServerListPage& page)
     maintenance->setCurrentWidget(automation);
     settle();
 }
+
+/*! Answers the page's message boxes while a test runs: "Yes" to questions, otherwise the
+ *  default button. Keeps the text of each box it closed.
+ */
+class MessageBoxAnswerer : public QObject {
+public:
+    MessageBoxAnswerer()
+    {
+        m_timer.setInterval(10);
+        connect(&m_timer, &QTimer::timeout, this, [this]() {
+            auto* box = qobject_cast<QMessageBox*>(QApplication::activeModalWidget());
+            if (!box) return;
+            answered.append(box->text());
+            if (QAbstractButton* yes = box->button(QMessageBox::Yes)) {
+                yes->click();
+            } else if (QAbstractButton* button = box->defaultButton()) {
+                button->click();
+            } else {
+                box->accept();
+            }
+        });
+        m_timer.start();
+    }
+
+    QStringList answered;
+
+private:
+    QTimer m_timer;
+};
 
 void selectServer(ServerListPage& page, const QString& serverId)
 {
@@ -362,6 +396,143 @@ private slots:
         QCOMPARE(updates->topLevelItem(0)->text(1), QStringLiteral("CurseForge"));
         // Without a CurseForge key the page must say so instead of sending a request.
         QVERIFY(updates->topLevelItem(0)->text(2).contains(QStringLiteral("API key")));
+    }
+
+    void backupsTabCreatesListsAndRemovesBackups()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        ServerManager manager(root.path());
+        const auto server = manager.createServer(QStringLiteral("Backed up"), QStringLiteral("1.21.1"));
+        QVERIFY(server);
+        QVERIFY(writeFile(QDir(server->serverDirectory()).filePath("world/level.dat"), "world"));
+
+        ServerListPage page;
+        page.setServerManager(&manager);
+        settle();
+        openTab(page, "backupsTab");
+        auto* tree = child<QTreeWidget>(page, "backupsTree");
+        QVERIFY(tree);
+        QCOMPARE(tree->topLevelItemCount(), 0);
+
+        MessageBoxAnswerer answerer;
+        child<QLineEdit>(page, "backupNameInput")->setText(QStringLiteral("Before test"));
+        child<QPushButton>(page, "createBackupButton")->click();
+        QCOMPARE(tree->topLevelItemCount(), 1);
+        QVERIFY(tree->topLevelItem(0)->text(0).contains(QStringLiteral("Before test")));
+        QVERIFY(child<QLineEdit>(page, "backupNameInput")->text().isEmpty());
+        QCOMPARE(manager.listServerBackups(server->id()).size(), 1);
+
+        tree->setCurrentItem(tree->topLevelItem(0));
+        QVERIFY(child<QPushButton>(page, "restoreBackupButton")->isEnabled());
+        child<QPushButton>(page, "removeBackupButton")->click();
+        QCOMPARE(tree->topLevelItemCount(), 0);
+        QVERIFY(manager.listServerBackups(server->id()).isEmpty());
+    }
+
+    void filesTabBrowsesTheServerFolder()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        ServerManager manager(root.path());
+        const auto server = manager.createServer(QStringLiteral("Browsed"), QStringLiteral("1.21.1"));
+        QVERIFY(server);
+        QVERIFY(writeFile(QDir(server->serverDirectory()).filePath("server.properties"), "motd=hi\n"));
+        QVERIFY(writeFile(QDir(server->serverDirectory()).filePath("world/level.dat"), "world"));
+
+        ServerListPage page;
+        page.setServerManager(&manager);
+        settle();
+        openTab(page, "filesTab");
+        auto* tree = child<QTreeWidget>(page, "serverFilesTree");
+        QVERIFY(tree);
+        QCOMPARE(tree->topLevelItemCount(), 1);
+        QTreeWidgetItem* rootItem = tree->topLevelItem(0);
+        QCOMPARE(rootItem->text(0), QStringLiteral("Browsed"));
+        QStringList names;
+        for (int index = 0; index < rootItem->childCount(); ++index) names << rootItem->child(index)->text(0);
+        QVERIFY2(names.contains(QStringLiteral("world")), qPrintable(names.join(", ")));
+        QVERIFY(names.contains(QStringLiteral("server.properties")));
+        // Folders list first.
+        QCOMPARE(names.first(), QStringLiteral("world"));
+    }
+
+    void modsTabListsAndTogglesInstalledContent()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        ServerManager manager(root.path());
+        const auto server = manager.createServer(QStringLiteral("Modded"), QStringLiteral("1.21.1"),
+                                                 QStringLiteral("fabric"));
+        QVERIFY(server);
+        const QDir mods(server->modsDirectory());
+        QVERIFY(writeFile(mods.filePath("sodium-fabric-0.5.8.jar"), "jar"));
+        QVERIFY(writeFile(mods.filePath("Jade_1.21-15.1.jar.disabled"), "jar"));
+
+        ServerListPage page;
+        page.setServerManager(&manager);
+        settle();
+        openTab(page, "installedContentTab");
+        auto* tree = child<QTreeWidget>(page, "installedContentTree");
+        QVERIFY(tree);
+        QCOMPARE(tree->topLevelItemCount(), 2);
+        QTreeWidgetItem* jade = tree->topLevelItem(0);
+        QCOMPARE(jade->text(0), QStringLiteral("Jade"));
+        QCOMPARE(jade->text(1), QStringLiteral("1.21-15.1"));
+        QCOMPARE(jade->text(2), QStringLiteral("Disabled"));
+        QTreeWidgetItem* sodium = tree->topLevelItem(1);
+        QCOMPARE(sodium->text(0), QStringLiteral("sodium fabric"));
+        QCOMPARE(sodium->text(1), QStringLiteral("0.5.8"));
+        QCOMPARE(sodium->text(2), QStringLiteral("Enabled"));
+
+        tree->setCurrentItem(jade);
+        child<QPushButton>(page, "toggleInstalledButton")->click();
+        QVERIFY(QFileInfo::exists(mods.filePath("Jade_1.21-15.1.jar")));
+        QCOMPARE(tree->topLevelItem(0)->text(2), QStringLiteral("Enabled"));
+    }
+
+    void consoleShowsServerOutputAndCopiesErrors()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        ServerManager manager(root.path());
+        const auto server = manager.createServer(QStringLiteral("Chatty"), QStringLiteral("1.21.1"));
+        QVERIFY(server);
+
+        ServerListPage page;
+        page.setServerManager(&manager);
+        settle();
+        openTab(page, "consoleTab");
+        auto* console = child<QPlainTextEdit>(page, "consoleOutput");
+        QVERIFY(console);
+        emit server->outputReceived(QStringLiteral("Done (3.2s)! For help, type \"help\""));
+        emit server->errorReceived(QStringLiteral("Something broke"));
+        QVERIFY(console->toPlainText().contains(QStringLiteral("Done (3.2s)!")));
+        QVERIFY(console->toPlainText().contains(QStringLiteral("[ERROR] Something broke")));
+
+        child<QPushButton>(page, "copyConsoleErrorsButton")->click();
+        QCOMPARE(QApplication::clipboard()->text(), QStringLiteral("[ERROR] Something broke"));
+    }
+
+    void homeTabSummarizesTheServer()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        ServerManager manager(root.path());
+        const auto server = manager.createServer(QStringLiteral("Summary"), QStringLiteral("1.20.4"),
+                                                 QStringLiteral("paper"));
+        QVERIFY(server);
+        QVERIFY(writeFile(QDir(server->pluginsDirectory()).filePath("EssentialsX-2.20.1.jar"), "jar"));
+
+        ServerListPage page;
+        page.setServerManager(&manager);
+        settle();
+        openTab(page, "overviewTab");
+        QCOMPARE(child<QLabel>(page, "overviewStatusValue")->text(), QStringLiteral("Stopped"));
+        auto* summary = child<QLabel>(page, "overviewSummaryLabel");
+        QVERIFY(summary);
+        QVERIFY2(summary->text().contains(QStringLiteral("1.20.4")), qPrintable(summary->text()));
+        QVERIFY(summary->text().contains(QStringLiteral("1 plugins")));
     }
 
 private:
