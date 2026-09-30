@@ -835,6 +835,11 @@ SET(LAUNCHER_SOURCES
     server/ServerManager.cpp
     server/ServerModpackInstaller.h
     server/ServerModpackInstaller.cpp
+    server/ServerModpackContent.h
+    server/ServerModpackContent.cpp
+    server/ServerModpackDependencies.cpp
+    server/ServerModpackTracking.h
+    server/ServerModpackTracking.cpp
     server/ServerPackCompatibility.h
     server/ServerPackCompatibility.cpp
     server/ServerInstance.h
