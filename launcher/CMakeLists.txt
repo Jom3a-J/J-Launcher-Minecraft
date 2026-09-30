@@ -844,6 +844,10 @@ SET(LAUNCHER_SOURCES
     server/ServerPackCompatibility.cpp
     server/ServerInstance.h
     server/ServerInstance.cpp
+    server/ServerInstanceProcess.cpp
+    server/ServerInstanceFiles.cpp
+    server/ServerInstanceJava.cpp
+    server/ServerInstanceSoftware.cpp
     server/ServerJvmArgs.h
     server/ServerJvmArgs.cpp
     server/ServerMemory.h

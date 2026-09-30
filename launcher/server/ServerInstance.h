@@ -46,6 +46,14 @@ enum class ServerContentType {
     Plugin
 };
 
+/*! One managed Minecraft server: its settings, its folder, and its running process.
+ *
+ *  The implementation is split by concern: ServerInstance.cpp (settings, saving, the log),
+ *  ServerInstanceProcess.cpp (start, stop, restarts, console output, live player commands),
+ *  ServerInstanceFiles.cpp (paths, launch scripts, content, server packs, properties, EULA),
+ *  ServerInstanceJava.cpp (choosing and installing Java) and ServerInstanceSoftware.cpp
+ *  (downloading the server software).
+ */
 class ServerInstance : public QObject
 {
     Q_OBJECT
