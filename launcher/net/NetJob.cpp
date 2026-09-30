@@ -55,7 +55,12 @@ NetJob::NetJob(QString job_name, QNetworkAccessManager* network, int max_concurr
 
     m_state_flush.setSingleShot(true);
     m_state_flush.setTimerType(Qt::CoarseTimer);
-    connect(&m_state_flush, &QTimer::timeout, this, [this] { emitState(m_queue.isEmpty() && m_doing.isEmpty()); });
+    connect(&m_state_flush, &QTimer::timeout, this, [this] {
+        if (totalSize() <= 1) {
+            return;  // single-request jobs report the request's own progress; see updateState()
+        }
+        emitState(m_queue.isEmpty() && m_doing.isEmpty());
+    });
 
     connect(m_scheduler, &Net::HostScheduler::capacityAvailable, this, &NetJob::onCapacityAvailable);
 }
@@ -332,6 +337,15 @@ auto NetJob::getFailedFiles() -> QList<QString>
 
 void NetJob::updateState()
 {
+    // A job with a single request reports that request's own byte progress and status
+    // (ConcurrentTask forwards them). Publishing "0 of 1 done" here, especially from the
+    // deferred flush, would keep overwriting it and make the bar jump back to 0%.
+    if (totalSize() <= 1) {
+        m_state_flush.stop();
+        ConcurrentTask::updateState();
+        return;
+    }
+
     // A terminal state is always published exactly. Everything in between is coalesced to
     // StateUpdateIntervalMs: a job with hundreds of requests otherwise spends its time rebuilding
     // the same status string.

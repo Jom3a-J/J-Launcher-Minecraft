@@ -268,7 +268,7 @@ void FlameCreationTask::executeTask()
         auto [job, rawResponse] = FlameAPI::get().getFiles(fileIds);
 
         connect(job.get(), &Task::succeeded, this,
-                [this, rawResponse, fileIds, oldInstDir, oldFiles, oldMinecraftDir, createInst]() mutable {
+                [this, rawResponse, fileIds, oldInstDir, oldFiles, oldMinecraftDir, createInst, warnUser]() mutable {
                     // Parse the API response
                     QJsonParseError parseError{};
                     auto doc = QJsonDocument::fromJson(*rawResponse, &parseError);
@@ -277,6 +277,12 @@ void FlameCreationTask::executeTask()
                                    << "reason:" << parseError.errorString();
                         qWarning() << "Response body excerpt:"
                                    << Privacy::sanitizeResponseBody(*rawResponse, 2048);
+                        // Returning here would leave the update waiting forever. Offer the same
+                        // choice as a failed request: continue (old files may be duplicated) or stop.
+                        warnUser(tr("Failed to fetch the old files."),
+                                 tr("CurseForge sent a response that could not be read, so the files of the old "
+                                    "version could not be identified. This may cause some of the files to be "
+                                    "duplicated. Do you want to continue?"));
                         return;
                     }
 

@@ -57,7 +57,14 @@ class ServerSupportRequestQueue {
             }
             if (!entry->waiters.isEmpty()) continue;
             if (entry->active) {
+                // Give the slot back now. The entry is dropped below, so its completion can no
+                // longer find it (and some cancels never call it at all); marking it completed
+                // keeps a late completion from releasing the same slot a second time.
                 entry->cancelled = true;
+                if (!entry->completed) {
+                    entry->completed = true;
+                    --m_active;
+                }
                 if (entry->cancel) {
                     cancelRequests.append(std::move(entry->cancel));
                 }

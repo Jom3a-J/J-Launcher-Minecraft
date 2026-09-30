@@ -3729,6 +3729,58 @@ class ArgumentProbe {
                  QByteArray("keep outside\n"));
     }
 
+    void importsServerPackWrappedInOneFolder()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+
+        const QString archivePath = temporaryRoot.filePath("wrapped-pack.zip");
+        QVERIFY(writeArchive(archivePath, {
+            { "MyPack-Server-1.0/mods/example.jar", "mod" },
+            { "MyPack-Server-1.0/mods/Mod..Extras.jar", "dots" },
+            { "MyPack-Server-1.0/config/example.toml", "config" },
+            { "MyPack-Server-1.0/README.md", "ignored" },
+            { "__MACOSX/MyPack-Server-1.0/mods/._example.jar", "ignored" },
+        }));
+
+        ServerInstance server("wrapped-pack-test", "Wrapped pack test");
+        server.setServerDirectory(temporaryRoot.filePath("server"));
+        QVERIFY(QDir().mkpath(server.serverDirectory()));
+        QString error;
+        QVERIFY2(server.importServerPack(archivePath, &error), qPrintable(error));
+        QCOMPARE(readFile(QDir(server.modsDirectory()).filePath("example.jar")),
+                 QByteArray("mod"));
+        QCOMPARE(readFile(QDir(server.modsDirectory()).filePath("Mod..Extras.jar")),
+                 QByteArray("dots"));
+        QVERIFY(QFileInfo::exists(QDir(server.serverDirectory()).filePath("config/example.toml")));
+        QVERIFY(!QFileInfo::exists(QDir(server.serverDirectory()).filePath("README.md")));
+        QVERIFY(!QFileInfo::exists(QDir(server.serverDirectory()).filePath("MyPack-Server-1.0")));
+    }
+
+    void serverWillNotStartDuringServerPackImport()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QString archivePath = temporaryRoot.filePath("pack.zip");
+        QVERIFY(writeArchive(archivePath, { { "mods/example.jar", "mod" } }));
+
+        ServerInstance server("import-guard-test", "Import guard test");
+        server.setServerDirectory(temporaryRoot.filePath("server"));
+        QVERIFY(QDir().mkpath(server.serverDirectory()));
+
+        QString error;
+        QVERIFY(server.beginServerPackImport(archivePath, &error));
+        QVERIFY(!server.beginServerPackImport(archivePath, &error));
+        QVERIFY(!server.start());
+        QVERIFY(!server.prepareServerSoftware());
+        QCOMPARE(server.status(), ServerStatus::Stopped);
+
+        QVERIFY(ServerInstance::importServerPackFiles(server.serverDirectory(), archivePath, &error));
+        server.finishServerPackImport(true);
+        QVERIFY(server.beginServerPackImport(archivePath, &error));
+        server.finishServerPackImport(false);
+    }
+
     void rejectsInvalidServerPackRoots()
     {
         QTemporaryDir temporaryRoot;

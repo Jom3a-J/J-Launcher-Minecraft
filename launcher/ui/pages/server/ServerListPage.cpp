@@ -113,6 +113,7 @@
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <psapi.h>
+#include <tlhelp32.h>
 
 namespace {
 struct ProcessSnapshot {
@@ -156,6 +157,50 @@ bool readProcessSnapshot(qint64 processId, ProcessSnapshot *snapshot)
     snapshot->cpuMilliseconds = fileTimeMilliseconds(kernel) + fileTimeMilliseconds(user);
     snapshot->workingSetBytes = static_cast<qint64>(memoryCounters.WorkingSetSize);
     return true;
+}
+
+/*! The process whose load should be shown for a server.
+ *
+ *  Forge and NeoForge servers start through run.bat, so the launched process is cmd.exe, which
+ *  uses almost no CPU or memory. The Java process it starts is the real server; returns that
+ *  (searching a couple of levels down) or processId itself when there is none.
+ */
+qint64 serverWorkProcessId(qint64 processId)
+{
+    if (processId <= 0) return processId;
+    HANDLE processes = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (processes == INVALID_HANDLE_VALUE) return processId;
+
+    QHash<DWORD, QList<QPair<DWORD, QString>>> children;
+    QString launchedName;
+    PROCESSENTRY32W entry = {};
+    entry.dwSize = sizeof(entry);
+    for (BOOL more = Process32FirstW(processes, &entry); more; more = Process32NextW(processes, &entry)) {
+        const QString name = QString::fromWCharArray(entry.szExeFile).toLower();
+        if (entry.th32ProcessID == static_cast<DWORD>(processId)) {
+            launchedName = name;
+        }
+        children[entry.th32ParentProcessID].append({ entry.th32ProcessID, name });
+    }
+    CloseHandle(processes);
+
+    const auto isJava = [](const QString &name) {
+        return name == QStringLiteral("java.exe") || name == QStringLiteral("javaw.exe");
+    };
+    if (isJava(launchedName)) return processId;
+
+    QList<DWORD> level{ static_cast<DWORD>(processId) };
+    for (int depth = 0; depth < 3 && !level.isEmpty(); ++depth) {
+        QList<DWORD> next;
+        for (const DWORD parent : level) {
+            for (const auto &child : children.value(parent)) {
+                if (isJava(child.second)) return child.first;
+                next.append(child.first);
+            }
+        }
+        level = next;
+    }
+    return processId;
 }
 }
 #endif
@@ -2681,6 +2726,8 @@ void ServerListPage::onCheckContentUpdates()
     int untracked = 0;
     int curseForgeNeedsKey = 0;
     int recoveredTracking = 0;
+    // Each instance's metadata is read at most once, and only if an untracked file needs it.
+    QHash<QString, ContentMetadataIndex> instanceMetadata;
     for (const QFileInfo &installed : files) {
         QString source = settings.value(sourcePrefix + installed.fileName()).toString();
         if (source.isEmpty() && APPLICATION->instances()) {
@@ -2688,8 +2735,14 @@ void ServerListPage::onCheckContentUpdates()
                  instanceIndex < APPLICATION->instances()->count(); ++instanceIndex) {
                 MinecraftInstance *instance = APPLICATION->instances()->at(instanceIndex);
                 if (!instance) continue;
+                const QString gameRoot = instance->gameRoot();
+                auto metadata = instanceMetadata.find(gameRoot);
+                if (metadata == instanceMetadata.end()) {
+                    metadata = instanceMetadata.insert(
+                        gameRoot, ServerModpackInstaller::loadContentMetadata(gameRoot));
+                }
                 source = ServerModpackInstaller::contentTrackingSource(
-                    instance->gameRoot(), installed.absoluteFilePath());
+                    gameRoot, *metadata, installed.absoluteFilePath());
                 if (!source.isEmpty()) {
                     settings.setValue(sourcePrefix + installed.fileName(), source);
                     ++recoveredTracking;
@@ -3193,8 +3246,38 @@ void ServerListPage::onImportServerPack()
     }
 
     QString error;
-    if (!server->importServerPack(archive, &error)) {
+    if (!server->beginServerPackImport(archive, &error)) {
         QMessageBox::warning(this, tr("Could Not Import Server Pack"), error);
+        return;
+    }
+
+    // Large packs take a while to unpack and copy; do it off the UI thread so the window
+    // keeps painting. The server refuses to start until finishServerPackImport.
+    QProgressDialog importProgress(tr("Importing server pack..."), QString(), 0, 0, this);
+    importProgress.setWindowTitle(tr("Import Server Pack"));
+    importProgress.setCancelButton(nullptr);
+    importProgress.setWindowModality(Qt::ApplicationModal);
+    importProgress.setMinimumDuration(0);
+    importProgress.show();
+
+    using ImportResult = QPair<bool, QString>;
+    QFutureWatcher<ImportResult> watcher;
+    QEventLoop waitLoop;
+    connect(&watcher, &QFutureWatcher<ImportResult>::finished, &waitLoop, &QEventLoop::quit);
+    watcher.setFuture(QtConcurrent::run([serverDirectory = server->serverDirectory(), archive]() {
+        QString importError;
+        const bool imported =
+            ServerInstance::importServerPackFiles(serverDirectory, archive, &importError);
+        return ImportResult(imported, importError);
+    }));
+    if (!watcher.isFinished()) {
+        waitLoop.exec();
+    }
+    const ImportResult imported = watcher.result();
+    server->finishServerPackImport(imported.first);
+    importProgress.close();
+    if (!imported.first) {
+        QMessageBox::warning(this, tr("Could Not Import Server Pack"), imported.second);
         return;
     }
 
@@ -3896,7 +3979,7 @@ void ServerListPage::refreshLiveStatistics()
 
 #ifdef Q_OS_WIN
     ProcessSnapshot snapshot;
-    const qint64 processId = server->processId();
+    const qint64 processId = serverWorkProcessId(server->processId());
     if (!readProcessSnapshot(processId, &snapshot)) {
         ServerHealthInput input;
         input.running = true;

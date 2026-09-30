@@ -4,7 +4,8 @@
 
 #include <QDir>
 #include <QFileInfo>
-
+#include <QHash>
+#include <QPointer>
 
 #include "Application.h"
 #include "FileSystem.h"
@@ -20,10 +21,41 @@
 
 namespace Java {
 
+namespace {
+/*! Runtime folders currently being downloaded, keyed by normalized path.
+ *
+ *  Two installs of the same runtime (two servers that need Java 21 starting together) must not
+ *  share a folder: the second would delete the first one's half-written download.
+ */
+QHash<QString, QPointer<JavaRuntimeInstallTask>>& runtimeInstallsInProgress()
+{
+    static QHash<QString, QPointer<JavaRuntimeInstallTask>> installs;
+    return installs;
+}
+
+QString runtimeKey(const QString& directory)
+{
+    return QDir::cleanPath(QDir(directory).absolutePath()).toLower();
+}
+}  // namespace
+
 JavaRuntimeInstallTask::JavaRuntimeInstallTask(int majorVersion)
     : Task(), m_majorVersion(majorVersion),
       m_supportedArchitecture(SysInfo::getSupportedJavaArchitecture())
 {
+    connect(this, &Task::finished, this, &JavaRuntimeInstallTask::releaseRuntimeDirectory);
+}
+
+void JavaRuntimeInstallTask::releaseRuntimeDirectory()
+{
+    if (m_claimedRuntimeKey.isEmpty()) {
+        return;
+    }
+    auto& installs = runtimeInstallsInProgress();
+    if (installs.value(m_claimedRuntimeKey) == this) {
+        installs.remove(m_claimedRuntimeKey);
+    }
+    m_claimedRuntimeKey.clear();
 }
 
 bool JavaRuntimeInstallTask::isUsableJava(const QString &javaPath)
@@ -33,12 +65,33 @@ bool JavaRuntimeInstallTask::isUsableJava(const QString &javaPath)
 
 bool JavaRuntimeInstallTask::canAbort() const
 {
-    return m_currentTask && m_currentTask->canAbort();
+    return m_waitingForOtherInstall || (m_currentTask && m_currentTask->canAbort());
 }
 
 bool JavaRuntimeInstallTask::abort()
 {
+    if (m_waitingForOtherInstall) {
+        // Only stop waiting; the other task keeps downloading for whoever started it.
+        m_waitingForOtherInstall = false;
+        if (isRunning()) {
+            emitAborted();
+        }
+        return true;
+    }
     return m_currentTask ? m_currentTask->abort() : Task::abort();
+}
+
+void JavaRuntimeInstallTask::finishAfterOtherInstall()
+{
+    if (!m_waitingForOtherInstall || !isRunning()) {
+        return;
+    }
+    m_waitingForOtherInstall = false;
+    if (isUsableJava(m_javaPath)) {
+        emitSucceeded();
+    } else {
+        emitFailed(tr("Another download of Java %1 did not complete. Please try again.").arg(m_majorVersion));
+    }
 }
 
 void JavaRuntimeInstallTask::executeTask()
@@ -144,6 +197,23 @@ void JavaRuntimeInstallTask::installRuntime(
         emitSucceeded();
         return;
     }
+
+    const QString key = runtimeKey(m_runtimeDirectory);
+    const QPointer<JavaRuntimeInstallTask> owner = runtimeInstallsInProgress().value(key);
+    if (owner && owner != this && owner->isRunning()) {
+        // Another task is already downloading this exact runtime. Deleting its folder would break
+        // both installs, so wait for it and then use whatever it produced.
+        setStatus(tr("Waiting for another Java %1 download to finish...").arg(m_majorVersion));
+        m_currentTask.reset();
+        m_waitingForOtherInstall = true;
+        emit abortStatusChanged(true);
+        connect(owner.data(), &Task::finished, this, &JavaRuntimeInstallTask::finishAfterOtherInstall);
+        connect(owner.data(), &QObject::destroyed, this, &JavaRuntimeInstallTask::finishAfterOtherInstall);
+        return;
+    }
+    runtimeInstallsInProgress().insert(key, this);
+    m_claimedRuntimeKey = key;
+
     if (QFileInfo::exists(m_runtimeDirectory)) {
         FS::deletePath(m_runtimeDirectory);
     }

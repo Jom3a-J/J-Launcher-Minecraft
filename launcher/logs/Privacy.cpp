@@ -29,11 +29,20 @@ constexpr auto Redacted = "[REDACTED]";
 constexpr qsizetype MinimumSanitizationInput = 64 * 1024;
 constexpr qsizetype MaximumSanitizationInput = 1024 * 1024;
 
-QString normalizedName(QString name)
+QString normalizedName(const QString& name)
 {
-    name = name.toLower();
-    name.remove(QRegularExpression(QStringLiteral("[^a-z0-9]")));
-    return name;
+    // Called for every header, JSON key and query item; a character filter avoids compiling a
+    // regular expression on each call.
+    QString normalized;
+    normalized.reserve(name.size());
+    for (const QChar character : name) {
+        const QChar lower = character.toLower();
+        if ((lower >= QLatin1Char('a') && lower <= QLatin1Char('z'))
+            || (lower >= QLatin1Char('0') && lower <= QLatin1Char('9'))) {
+            normalized.append(lower);
+        }
+    }
+    return normalized;
 }
 
 bool isSensitiveName(const QString& name)
@@ -323,6 +332,17 @@ QJsonValue sanitizeJsonValue(const QJsonValue& value)
 namespace Privacy {
 
 namespace {
+QString redactAll(const QString& text, bool includeEmbeddedUrls)
+{
+    QString result = redactStructuredTokens(text);
+    result = redactKeyValues(result);
+    result = redactMinecraftCommands(result);
+    if (includeEmbeddedUrls) {
+        result = redactEmbeddedUrls(result);
+    }
+    return replaceUserPathComponents(result);
+}
+
 QString sanitizeTextCore(const QString& text, int maxLength,
                          bool includeEmbeddedUrls)
 {
@@ -337,16 +357,36 @@ QString sanitizeTextCore(const QString& text, int maxLength,
     const QString boundedInput = text.size() > inputLimit
         ? text.left(inputLimit)
         : text;
-    QString result = redactStructuredTokens(boundedInput);
-    result = redactKeyValues(result);
-    result = redactMinecraftCommands(result);
-    if (includeEmbeddedUrls) {
-        result = redactEmbeddedUrls(result);
-    }
-    result = replaceUserPathComponents(result);
-    return truncate(result, maxLength);
+    return truncate(redactAll(boundedInput, includeEmbeddedUrls), maxLength);
 }
 }  // namespace
+
+QString sanitizeLongText(const QString& text)
+{
+    // Every redaction pattern stops at the end of a line, so cutting the text at line breaks
+    // cannot split a secret across two pieces. Pieces keep the regular expressions working on
+    // bounded input; nothing is ever dropped or truncated, however long the text is.
+    if (text.size() <= MaximumSanitizationInput) {
+        return redactAll(text, true);
+    }
+
+    QString result;
+    result.reserve(text.size());
+    qsizetype start = 0;
+    while (start < text.size()) {
+        qsizetype end = std::min(text.size(), start + MaximumSanitizationInput);
+        if (end < text.size()) {
+            const qsizetype newline = text.lastIndexOf(QLatin1Char('\n'), end - 1);
+            if (newline >= start) {
+                end = newline + 1;
+            }
+            // Otherwise a single line is longer than a piece; it is split at the piece boundary.
+        }
+        result += redactAll(text.mid(start, end - start), true);
+        start = end;
+    }
+    return result;
+}
 
 QString sanitizePath(const QString& path, int maxLength)
 {

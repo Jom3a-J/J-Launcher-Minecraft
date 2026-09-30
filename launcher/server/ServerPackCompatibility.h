@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 #pragma once
 
+#include <QHash>
 #include <QList>
 #include <QString>
 #include <QStringList>
@@ -96,6 +97,9 @@ struct ServerPackCompatibilityReport {
     bool hasDedicatedServerPack = false;
     ServerPackCompatibilityState state = ServerPackCompatibilityState::Unknown;
     QList<ServerPackFileDecision> files;
+    // Position of each entry in files, keyed by case-folded path. Kept by the report builder so
+    // that packs with thousands of files are not searched end to end for every entry.
+    QHash<QString, qsizetype> fileIndexByPath;
     QStringList reasons;
     QStringList warnings;
     // Sparse, user-facing projection notices. Keep diagnostic compatibility

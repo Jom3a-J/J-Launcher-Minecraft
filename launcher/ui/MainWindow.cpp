@@ -1551,14 +1551,21 @@ void MainWindow::on_actionManageSkins_triggered()
     auto account = APPLICATION->accounts()->defaultAccount();
 
     if (account && (account->accountType() == AccountType::MSA) && !account->isActive()) {
+        static const char* accountProperty = "jlauncherSkinAccountId";
         if (m_skinManageWindow) {
-            UI::Modeless::activate(m_skinManageWindow.data());
-            return;
+            if (m_skinManageWindow->property(accountProperty).toString() == account->internalId()) {
+                UI::Modeless::activate(m_skinManageWindow.data());
+                return;
+            }
+            // The default account changed since the window opened; it would edit the old one.
+            m_skinManageWindow->close();
+            m_skinManageWindow.clear();
         }
 
         UI::Modeless::showOrActivate(m_skinManageWindow, [this, account] {
             auto* dialog = new SkinManageDialog(this, account);
             dialog->setAttribute(Qt::WA_DeleteOnClose);
+            dialog->setProperty(accountProperty, account->internalId());
             return dialog;
         });
     }

@@ -1743,9 +1743,10 @@ void importContentTracking(const QString &gameRoot,
     const QString sourcePrefix = QStringLiteral("ServerContentSources/%1/").arg(server->id());
     const QFileInfoList installedFiles = QDir(server->modsDirectory()).entryInfoList(
         QStringList() << QStringLiteral("*.jar"), QDir::Files);
+    const ContentMetadataIndex metadata = ServerModpackInstaller::loadContentMetadata(gameRoot);
     for (const QFileInfo &installed : installedFiles) {
         const QString source = ServerModpackInstaller::contentTrackingSource(
-            gameRoot, installed.absoluteFilePath());
+            gameRoot, metadata, installed.absoluteFilePath());
         if (!source.isEmpty()) {
             settings.setValue(sourcePrefix + installed.fileName(), source);
         }
@@ -1827,9 +1828,13 @@ ServerModpackProfile ServerModpackInstaller::profileForVersions(
 QString ServerModpackInstaller::contentTrackingSource(
     const QString &gameRoot, const QString &installedFilePath)
 {
-    const QFileInfo installed(installedFilePath);
-    if (!installed.isFile()) return {};
+    if (!QFileInfo(installedFilePath).isFile()) return {};
+    return contentTrackingSource(gameRoot, loadContentMetadata(gameRoot), installedFilePath);
+}
 
+ContentMetadataIndex ServerModpackInstaller::loadContentMetadata(const QString &gameRoot)
+{
+    ContentMetadataIndex index;
     const QList<QDir> metadataDirectories{
         QDir(QDir(gameRoot).filePath(QStringLiteral("mods/.index"))),
         QDir(QDir(gameRoot).filePath(QStringLiteral("jarmods"))),
@@ -1838,37 +1843,52 @@ QString ServerModpackInstaller::contentTrackingSource(
         for (const QString &entry : indexDirectory.entryList(
                  QStringList() << QStringLiteral("*.pw.toml"), QDir::Files)) {
             const auto metadata = Metadata::get(indexDirectory, entry);
-            if (!metadata.isValid()
-                || metadata.filename.compare(installed.fileName(), Qt::CaseInsensitive) != 0) {
+            if (!metadata.isValid()) {
                 continue;
             }
-
-            bool matches = false;
-            const Hashing::Algorithm algorithm =
-                Hashing::algorithmFromString(metadata.hash_format.toLower());
-            if (!metadata.hash.isEmpty() && algorithm != Hashing::Algorithm::Unknown) {
-                const QString actualHash = Hashing::hash(installed.absoluteFilePath(), algorithm);
-                matches = !actualHash.isEmpty()
-                    && actualHash.compare(metadata.hash, Qt::CaseInsensitive) == 0;
-            } else {
-                const QFileInfo sourceFile(
-                    QDir(gameRoot).filePath(QStringLiteral("mods/") + metadata.filename));
-                if (sourceFile.isFile() && sourceFile.size() == installed.size()) {
-                    const QString installedHash = Hashing::hash(
-                        installed.absoluteFilePath(), Hashing::Algorithm::Sha1);
-                    const QString sourceHash = Hashing::hash(
-                        sourceFile.absoluteFilePath(), Hashing::Algorithm::Sha1);
-                    matches = !installedHash.isEmpty() && installedHash == sourceHash;
-                }
-            }
-            if (!matches) continue;
-
             const QString provider =
                 metadata.provider == ModPlatform::ResourceProvider::MODRINTH
                 ? QStringLiteral("modrinth") : QStringLiteral("curseforge");
-            return QStringLiteral("%1:%2:%3")
-                .arg(provider, metadata.project_id.toString(),
-                     metadata.file_id.toString());
+            index[metadata.filename.toCaseFolded()].append({
+                metadata.filename, metadata.hash, metadata.hash_format,
+                QStringLiteral("%1:%2:%3").arg(provider, metadata.project_id.toString(),
+                                               metadata.file_id.toString()) });
+        }
+    }
+    return index;
+}
+
+QString ServerModpackInstaller::contentTrackingSource(
+    const QString &gameRoot, const ContentMetadataIndex &metadata,
+    const QString &installedFilePath)
+{
+    const QFileInfo installed(installedFilePath);
+    if (!installed.isFile()) return {};
+
+    const auto candidates = metadata.constFind(installed.fileName().toCaseFolded());
+    if (candidates == metadata.constEnd()) return {};
+
+    for (const ContentMetadataEntry &entry : *candidates) {
+        bool matches = false;
+        const Hashing::Algorithm algorithm =
+            Hashing::algorithmFromString(entry.hashFormat.toLower());
+        if (!entry.hash.isEmpty() && algorithm != Hashing::Algorithm::Unknown) {
+            const QString actualHash = Hashing::hash(installed.absoluteFilePath(), algorithm);
+            matches = !actualHash.isEmpty()
+                && actualHash.compare(entry.hash, Qt::CaseInsensitive) == 0;
+        } else {
+            const QFileInfo sourceFile(
+                QDir(gameRoot).filePath(QStringLiteral("mods/") + entry.filename));
+            if (sourceFile.isFile() && sourceFile.size() == installed.size()) {
+                const QString installedHash = Hashing::hash(
+                    installed.absoluteFilePath(), Hashing::Algorithm::Sha1);
+                const QString sourceHash = Hashing::hash(
+                    sourceFile.absoluteFilePath(), Hashing::Algorithm::Sha1);
+                matches = !installedHash.isEmpty() && installedHash == sourceHash;
+            }
+        }
+        if (matches) {
+            return entry.source;
         }
     }
     return {};

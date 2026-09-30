@@ -207,6 +207,10 @@ bool ServerInstance::start()
         m_status == ServerStatus::Stopping || m_status == ServerStatus::Downloading) {
         return false;
     }
+    if (m_serverPackImportInProgress) {
+        appendLog(tr("[INFO] The server will not start while a server pack is being imported."));
+        return false;
+    }
 
     if (m_serverDirectory.trimmed().isEmpty()) {
         const QString message = tr("A server folder must be configured before starting this server.");
@@ -610,7 +614,8 @@ bool ServerInstance::restart()
 bool ServerInstance::prepareServerSoftware()
 {
     if (m_status == ServerStatus::Downloading || m_status == ServerStatus::Running
-        || m_status == ServerStatus::Starting || m_status == ServerStatus::Stopping) {
+        || m_status == ServerStatus::Starting || m_status == ServerStatus::Stopping
+        || m_serverPackImportInProgress) {
         return false;
     }
     if (hasLaunchTarget()) {
@@ -1273,9 +1278,22 @@ bool ServerInstance::addContentFiles(const QStringList &paths, QString *error)
 
 bool ServerInstance::importServerPack(const QString &archivePath, QString *error)
 {
-    if (m_status != ServerStatus::Stopped && m_status != ServerStatus::Error) {
+    if (!beginServerPackImport(archivePath, error)) {
+        return false;
+    }
+    const bool imported = importServerPackFiles(m_serverDirectory, archivePath, error);
+    finishServerPackImport(imported);
+    return imported;
+}
+
+bool ServerInstance::beginServerPackImport(const QString &archivePath, QString *error)
+{
+    if ((m_status != ServerStatus::Stopped && m_status != ServerStatus::Error)
+        || m_serverPackImportInProgress) {
         if (error) {
-            *error = tr("Stop the server before importing a server pack.");
+            *error = m_serverPackImportInProgress
+                ? tr("A server pack is already being imported.")
+                : tr("Stop the server before importing a server pack.");
         }
         return false;
     }
@@ -1285,20 +1303,27 @@ bool ServerInstance::importServerPack(const QString &archivePath, QString *error
         }
         return false;
     }
-    if (!extractServerPack(archivePath, error)) {
-        return false;
-    }
-    syncPortFromServerProperties();
+    cancelPendingCrashRestart();
+    m_serverPackImportInProgress = true;
     return true;
 }
 
-bool ServerInstance::extractServerPack(const QString &archivePath, QString *error)
+bool ServerInstance::importServerPackFiles(const QString &serverDirectory,
+                                           const QString &archivePath, QString *error)
 {
-    ServerPackImportTransaction transaction(m_serverDirectory);
+    ServerPackImportTransaction transaction(serverDirectory);
     if (!transaction.stage(archivePath, error)) {
         return false;
     }
     return transaction.publish(error);
+}
+
+void ServerInstance::finishServerPackImport(bool imported)
+{
+    m_serverPackImportInProgress = false;
+    if (imported) {
+        syncPortFromServerProperties();
+    }
 }
 
 void ServerInstance::setStatus(ServerStatus status)
@@ -1443,7 +1468,8 @@ void ServerInstance::handleConsoleLine(const QString &line, bool error)
 {
     const QString safeLine = Privacy::sanitizeText(line, 8192);
     const QString formatted = error ? "[ERROR] " + safeLine : safeLine;
-    appendLog(formatted);
+    // Console lines arrive constantly; the redaction regexes are costly, so run them once.
+    appendSanitizedLog(formatted);
     if (error) emit errorReceived(safeLine); else emit outputReceived(safeLine);
 
     if (m_status == ServerStatus::Starting && isReadyOutput(line)) {
@@ -1672,7 +1698,8 @@ bool ServerInstance::beginServerDownload(const QString &targetVersion,
                                          bool commitTargetVersion, bool commitTargetLoaderVersion)
 {
     if (m_status == ServerStatus::Downloading || m_status == ServerStatus::Running
-        || m_status == ServerStatus::Starting || m_status == ServerStatus::Stopping) {
+        || m_status == ServerStatus::Starting || m_status == ServerStatus::Stopping
+        || m_serverPackImportInProgress) {
         return false;
     }
 
@@ -1768,7 +1795,12 @@ bool ServerInstance::cancelDownload()
 
 void ServerInstance::appendLog(const QString &line)
 {
-    m_consoleLog.append(Privacy::sanitizeText(line, 8192) + "\n");
+    appendSanitizedLog(Privacy::sanitizeText(line, 8192));
+}
+
+void ServerInstance::appendSanitizedLog(const QString &line)
+{
+    m_consoleLog.append(line + "\n");
     // Cap log size at ~100,000 characters
     if (m_consoleLog.size() > 100000) {
         m_consoleLog = m_consoleLog.right(80000);

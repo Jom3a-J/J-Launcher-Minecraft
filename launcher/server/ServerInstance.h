@@ -115,6 +115,14 @@ public:
     bool cancelDownload();
     bool addMods(const QStringList &paths, QString *error = nullptr);
     bool importServerPack(const QString &archivePath, QString *error = nullptr);
+    /*! The three steps of importServerPack, for callers that run the file work on another
+     *  thread. begin checks the server can take the pack and blocks starting it until finish;
+     *  importServerPackFiles touches no ServerInstance state and is safe on a worker thread.
+     */
+    bool beginServerPackImport(const QString &archivePath, QString *error = nullptr);
+    static bool importServerPackFiles(const QString &serverDirectory,
+                                      const QString &archivePath, QString *error = nullptr);
+    void finishServerPackImport(bool imported);
     bool kickPlayer(const QString &name, const QString &reason = QString(),
                     QString *error = nullptr);
     bool setPlayerWhitelistedLive(const QString &name, bool enabled,
@@ -181,6 +189,8 @@ private slots:
     void onProcessError(QProcess::ProcessError error);
 
 private:
+    /// Stores a line that has already been through Privacy::sanitizeText.
+    void appendSanitizedLog(const QString &line);
     void setStatus(ServerStatus status);
     void scheduleStopEscalation(int graceMs);
     void forceKillProcessTree();
@@ -195,7 +205,6 @@ private:
     bool installCompatibleJava(int requiredVersion,
                                bool startAfterInstall = true,
                                bool prepareServerAfterInstall = false);
-    bool extractServerPack(const QString &archivePath, QString *error);
     void handleConsoleLine(const QString &line, bool error = false);
     bool beginServerDownload(const QString &targetVersion, const QString &targetLoaderVersion,
                              const QString &javaPath, bool startAfterDownload,
@@ -230,6 +239,7 @@ private:
     QString m_consoleLog;
     bool m_restartRequested = false;
     bool m_downloadCancelRequested = false;
+    bool m_serverPackImportInProgress = false;
     bool m_startupTimedOut = false;
     bool m_startupTimeoutOverridden = false;
     QDateTime m_startedAt;

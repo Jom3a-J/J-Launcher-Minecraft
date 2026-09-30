@@ -6,6 +6,12 @@ on:
   pull_request:
     branches:
       - develop
+    # A full build takes most of an hour; skip it when only documentation changed.
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - 'COPYING*'
   workflow_dispatch:
 
 permissions:
@@ -27,6 +33,10 @@ jobs:
       QT_ARCH: win64_msvc2022_64
       QT_ROOT: C:\Qt
       BUILD_DIRECTORY: ${{ github.workspace }}\build-ci
+      # Built vcpkg packages are kept between runs (see the cache step) instead of being
+      # compiled from source every time.
+      VCPKG_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-binary-cache,readwrite
 
     steps:
       - name: Checkout repository
@@ -83,6 +93,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
               throw 'Unable to bootstrap the repository vcpkg revision.'
           }
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_BINARY_CACHE | Out-Null
+          $vcpkgRevision = git -C cmake/vcpkg rev-parse HEAD
+          "vcpkg_revision=$vcpkgRevision" >> $env:GITHUB_OUTPUT
+        id: vcpkg
+
+      - name: Restore the vcpkg binary cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VCPKG_BINARY_CACHE }}
+          key: vcpkg-x64-windows-${{ steps.vcpkg.outputs.vcpkg_revision }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json') }}
+          restore-keys: |
+            vcpkg-x64-windows-${{ steps.vcpkg.outputs.vcpkg_revision }}-
 
       - name: Configure, build, and test Windows x64
         shell: pwsh

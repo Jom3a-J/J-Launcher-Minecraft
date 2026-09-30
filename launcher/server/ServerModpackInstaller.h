@@ -1,5 +1,7 @@
 #pragma once
 
+#include <QHash>
+#include <QList>
 #include <QString>
 #include <QStringList>
 #include <QtGlobal>
@@ -85,6 +87,18 @@ struct ServerDependencyCheckResult {
     bool isCompatible() const { return state == ServerDependencyCheckState::Compatible; }
 };
 
+/// One mod's download record from a game folder's metadata (mods/.index, jarmods).
+struct ContentMetadataEntry {
+    QString filename;
+    QString hash;
+    QString hashFormat;
+    /// "provider:projectId:fileId", the form stored under ServerContentSources.
+    QString source;
+};
+
+/// A game folder's metadata keyed by case-folded file name, in lookup order.
+using ContentMetadataIndex = QHash<QString, QList<ContentMetadataEntry>>;
+
 class ServerModpackInstaller {
 public:
     static ServerModpackProfile profileForVersions(const QString &minecraftVersion,
@@ -109,6 +123,11 @@ public:
         const QString &serverRoot, const QString &loaderType,
         const QString &minecraftVersion, const QString &loaderVersion);
     static QString contentTrackingSource(const QString &gameRoot,
+                                         const QString &installedFilePath);
+    /// Reads a game folder's metadata once, for looking up many files.
+    static ContentMetadataIndex loadContentMetadata(const QString &gameRoot);
+    static QString contentTrackingSource(const QString &gameRoot,
+                                         const ContentMetadataIndex &metadata,
                                          const QString &installedFilePath);
     static bool markKnownClientOnlyFile(const QString &filePath);
     static bool isKnownClientOnlyFile(const QString &filePath);

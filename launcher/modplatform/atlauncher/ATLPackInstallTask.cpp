@@ -90,10 +90,12 @@ PackInstallTask::PackInstallTask(UserInteractionSupport* support, QString packNa
 
 bool PackInstallTask::abort()
 {
-    if (abortable) {
+    if (abortable && jobPtr) {
         return jobPtr->abort();
     }
-    return false;
+    // Past the pack's own downloads the only abortable step is the game-file download that
+    // InstanceTask runs behind a "Skip" button; it handles that (and refuses otherwise).
+    return InstanceTask::abort();
 }
 
 void PackInstallTask::executeTask()

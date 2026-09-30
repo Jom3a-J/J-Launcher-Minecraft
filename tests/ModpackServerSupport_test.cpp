@@ -108,6 +108,43 @@ class ModpackServerSupportTest final : public QObject {
         QCOMPARE(starts, 1);
         QCOMPARE(queue.activeCount(), 0);
     }
+
+    void providerQueueCancellingActiveOwnerReleasesItsSlot()
+    {
+        using Queue = ModPlatform::ServerSupportRequestQueue<int>;
+        Queue queue(1);
+        QObject firstOwner;
+        QObject secondOwner;
+        QList<Queue::Completion> completions;
+        int starts = 0;
+        int cancels = 0;
+        auto starter = [&completions, &starts, &cancels](Queue::Completion done) {
+            ++starts;
+            completions.append(std::move(done));
+            return Queue::Cancel{ [&cancels] { ++cancels; } };
+        };
+
+        queue.request("first", &firstOwner, starter, [](Queue::Result) {});
+        QCOMPARE(queue.activeCount(), 1);
+        queue.cancelOwner(&firstOwner);
+        QCOMPARE(cancels, 1);
+        QCOMPARE(queue.activeCount(), 0);
+
+        // The freed slot must be usable straight away, even with a concurrency of one.
+        bool secondAnswered = false;
+        queue.request("second", &secondOwner, starter, [&secondAnswered](Queue::Result) { secondAnswered = true; });
+        QCOMPARE(starts, 2);
+        QCOMPARE(queue.activeCount(), 1);
+
+        // A late completion of the cancelled request must not release a second slot.
+        completions.first()(Queue::Result{ 1 });
+        QCOMPARE(queue.activeCount(), 1);
+        QVERIFY(!secondAnswered);
+
+        completions.last()(Queue::Result{ 2 });
+        QVERIFY(secondAnswered);
+        QCOMPARE(queue.activeCount(), 0);
+    }
 };
 
 QTEST_GUILESS_MAIN(ModpackServerSupportTest)
