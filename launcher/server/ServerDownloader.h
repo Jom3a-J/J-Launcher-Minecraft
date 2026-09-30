@@ -44,6 +44,14 @@ struct ServerProviderEndpoints
 
 QString serverLoaderInstallIncompleteMarkerPath(const QString &serverDirectory);
 
+/*! Lists and downloads server software for every supported server type.
+ *
+ *  One object runs one request at a time; m_step says which reply is expected next. The
+ *  implementation is split by server type: ServerDownloader.cpp (requests, file downloads,
+ *  cancelling, install checks), ServerDownloaderCatalog.cpp (parsing version and build lists),
+ *  and ServerDownloaderVanilla/Paper/Fabric/Forge.cpp (each type's download steps; Paper also
+ *  holds Purpur, Forge also holds NeoForge and the installer).
+ */
 class ServerDownloader : public QObject
 {
     Q_OBJECT

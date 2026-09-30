@@ -866,6 +866,12 @@ SET(LAUNCHER_SOURCES
     server/ServerProperties.cpp
     server/ServerDownloader.h
     server/ServerDownloader.cpp
+    server/ServerDownloaderShared.h
+    server/ServerDownloaderCatalog.cpp
+    server/ServerDownloaderVanilla.cpp
+    server/ServerDownloaderPaper.cpp
+    server/ServerDownloaderFabric.cpp
+    server/ServerDownloaderForge.cpp
     ui/pages/server/ServerListPage.h
     ui/pages/server/ServerListPage.cpp
     ui/pages/server/ServerAutomationTab.h

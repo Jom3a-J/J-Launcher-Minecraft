@@ -11,6 +11,7 @@
 
 #include <archive/ArchiveWriter.h>
 #include <server/ServerDiagnostics.h>
+#include <server/ServerDownloaderShared.h>
 #include <server/ServerFiles.h>
 #include <server/ServerProcessStats.h>
 
@@ -108,6 +109,25 @@ private slots:
         QCOMPARE(suspects.size(), 1);
         QCOMPARE(QFileInfo(suspects.first()).fileName(), QStringLiteral("broken-1.0.jar"));
         QVERIFY(ServerDiagnostics::suspectedModFiles(mods, QStringLiteral("no mod named")).isEmpty());
+    }
+
+    void recognizesAndChecksSha1Checksums()
+    {
+        const QByteArray valid("da39a3ee5e6b4b0d3255bfef95601890afd80709");  // SHA-1 of nothing
+        QVERIFY(ServerDownloaderDetail::isSha1(valid));
+        QVERIFY(ServerDownloaderDetail::isSha1(valid.toUpper()));
+        QVERIFY(!ServerDownloaderDetail::isSha1(valid.left(39)));
+        QVERIFY(!ServerDownloaderDetail::isSha1(valid + "0"));
+        QVERIFY(!ServerDownloaderDetail::isSha1(QByteArray("zz39a3ee5e6b4b0d3255bfef95601890afd80709")));
+        QVERIFY(!ServerDownloaderDetail::isSha1(QByteArray("<html>not found</html>")));
+        QVERIFY(!ServerDownloaderDetail::isSha1(QByteArray()));
+
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        QVERIFY(writeFile(root.filePath("empty.bin"), QByteArray()));
+        QVERIFY(ServerDownloaderDetail::fileMatchesSha1(root.filePath("empty.bin"), valid.toUpper()));
+        QVERIFY(!ServerDownloaderDetail::fileMatchesSha1(root.filePath("empty.bin"), QByteArray()));
+        QVERIFY(!ServerDownloaderDetail::fileMatchesSha1(root.filePath("missing.bin"), valid));
     }
 
     void readsTheLoadOfARunningProcess()
