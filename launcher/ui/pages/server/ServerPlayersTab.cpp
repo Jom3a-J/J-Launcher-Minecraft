@@ -21,7 +21,6 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSaveFile>
-#include <QSettings>
 #include <QSignalBlocker>
 #include <QTreeWidget>
 #include <QVBoxLayout>
@@ -97,7 +96,9 @@ void ServerPlayersTab::setServerId(const QString &serverId)
 
 QStringList ServerPlayersTab::playerHistory() const
 {
-    return QSettings().value(QString("ServerPlayerHistory/%1/events").arg(m_serverId)).toStringList();
+    return m_serverManager
+        ? m_serverManager->dataStore().list(m_serverId, ServerDataGroup::PlayerHistory, "events")
+        : QStringList();
 }
 
 void ServerPlayersTab::refresh()

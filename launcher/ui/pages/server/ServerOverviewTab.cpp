@@ -13,7 +13,6 @@
 #include <QLabel>
 #include <QProgressBar>
 #include <QPushButton>
-#include <QSettings>
 #include <QStorageInfo>
 #include <QThread>
 #include <QVBoxLayout>
@@ -307,11 +306,11 @@ void ServerOverviewTab::refreshLiveStatistics()
             .arg(color.name()));
     };
     if (m_cpuBar && m_ramBar && m_updatedLabel) {
-        QSettings monitoringSettings;
-        const QString monitoringPrefix = QString("ServerMonitoring/%1/").arg(server->id());
-        const int cpuWarning = monitoringSettings.value(monitoringPrefix + "cpuWarning", 85).toInt();
-        const int ramWarning = monitoringSettings.value(monitoringPrefix + "ramWarning", 90).toInt();
-        const int diskWarningGb = monitoringSettings.value(monitoringPrefix + "diskWarningGb", 2).toInt();
+        const ServerDataStore &records = m_serverManager->dataStore();
+        const QString &monitoring = ServerDataGroup::Monitoring;
+        const int cpuWarning = records.value(server->id(), monitoring, "cpuWarning", 85).toInt();
+        const int ramWarning = records.value(server->id(), monitoring, "ramWarning", 90).toInt();
+        const int diskWarningGb = records.value(server->id(), monitoring, "diskWarningGb", 2).toInt();
         const QStorageInfo storage(server->serverDirectory());
         ServerHealthInput healthInput;
         healthInput.running = true;

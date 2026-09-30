@@ -847,6 +847,8 @@ SET(LAUNCHER_SOURCES
     server/ServerPackImportTransaction.cpp
     server/ServerDiagnostics.h
     server/ServerDiagnostics.cpp
+    server/ServerDataStore.h
+    server/ServerDataStore.cpp
     server/ServerFiles.h
     server/ServerFiles.cpp
     server/ServerProcessStats.h

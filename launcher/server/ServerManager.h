@@ -25,6 +25,8 @@
 #include <QStringList>
 #include <memory>
 
+#include "ServerDataStore.h"
+
 class ServerInstance;
 
 struct ServerBackupInfo {
@@ -77,6 +79,9 @@ public:
     QList<std::shared_ptr<ServerInstance>> getAllServers() const;
     int serverCount() const { return m_servers.size(); }
     QString serversRoot() const;
+    /// Records kept for each server besides its settings: schedules, histories, mod sources.
+    ServerDataStore &dataStore() { return m_dataStore; }
+    const ServerDataStore &dataStore() const { return m_dataStore; }
 
     // Save/Load
     bool save();
@@ -98,6 +103,7 @@ private:
 
     QString m_dataDir;
     QString m_serversFile;
+    ServerDataStore m_dataStore;
     QMap<QString, std::shared_ptr<ServerInstance>> m_servers;
     struct TrashHistoryItem {
         QString id;

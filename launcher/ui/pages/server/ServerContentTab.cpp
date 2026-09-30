@@ -16,7 +16,6 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRegularExpression>
-#include <QSettings>
 #include <QTemporaryDir>
 #include <QTreeWidget>
 #include <QUrl>
@@ -370,8 +369,11 @@ void ServerContentTab::browseContent(const QString &initialSearch)
         const QString source = QString("%1:%2:%3")
             .arg(provider, download->getPack()->addonId.toString(),
                  download->getVersion().fileId.toString());
-        connect(download.get(), &Task::succeeded, this, [serverId, filename, source]() {
-            QSettings().setValue(QString("ServerContentSources/%1/%2").arg(serverId, filename), source);
+        connect(download.get(), &Task::succeeded, this, [this, serverId, filename, source]() {
+            if (m_serverManager) {
+                m_serverManager->dataStore().setValue(serverId, ServerDataGroup::ContentSources,
+                                                      filename, source);
+            }
         });
         downloadedNames.append(filename);
         downloads->addTask(download);

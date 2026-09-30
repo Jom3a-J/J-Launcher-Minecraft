@@ -69,7 +69,6 @@
 #include <QTabBar>
 #include <QTabWidget>
 #include <QRegularExpression>
-#include <QSettings>
 #include <QSignalBlocker>
 #include <utility>
 #include <QFutureWatcher>
@@ -706,9 +705,8 @@ void ServerListPage::setServerManager(ServerManager *manager)
                 return;
             }
             m_automationTab->refreshHistory();
-            QSettings settings;
-            const QStringList history = settings.value(
-                QString("ServerAutomation/%1/history").arg(serverId)).toStringList();
+            const QStringList history =
+                m_serverManager->dataStore().list(serverId, ServerDataGroup::Automation, "history");
             if (!history.isEmpty() && history.first().contains(QStringLiteral("BACKUP:"))) {
                 m_backupsTab->refresh();
                 m_overviewTab->refresh();

@@ -1047,11 +1047,10 @@ class ServerManagerTest : public QObject {
         QCOMPARE(properties.value("topography-preset"), QString("void"));
         QCOMPARE(properties.value("server-port"),
                  QString::number(server->port()));
-        const QString trackingPrefix =
-            QString("ServerContentSources/%1/").arg(server->id());
-        QCOMPARE(QSettings().value(trackingPrefix + "common.jar").toString(),
+        QCOMPARE(manager.dataStore()
+                     .value(server->id(), ServerDataGroup::ContentSources, "common.jar")
+                     .toString(),
                  QString("curseforge:123:456"));
-        QSettings().remove(trackingPrefix);
         QCoreApplication::setOrganizationName(previousOrganization);
         QCoreApplication::setApplicationName(previousApplication);
         QVERIFY(!QFileInfo::exists(server->serverJarPath()));
@@ -2625,35 +2624,29 @@ class ServerManagerTest : public QObject {
         QVERIFY(writeFile(QDir(server->serverDirectory()).filePath("world/level.dat"),
                           "synthetic world"));
 
-        const QString prefix = QString("ServerAutomation/%1/").arg(server->id());
-        QSettings settings;
-        settings.setValue(prefix + "enabled", true);
-        settings.setValue(prefix + "action", "backup");
-        settings.setValue(prefix + "time", "12:34");
-        settings.setValue(prefix + "retention", 0);
-        settings.remove(prefix + "lastRun");
-        settings.remove(prefix + "history");
-        settings.sync();
+        ServerDataStore &records = manager.dataStore();
+        const QString &automation = ServerDataGroup::Automation;
+        QVERIFY(records.setValue(server->id(), automation, "enabled", true));
+        QVERIFY(records.setValue(server->id(), automation, "action", "backup"));
+        QVERIFY(records.setValue(server->id(), automation, "time", "12:34"));
+        QVERIFY(records.setValue(server->id(), automation, "retention", 0));
 
         QSignalSpy recorded(&manager, &ServerManager::automationRecorded);
         const QDateTime scheduledTime(QDate(2026, 9, 29), QTime(12, 34));
         manager.runDueAutomations(scheduledTime);
         QCOMPARE(recorded.size(), 1);
         QVERIFY(!manager.listServerBackups(server->id()).isEmpty());
-        QCOMPARE(settings.value(prefix + "lastRun").toString(),
+        QCOMPARE(records.value(server->id(), automation, "lastRun").toString(),
                  scheduledTime.date().toString(Qt::ISODate));
-        const QStringList firstHistory = settings.value(prefix + "history").toStringList();
+        const QStringList firstHistory = records.list(server->id(), automation, "history");
         QCOMPARE(firstHistory.size(), 1);
         QVERIFY(firstHistory.first().contains("BACKUP"));
         const qsizetype backupCount = manager.listServerBackups(server->id()).size();
 
         manager.runDueAutomations(scheduledTime);
         QCOMPARE(recorded.size(), 1);
-        QCOMPARE(settings.value(prefix + "history").toStringList().size(), 1);
+        QCOMPARE(records.list(server->id(), automation, "history").size(), 1);
         QCOMPARE(manager.listServerBackups(server->id()).size(), backupCount);
-
-        settings.remove(prefix);
-        settings.sync();
     }
 
     void recordsCrashAndPlayerHistoryWithoutServerWindow()
@@ -2723,13 +2716,14 @@ class ServerManagerTest : public QObject {
         QVERIFY(server->start());
         QTRY_COMPARE_WITH_TIMEOUT(server->status(), ServerStatus::Error, 5000);
         QCOMPARE(crashRecorded.size(), 1);
-        QVERIFY(settings.value(cleanup.diagnosticsPrefix + QStringLiteral("lastCrash"))
+        QVERIFY(manager.dataStore()
+                    .value(server->id(), ServerDataGroup::Diagnostics, QStringLiteral("lastCrash"))
                     .toString().contains(QStringLiteral("OutOfMemoryError")));
 
         emit server->playerActivity(QStringLiteral("FixturePlayer"), true);
         QCOMPARE(playerRecorded.size(), 1);
-        const QStringList events = settings.value(
-            cleanup.historyPrefix + QStringLiteral("events")).toStringList();
+        const QStringList events = manager.dataStore().list(
+            server->id(), ServerDataGroup::PlayerHistory, QStringLiteral("events"));
         QCOMPARE(events.size(), 1);
         QVERIFY(events.first().contains(QStringLiteral("FixturePlayer joined")));
     }

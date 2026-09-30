@@ -21,7 +21,6 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QPushButton>
-#include <QSettings>
 #include <QSignalBlocker>
 #include <QTreeWidget>
 #include <QUrlQuery>
@@ -178,12 +177,12 @@ void ServerUpdatesTab::clearUpdateList()
 
 QString ServerUpdatesTab::latestRollbackBackupPath(const ServerInstance &server) const
 {
-    QSettings updateSettings;
-    QString backupPath = updateSettings.value(
-        QString("ServerUpdates/%1/latestRollbackBackupPath").arg(server.id())).toString();
+    const ServerDataStore &records = m_serverManager->dataStore();
+    QString backupPath =
+        records.value(server.id(), ServerDataGroup::Updates, "latestRollbackBackupPath").toString();
     if (backupPath.isEmpty()) {
-        const QString backupName = updateSettings.value(
-            QString("ServerUpdates/%1/latestRollbackBackup").arg(server.id())).toString();
+        const QString backupName =
+            records.value(server.id(), ServerDataGroup::Updates, "latestRollbackBackup").toString();
         if (!backupName.isEmpty()) {
             backupPath = QDir(QDir(server.serverDirectory()).filePath("backups"))
                              .filePath(backupName);
@@ -455,21 +454,17 @@ bool ServerUpdatesTab::startServerSoftwareUpdate(
         return false;
     }
     const QString backupFolderName = QFileInfo(rollbackBackup.path).fileName();
-    QSettings historySettings;
-    const QString historyKey = QString("ServerUpdates/%1/history").arg(server->id());
-    QStringList history = historySettings.value(historyKey).toStringList();
+    ServerDataStore &records = m_serverManager->dataStore();
     const QString updateSource = changeVersion ? server->version() : server->loaderVersion();
     const QString updateTarget = targetBuild.isEmpty() ? targetVersion : targetBuild;
-    history.append(QString("%1 — %2 %3 -> %4; rollback backup %5")
-                       .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm"),
-                            changeVersion ? tr("version change") : tr("build update"),
-                            updateSource, updateTarget, backupFolderName));
-    while (history.size() > 30) history.removeFirst();
-    historySettings.setValue(historyKey, history);
-    historySettings.setValue(QString("ServerUpdates/%1/latestRollbackBackup").arg(server->id()),
-                             backupFolderName);
-    historySettings.setValue(QString("ServerUpdates/%1/latestRollbackBackupPath").arg(server->id()),
-                             rollbackBackup.path);
+    records.addToList(server->id(), ServerDataGroup::Updates, "history",
+                      QString("%1 — %2 %3 -> %4; rollback backup %5")
+                          .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm"),
+                               changeVersion ? tr("version change") : tr("build update"),
+                               updateSource, updateTarget, backupFolderName),
+                      30, ServerDataStore::Order::NewestLast);
+    records.setValue(server->id(), ServerDataGroup::Updates, "latestRollbackBackup", backupFolderName);
+    records.setValue(server->id(), ServerDataGroup::Updates, "latestRollbackBackupPath", rollbackBackup.path);
     const bool started = changeVersion
         ? server->downloadServerJarForVersion(targetVersion, server->javaPath(), false)
         : (targetBuild.isEmpty()
@@ -523,8 +518,7 @@ void ServerUpdatesTab::checkContentUpdates()
     m_contentUpdatesTree->clear();
     const QString contentDirectory = server->contentDirectory();
     const QFileInfoList files = QDir(contentDirectory).entryInfoList(QStringList() << "*.jar", QDir::Files);
-    QSettings settings;
-    const QString sourcePrefix = QString("ServerContentSources/%1/").arg(server->id());
+    ServerDataStore &records = m_serverManager->dataStore();
     int requests = 0;
     int untracked = 0;
     int curseForgeNeedsKey = 0;
@@ -532,7 +526,7 @@ void ServerUpdatesTab::checkContentUpdates()
     // Each instance's metadata is read at most once, and only if an untracked file needs it.
     QHash<QString, ContentMetadataIndex> instanceMetadata;
     for (const QFileInfo &installed : files) {
-        QString source = settings.value(sourcePrefix + installed.fileName()).toString();
+        QString source = records.value(server->id(), ServerDataGroup::ContentSources, installed.fileName()).toString();
         if (source.isEmpty() && APPLICATION_DYN && APPLICATION->instances()) {
             for (int instanceIndex = 0;
                  instanceIndex < APPLICATION->instances()->count(); ++instanceIndex) {
@@ -547,7 +541,7 @@ void ServerUpdatesTab::checkContentUpdates()
                 source = ServerModpackInstaller::contentTrackingSource(
                     gameRoot, *metadata, installed.absoluteFilePath());
                 if (!source.isEmpty()) {
-                    settings.setValue(sourcePrefix + installed.fileName(), source);
+                    records.setValue(server->id(), ServerDataGroup::ContentSources, installed.fileName(), source);
                     ++recoveredTracking;
                     break;
                 }
@@ -752,19 +746,21 @@ void ServerUpdatesTab::installContentUpdate()
                                          cacheError);
                 }
             }
-            QSettings settings;
-            const QString prefix = QString("ServerContentSources/%1/").arg(serverId);
-            const QString updatedSource = QStringLiteral("%1:%2")
-                .arg(source.section(':', 0, 1), versionId);
-            settings.remove(prefix + QFileInfo(oldPath).fileName());
-            settings.setValue(prefix + QFileInfo(result.destinationPath).fileName(), updatedSource);
-            const QString metadataPrefix = QString("ServerContentMetadata/%1/%2/")
-                .arg(serverId, QFileInfo(result.destinationPath).fileName());
-            settings.setValue(metadataPrefix + "versionId", versionId);
-            settings.setValue(metadataPrefix + "url", result.finalUrl.toString());
-            settings.setValue(metadataPrefix + "hashAlgorithm", static_cast<int>(hashAlgorithm));
-            settings.setValue(metadataPrefix + "hash", QString::fromLatin1(expectedHash.toHex()));
-            settings.setValue(metadataPrefix + "installedAt", QDateTime::currentDateTimeUtc().toString(Qt::ISODate));
+            if (m_serverManager) {
+                ServerDataStore &records = m_serverManager->dataStore();
+                const QString updatedSource = QStringLiteral("%1:%2")
+                    .arg(source.section(':', 0, 1), versionId);
+                const QString updatedName = QFileInfo(result.destinationPath).fileName();
+                records.remove(serverId, ServerDataGroup::ContentSources, QFileInfo(oldPath).fileName());
+                records.setValue(serverId, ServerDataGroup::ContentSources, updatedName, updatedSource);
+                records.setValue(serverId, ServerDataGroup::ContentMetadata, updatedName, QVariantMap{
+                    { "versionId", versionId },
+                    { "url", result.finalUrl.toString() },
+                    { "hashAlgorithm", static_cast<int>(hashAlgorithm) },
+                    { "hash", QString::fromLatin1(expectedHash.toHex()) },
+                    { "installedAt", QDateTime::currentDateTimeUtc().toString(Qt::ISODate) },
+                });
+            }
             if (target) {
                 target->setText(0, QFileInfo(result.destinationPath).fileName());
                 target->setText(2, tr("Updated — restart server to load it"));

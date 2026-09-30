@@ -1736,11 +1736,10 @@ bool hasUsablePreparedContent(const QString &destination)
 }
 
 void importContentTracking(const QString &gameRoot,
-                           const std::shared_ptr<ServerInstance> &server)
+                           const std::shared_ptr<ServerInstance> &server,
+                           ServerDataStore &records)
 {
     if (!server) return;
-    QSettings settings;
-    const QString sourcePrefix = QStringLiteral("ServerContentSources/%1/").arg(server->id());
     const QFileInfoList installedFiles = QDir(server->modsDirectory()).entryInfoList(
         QStringList() << QStringLiteral("*.jar"), QDir::Files);
     const ContentMetadataIndex metadata = ServerModpackInstaller::loadContentMetadata(gameRoot);
@@ -1748,7 +1747,7 @@ void importContentTracking(const QString &gameRoot,
         const QString source = ServerModpackInstaller::contentTrackingSource(
             gameRoot, metadata, installed.absoluteFilePath());
         if (!source.isEmpty()) {
-            settings.setValue(sourcePrefix + installed.fileName(), source);
+            records.setValue(server->id(), ServerDataGroup::ContentSources, installed.fileName(), source);
         }
     }
 }
@@ -2438,7 +2437,7 @@ ServerModpackInstallResult ServerModpackInstaller::installPreparedServer(
             installationError);
         return result;
     }
-    importContentTracking(gameRoot, server);
+    importContentTracking(gameRoot, server, manager->dataStore());
     // Size memory only now that the prepared server content is known, and
     // only for this newly created server. Existing servers are never
     // touched. Persist through the manager so save/reload keeps the values.

@@ -31,7 +31,6 @@
 #include <QUuid>
 #include <QDateTime>
 #include <QDeadlineTimer>
-#include <QSettings>
 #include <QLocale>
 #include <algorithm>
 
@@ -329,6 +328,7 @@ ServerManager::ServerManager(const QString &dataDir, QObject *parent)
     : QObject(parent)
     , m_dataDir(dataDir)
     , m_serversFile(QDir(dataDir).filePath("servers.json"))
+    , m_dataStore(QDir(dataDir).filePath("server-records"))
 {
     // Ensure servers directory exists
     QDir dir(dataDir);
@@ -375,23 +375,23 @@ void ServerManager::startAutomationScheduler()
 
 void ServerManager::runDueAutomations(const QDateTime &now)
 {
-    QSettings settings;
     const QString date = now.date().toString(Qt::ISODate);
+    const QString &automation = ServerDataGroup::Automation;
     for (const auto &server : getAllServers()) {
-        const QString prefix = QString("ServerAutomation/%1/").arg(server->id());
-        if (!settings.value(prefix + "enabled", false).toBool()) {
+        const QString id = server->id();
+        if (!m_dataStore.value(id, automation, "enabled", false).toBool()) {
             continue;
         }
-        const QTime scheduled = QTime::fromString(settings.value(prefix + "time").toString(),
-                                                  "HH:mm");
+        const QTime scheduled = QTime::fromString(
+            m_dataStore.value(id, automation, "time").toString(), "HH:mm");
         if (!scheduled.isValid() || scheduled.hour() != now.time().hour()
             || scheduled.minute() != now.time().minute()
-            || settings.value(prefix + "lastRun").toString() == date) {
+            || m_dataStore.value(id, automation, "lastRun").toString() == date) {
             continue;
         }
-        settings.setValue(prefix + "lastRun", date);
-        runAutomation(server, settings.value(prefix + "action", "start").toString(),
-                      settings.value(prefix + "retention", 0).toInt());
+        m_dataStore.setValue(id, automation, "lastRun", date);
+        runAutomation(server, m_dataStore.value(id, automation, "action", "start").toString(),
+                      m_dataStore.value(id, automation, "retention", 0).toInt());
     }
 }
 
@@ -463,16 +463,11 @@ void ServerManager::recordAutomation(const std::shared_ptr<ServerInstance> &serv
     if (!server) {
         return;
     }
-    QSettings settings;
-    const QString key = QString("ServerAutomation/%1/history").arg(server->id());
-    QStringList history = settings.value(key).toStringList();
-    history.prepend(QString("%1 — %2: %3")
-        .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss"),
-             action.toUpper(), result));
-    while (history.size() > 50) {
-        history.removeLast();
-    }
-    settings.setValue(key, history);
+    m_dataStore.addToList(server->id(), ServerDataGroup::Automation, "history",
+                          QString("%1 — %2: %3")
+                              .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss"),
+                                   action.toUpper(), result),
+                          50, ServerDataStore::Order::NewestFirst);
     emit automationRecorded(server->id());
 }
 
@@ -896,6 +891,8 @@ bool ServerManager::load()
         if (server) {
             m_servers[server->id()] = server;
             attachServerRecording(server);
+            // Records written by versions that kept them in the Windows registry.
+            m_dataStore.importLegacySettings(server->id());
         }
     }
 
@@ -916,26 +913,19 @@ void ServerManager::attachServerRecording(const std::shared_ptr<ServerInstance> 
     ServerInstance *instance = server.get();
     connect(server.get(), &ServerInstance::serverCrashed, this,
             [this, instance](const QString &message, const QString &details) {
-        const QString prefix = QStringLiteral("ServerDiagnostics/%1/").arg(instance->id());
-        QSettings settings;
-        settings.setValue(prefix + QStringLiteral("lastCrash"),
-                          ServerDiagnostics::crashSummary(message, details));
-        settings.setValue(prefix + QStringLiteral("details"),
-                          ServerDiagnostics::structuredCrashDetails(*instance, message, details));
+        m_dataStore.setValue(instance->id(), ServerDataGroup::Diagnostics, QStringLiteral("lastCrash"),
+                             ServerDiagnostics::crashSummary(message, details));
+        m_dataStore.setValue(instance->id(), ServerDataGroup::Diagnostics, QStringLiteral("details"),
+                             ServerDiagnostics::structuredCrashDetails(*instance, message, details));
         emit serverDiagnosticsRecorded(instance->id());
     });
     connect(server.get(), &ServerInstance::playerActivity, this,
             [this, instance](const QString &player, bool joined) {
-        QSettings settings;
-        const QString key = QStringLiteral("ServerPlayerHistory/%1/events").arg(instance->id());
-        QStringList events = settings.value(key).toStringList();
-        events.append(QStringLiteral("%1 — %2 %3")
-            .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm")),
-                 player, joined ? tr("joined") : tr("left")));
-        while (events.size() > 100) {
-            events.removeFirst();
-        }
-        settings.setValue(key, events);
+        m_dataStore.addToList(instance->id(), ServerDataGroup::PlayerHistory, QStringLiteral("events"),
+                              QStringLiteral("%1 — %2 %3")
+                                  .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm")),
+                                       player, joined ? tr("joined") : tr("left")),
+                              100, ServerDataStore::Order::NewestLast);
         emit playerHistoryRecorded(instance->id());
     });
 }

@@ -11,7 +11,6 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
-#include <QSettings>
 #include <QSpinBox>
 #include <QTimeEdit>
 #include <QVBoxLayout>
@@ -137,21 +136,21 @@ void ServerAutomationTab::refresh()
     if (!m_serverManager || m_serverId.isEmpty()) {
         m_infoLabel->setText(tr("Select a server to configure automated maintenance."));
     } else if (const auto server = m_serverManager->getServer(m_serverId)) {
-        QSettings settings;
-        const QString prefix = QString("ServerAutomation/%1/").arg(server->id());
-        m_scheduleEnabledCheck->setChecked(settings.value(prefix + "enabled", false).toBool());
-        const QString action = settings.value(prefix + "action", "start").toString();
+        const ServerDataStore &records = m_serverManager->dataStore();
+        const QString &automation = ServerDataGroup::Automation;
+        const QString &monitoring = ServerDataGroup::Monitoring;
+        m_scheduleEnabledCheck->setChecked(records.value(m_serverId, automation, "enabled", false).toBool());
+        const QString action = records.value(m_serverId, automation, "action", "start").toString();
         const int actionIndex = m_scheduleActionCombo->findData(action);
         m_scheduleActionCombo->setCurrentIndex(actionIndex >= 0 ? actionIndex : 0);
-        const QTime time = QTime::fromString(settings.value(prefix + "time", "03:00").toString(), "HH:mm");
+        const QTime time = QTime::fromString(records.value(m_serverId, automation, "time", "03:00").toString(), "HH:mm");
         m_scheduleTimeEdit->setTime(time.isValid() ? time : QTime(3, 0));
-        m_backupRetentionSpin->setValue(settings.value(prefix + "retention", 0).toInt());
+        m_backupRetentionSpin->setValue(records.value(m_serverId, automation, "retention", 0).toInt());
         m_gracefulStopTimeoutSpin->setValue(server->gracefulStopTimeoutSeconds());
         m_autoRestartCheck->setChecked(server->autoRestartOnCrash());
-        const QString monitoringPrefix = QString("ServerMonitoring/%1/").arg(server->id());
-        m_cpuWarningSpin->setValue(settings.value(monitoringPrefix + "cpuWarning", 85).toInt());
-        m_ramWarningSpin->setValue(settings.value(monitoringPrefix + "ramWarning", 90).toInt());
-        m_diskWarningSpin->setValue(settings.value(monitoringPrefix + "diskWarningGb", 2).toInt());
+        m_cpuWarningSpin->setValue(records.value(m_serverId, monitoring, "cpuWarning", 85).toInt());
+        m_ramWarningSpin->setValue(records.value(m_serverId, monitoring, "ramWarning", 90).toInt());
+        m_diskWarningSpin->setValue(records.value(m_serverId, monitoring, "diskWarningGb", 2).toInt());
         m_infoLabel->setText(tr("Daily schedules are checked every 30 seconds. The server must be stopped for an automatic backup."));
         refreshHistory();
     }
@@ -163,20 +162,22 @@ void ServerAutomationTab::save()
     if (!m_serverManager || m_serverId.isEmpty()) return;
     const auto server = m_serverManager->getServer(m_serverId);
     if (!server || server->isRunning()) return;
-    QSettings settings;
-    const QString prefix = QString("ServerAutomation/%1/").arg(server->id());
-    settings.setValue(prefix + "enabled", m_scheduleEnabledCheck->isChecked());
-    settings.setValue(prefix + "action", m_scheduleActionCombo->currentData().toString());
-    settings.setValue(prefix + "time", m_scheduleTimeEdit->time().toString("HH:mm"));
-    settings.setValue(prefix + "retention", m_backupRetentionSpin->value());
-    const QString monitoringPrefix = QString("ServerMonitoring/%1/").arg(server->id());
-    settings.setValue(monitoringPrefix + "cpuWarning", m_cpuWarningSpin->value());
-    settings.setValue(monitoringPrefix + "ramWarning", m_ramWarningSpin->value());
-    settings.setValue(monitoringPrefix + "diskWarningGb", m_diskWarningSpin->value());
+    ServerDataStore &records = m_serverManager->dataStore();
+    const QString &automation = ServerDataGroup::Automation;
+    const QString &monitoring = ServerDataGroup::Monitoring;
+    bool saved = records.setValue(m_serverId, automation, "enabled", m_scheduleEnabledCheck->isChecked());
+    saved = records.setValue(m_serverId, automation, "action", m_scheduleActionCombo->currentData().toString()) && saved;
+    saved = records.setValue(m_serverId, automation, "time", m_scheduleTimeEdit->time().toString("HH:mm")) && saved;
+    saved = records.setValue(m_serverId, automation, "retention", m_backupRetentionSpin->value()) && saved;
+    saved = records.setValue(m_serverId, monitoring, "cpuWarning", m_cpuWarningSpin->value()) && saved;
+    saved = records.setValue(m_serverId, monitoring, "ramWarning", m_ramWarningSpin->value()) && saved;
+    saved = records.setValue(m_serverId, monitoring, "diskWarningGb", m_diskWarningSpin->value()) && saved;
     server->setAutoRestartOnCrash(m_autoRestartCheck->isChecked());
     server->setGracefulStopTimeoutSeconds(m_gracefulStopTimeoutSpin->value());
-    m_serverManager->save();
-    m_infoLabel->setText(tr("Automation saved for %1.").arg(server->name()));
+    saved = m_serverManager->save() && saved;
+    m_infoLabel->setText(saved
+        ? tr("Automation saved for %1.").arg(server->name())
+        : tr("Automation for %1 could not be saved. Check that the J Launcher data folder is writable.").arg(server->name()));
 }
 
 void ServerAutomationTab::refreshHistory()
@@ -186,8 +187,9 @@ void ServerAutomationTab::refreshHistory()
         m_historyList->addItem(tr("Select a server to view automation activity."));
         return;
     }
-    QSettings settings;
-    const QStringList history = settings.value(QString("ServerAutomation/%1/history").arg(m_serverId)).toStringList();
+    const QStringList history = m_serverManager
+        ? m_serverManager->dataStore().list(m_serverId, ServerDataGroup::Automation, "history")
+        : QStringList();
     if (history.isEmpty()) {
         m_historyList->addItem(tr("No automated actions have run for this server yet."));
         return;
@@ -213,17 +215,18 @@ void ServerAutomationTab::refreshDiagnostics()
         m_viewCrashReportButton->setEnabled(false);
         return;
     }
-    QSettings settings;
-    const QString crash = settings.value(QString("ServerDiagnostics/%1/lastCrash").arg(m_serverId)).toString();
+    const QString crash = m_serverManager
+        ? m_serverManager->dataStore().value(m_serverId, ServerDataGroup::Diagnostics, "lastCrash").toString()
+        : QString();
     m_diagnosticsLabel->setText(crash.isEmpty() ? tr("No crash report recorded for this server.") : tr("Latest crash: %1").arg(crash));
     m_viewCrashReportButton->setEnabled(!crash.isEmpty());
 }
 
 void ServerAutomationTab::showCrashReport()
 {
-    if (m_serverId.isEmpty()) return;
-    QSettings settings;
-    const QString details = settings.value(QString("ServerDiagnostics/%1/details").arg(m_serverId)).toString();
+    if (m_serverId.isEmpty() || !m_serverManager) return;
+    const QString details =
+        m_serverManager->dataStore().value(m_serverId, ServerDataGroup::Diagnostics, "details").toString();
     if (details.isEmpty()) return;
     QMessageBox dialog(this);
     dialog.setWindowTitle(tr("Latest Crash Report"));
