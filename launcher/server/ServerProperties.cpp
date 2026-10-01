@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include "ServerProperties.h"
+#include "ServerPaths.h"
 
 #include <QDir>
 #include <QFile>
@@ -244,12 +245,9 @@ QString ServerProperties::worldSetupIssue(const QString &serverRoot)
         }
         QStringList missing;
         while (!requiredFiles.atEnd()) {
-            QString path = QDir::fromNativeSeparators(
-                QDir::cleanPath(QString::fromUtf8(requiredFiles.readLine()).trimmed()));
-            while (path.startsWith(QStringLiteral("./"))) path.remove(0, 2);
-            if (path.isEmpty() || path == QStringLiteral("..")
-                || path.startsWith(QStringLiteral("../"))
-                || QDir::isAbsolutePath(path)) {
+            const QString path = ServerPaths::normalizedRelativePath(
+                QString::fromUtf8(requiredFiles.readLine()));
+            if (!ServerPaths::isSafeRelativePath(path)) {
                 return QObject::tr("Setup required: the missing server-file list contains an unsafe path.");
             }
             const QFileInfo file(root.filePath(path));

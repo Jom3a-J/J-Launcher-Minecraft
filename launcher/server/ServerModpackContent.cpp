@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include "ServerModpackContent.h"
+#include "ServerPaths.h"
 
 #include "ServerModpackInstaller.h"
 #include "server/ServerInstance.h"
@@ -31,21 +32,10 @@
 
 namespace ServerModpackContent {
 
-QString normalizedRelativePath(QString path)
-{
-    path = QDir::fromNativeSeparators(QDir::cleanPath(path.trimmed()));
-    while (path.startsWith("./")) {
-        path.remove(0, 2);
-    }
-    return path;
-}
+// Paths from the pack are checked with the shared rules.
+using ServerPaths::isSafeRelativePath;
+using ServerPaths::normalizedRelativePath;
 
-bool isSafeRelativePath(const QString &path)
-{
-    const QString normalized = normalizedRelativePath(path);
-    return !normalized.isEmpty() && normalized != ".." && !normalized.startsWith("../")
-        && !QDir::isAbsolutePath(normalized);
-}
 
 const QStringList &serverContentRoots()
 {

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include "ServerModpackInstaller.h"
-#include "ServerModpackContent.h"
+#include "ServerPaths.h"
 #include "server/ServerInstance.h"
 #include "server/ServerManager.h"
 #include "server/ServerPackCompatibility.h"
@@ -28,7 +28,7 @@
 #include <algorithm>
 #include <utility>
 
-using ServerModpackContent::isSafeRelativePath;
+using ServerPaths::isSafeRelativePath;
 
 namespace {
 // Definite: complete parsing proved a missing mandatory dependency or a

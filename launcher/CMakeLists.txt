@@ -860,6 +860,8 @@ SET(LAUNCHER_SOURCES
     server/ServerDataStore.cpp
     server/ServerFiles.h
     server/ServerFiles.cpp
+    server/ServerPaths.h
+    server/ServerPaths.cpp
     server/ServerProcessStats.h
     server/ServerProcessStats.cpp
     server/ServerContentUpdater.h

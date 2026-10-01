@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include "ServerPackImportTransaction.h"
+#include "ServerPaths.h"
 
 #include "archive/ArchiveReader.h"
 #include <archive.h>
@@ -139,52 +140,6 @@ bool copyFileContents(const QString& sourcePath, const QString& targetPath,
     return true;
 }
 
-bool validateWindowsPathComponents(const QString& path, QString* unsafeComponent)
-{
-    static const QStringList reservedDevices = {
-        QStringLiteral("CON"), QStringLiteral("PRN"), QStringLiteral("AUX"),
-        QStringLiteral("NUL"), QStringLiteral("COM1"), QStringLiteral("COM2"),
-        QStringLiteral("COM3"), QStringLiteral("COM4"), QStringLiteral("COM5"),
-        QStringLiteral("COM6"), QStringLiteral("COM7"), QStringLiteral("COM8"),
-        QStringLiteral("COM9"), QStringLiteral("LPT1"), QStringLiteral("LPT2"),
-        QStringLiteral("LPT3"), QStringLiteral("LPT4"), QStringLiteral("LPT5"),
-        QStringLiteral("LPT6"), QStringLiteral("LPT7"), QStringLiteral("LPT8"),
-        QStringLiteral("LPT9")
-    };
-
-    const QStringList components = path.split('/', Qt::KeepEmptyParts);
-    for (const QString& component : components) {
-        if (component.isEmpty()) {
-            continue;
-        }
-
-        bool invalid = component == QStringLiteral(".");
-        for (const QChar character : component) {
-            const ushort code = character.unicode();
-            if (code < 0x20 || (code >= 0x7f && code <= 0x9f)
-                || QStringLiteral("<>:\"|?*").contains(character)) {
-                invalid = true;
-                break;
-            }
-        }
-        if (component.endsWith('.') || component.endsWith(' ')) {
-            invalid = true;
-        }
-
-        QString deviceStem = component.section('.', 0, 0).trimmed();
-        if (reservedDevices.contains(deviceStem, Qt::CaseInsensitive)) {
-            invalid = true;
-        }
-
-        if (invalid) {
-            if (unsafeComponent) {
-                *unsafeComponent = component;
-            }
-            return false;
-        }
-    }
-    return true;
-}
 
 bool normalizeServerPackPath(QString path, QString* normalized,
                              QString* unsafeComponent, const QString& wrapperFolder = {})
@@ -219,7 +174,7 @@ bool normalizeServerPackPath(QString path, QString* normalized,
         }
         return false;
     }
-    if (!validateWindowsPathComponents(path, unsafeComponent)) {
+    if (!ServerPaths::hasValidWindowsNames(path, unsafeComponent)) {
         return false;
     }
 

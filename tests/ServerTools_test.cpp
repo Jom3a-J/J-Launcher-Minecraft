@@ -13,6 +13,7 @@
 #include <server/ServerDiagnostics.h>
 #include <server/ServerDownloaderShared.h>
 #include <server/ServerFiles.h>
+#include <server/ServerPaths.h>
 #include <server/ServerProcessStats.h>
 
 namespace {
@@ -109,6 +110,32 @@ private slots:
         QCOMPARE(suspects.size(), 1);
         QCOMPARE(QFileInfo(suspects.first()).fileName(), QStringLiteral("broken-1.0.jar"));
         QVERIFY(ServerDiagnostics::suspectedModFiles(mods, QStringLiteral("no mod named")).isEmpty());
+    }
+
+    void checksRelativePathsFromOutsideTheLauncher()
+    {
+        QCOMPARE(ServerPaths::normalizedRelativePath(QStringLiteral("  ./mods\\a.jar ")), QStringLiteral("mods/a.jar"));
+        QCOMPARE(ServerPaths::normalizedRelativePath(QStringLiteral("config/../mods/a.jar")), QStringLiteral("mods/a.jar"));
+        QVERIFY(ServerPaths::isSafeRelativePath(QStringLiteral("mods/a.jar")));
+        QVERIFY(ServerPaths::isSafeRelativePath(QStringLiteral("mods/Mod..Extras.jar")));
+        QVERIFY(ServerPaths::isSafeRelativePath(QStringLiteral("config/../mods/a.jar")));
+        QVERIFY(!ServerPaths::isSafeRelativePath(QStringLiteral("../outside.txt")));
+        QVERIFY(!ServerPaths::isSafeRelativePath(QStringLiteral("mods/../../outside.txt")));
+        QVERIFY(!ServerPaths::isSafeRelativePath(QStringLiteral("..")));
+        QVERIFY(!ServerPaths::isSafeRelativePath(QStringLiteral("C:/Windows/system.ini")));
+        QVERIFY(!ServerPaths::isSafeRelativePath(QStringLiteral("/etc/passwd")));
+        QVERIFY(!ServerPaths::isSafeRelativePath(QStringLiteral("   ")));
+
+        QString bad;
+        QVERIFY(ServerPaths::hasValidWindowsNames(QStringLiteral("mods//config/server.properties"), &bad));
+        for (const QString &path : { QStringLiteral("mods/CON.jar"), QStringLiteral("lpt9/a"),
+                                     QStringLiteral("mods/a?.jar"), QStringLiteral("mods/trailing."),
+                                     QStringLiteral("mods/space "), QStringLiteral("./a"),
+                                     QStringLiteral("mods/a\x01.jar") }) {
+            bad.clear();
+            QVERIFY2(!ServerPaths::hasValidWindowsNames(path, &bad), qPrintable(path));
+            QVERIFY(!bad.isEmpty());
+        }
     }
 
     void recognizesAndChecksSha1Checksums()

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 
 #include "ServerPackCompatibility.h"
+#include "ServerPaths.h"
 
 #include <QDir>
 #include <QDirIterator>
@@ -16,22 +17,13 @@
 
 namespace {
 
+using ServerPaths::isSafeRelativePath;
+
 QString normalizedPath(QString path)
 {
-    path = QDir::fromNativeSeparators(QDir::cleanPath(path.trimmed()));
-    while (path.startsWith(QStringLiteral("./"))) {
-        path.remove(0, 2);
-    }
-    return path;
+    return ServerPaths::normalizedRelativePath(std::move(path));
 }
 
-bool isSafeRelativePath(const QString &path)
-{
-    const QString normalized = normalizedPath(path);
-    return !normalized.isEmpty() && normalized != QStringLiteral("..")
-        && !normalized.startsWith(QStringLiteral("../"))
-        && !QDir::isAbsolutePath(normalized);
-}
 
 QString normalizedLoader(QString loader)
 {

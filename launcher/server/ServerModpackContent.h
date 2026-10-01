@@ -8,16 +8,15 @@
 
 class ServerInstance;
 
-/*! Turning a modpack instance into server files: safe relative paths, published server-pack
- *  folders, copying, client-only filtering, and the markers left in a prepared server.
+/*! Turning a modpack instance into server files: published server-pack folders, copying,
+ *  client-only filtering, and the markers left in a prepared server. Path checks are in
+ *  ServerPaths.
  *
  *  ServerModpackInstaller::prepareContent is the entry point; these are the pieces the rest
  *  of the installer also needs.
  */
 namespace ServerModpackContent {
 
-/// A relative path that stays inside its root (no "..", not absolute).
-bool isSafeRelativePath(const QString &path);
 /// Folders in an instance that look like a published server pack, best first.
 QStringList publishedServerPackRootChoicesInternal(const QString &instanceRoot);
 bool copyDirectoryContents(const QString &sourceRoot, const QString &destinationRoot,
