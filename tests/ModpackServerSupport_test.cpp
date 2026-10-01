@@ -1,12 +1,19 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #include <QtTest>
 #include <QCoreApplication>
+#include <QFile>
+#include <QTemporaryDir>
 #include <utility>
 
 #include "modplatform/ServerSupport.h"
 #include "modplatform/ServerSupportRequestQueue.h"
 #include "modplatform/ftb/FTBPackInstallTask.h"
 #include "ui/pages/modplatform/technic/TechnicModel.h"
+
+// Last, because its macros clash with names in the launcher headers.
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
 class ModpackServerSupportTest final : public QObject {
     Q_OBJECT
@@ -36,6 +43,45 @@ class ModpackServerSupportTest final : public QObject {
         QCOMPARE(FTB::serverPackSupportFromHttpStatus(200, false), ModPlatform::ServerSupport::Official);
         QCOMPARE(FTB::serverPackSupportFromHttpStatus(404, true), ModPlatform::ServerSupport::ClientDerived);
         QCOMPARE(FTB::serverPackSupportFromHttpStatus(0, true), ModPlatform::ServerSupport::Unknown);
+    }
+
+    void ftbInstallerMustBeSignedByFtb()
+    {
+#ifdef Q_OS_WIN
+        // The Qt library this test runs on carries a real signature from another publisher.
+        HMODULE qtCore = nullptr;
+        QVERIFY(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   reinterpret_cast<LPCWSTR>(&qVersion), &qtCore));
+        wchar_t modulePath[MAX_PATH];
+        const DWORD length = GetModuleFileNameW(qtCore, modulePath, MAX_PATH);
+        QVERIFY(length > 0 && length < MAX_PATH);
+        const QString signedByQt = QString::fromWCharArray(modulePath, static_cast<int>(length));
+
+        QString error;
+        const bool trusted = FTB::verifyTrustedWindowsExecutable(signedByQt, QStringLiteral("The QT Company Oy"), &error);
+        if (!trusted && error.contains(QStringLiteral("signature verification"))) {
+            QSKIP(qPrintable(QStringLiteral("This Qt build carries no trusted signature: %1").arg(error)));
+        }
+        QVERIFY2(trusted, qPrintable(error));
+
+        error.clear();
+        QVERIFY(!FTB::verifyTrustedWindowsExecutable(signedByQt, QString::fromLatin1(FTB::ServerInstallerSigner), &error));
+        QVERIFY2(error.contains(QStringLiteral("signed by \"The QT Company Oy\" instead of \"Feed The Beast Ltd\"")),
+                 qPrintable(error));
+
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        const QString unsignedFile = directory.filePath(QStringLiteral("unsigned.exe"));
+        QFile file(unsignedFile);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QVERIFY(file.write("not a signed program") > 0);
+        file.close();
+        error.clear();
+        QVERIFY(!FTB::verifyTrustedWindowsExecutable(unsignedFile, QString::fromLatin1(FTB::ServerInstallerSigner), &error));
+        QVERIFY2(error.contains(QStringLiteral("signature verification")), qPrintable(error));
+#else
+        QSKIP("Installer signatures are checked on Windows only.");
+#endif
     }
 
     void providerQueueLimits()
