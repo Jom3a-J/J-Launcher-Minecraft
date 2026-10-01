@@ -1085,6 +1085,8 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
         m_serverManager = std::make_unique<ServerManager>(m_dataPath, this);
         if (!m_serverManager->load()) {
             qWarning() << "Could not load the local server registry.";
+        } else {
+            m_serverManager->startAutomationScheduler();
         }
         qInfo() << "<> Local server registry initialized.";
     }
@@ -1206,6 +1208,9 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
 #endif
 
     connect(this, &Application::aboutToQuit, this, [this]() {
+        if (m_serverManager) {
+            m_serverManager->shutdownAllServers();
+        }
         if (m_instances) {
             // save any remaining instance state
             m_instances->saveNow();

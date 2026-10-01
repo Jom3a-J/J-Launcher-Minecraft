@@ -15,6 +15,8 @@
 
 #include "ServerManager.h"
 #include "ServerInstance.h"
+#include "ServerDiagnostics.h"
+#include "ServerFiles.h"
 #include "FileSystem.h"
 #include <QFile>
 #include <QDir>
@@ -28,6 +30,7 @@
 #include <QTemporaryDir>
 #include <QUuid>
 #include <QDateTime>
+#include <QDeadlineTimer>
 #include <QLocale>
 #include <algorithm>
 
@@ -36,7 +39,8 @@ const QString BACKUP_MANIFEST = QStringLiteral(".jlauncher-backup.json");
 constexpr int BACKUP_FORMAT_VERSION = 1;
 
 bool copyDirectoryContents(const QString &sourcePath, const QString &destinationPath,
-                           QString *error, const QSet<QString> &excludedTopLevels = {})
+                           QString *error, const QSet<QString> &excludedTopLevels = {},
+                           bool skipExistingFiles = false)
 {
     const QDir source(sourcePath);
     if (!source.exists() || !QDir().mkpath(destinationPath)) {
@@ -67,10 +71,14 @@ bool copyDirectoryContents(const QString &sourcePath, const QString &destination
         }
         const QString destination = QDir(destinationPath).filePath(entry.fileName());
         if (entry.isDir()) {
-            if (!copyDirectoryContents(entry.absoluteFilePath(), destination, error)) {
+            if (!copyDirectoryContents(entry.absoluteFilePath(), destination, error,
+                                       {}, skipExistingFiles)) {
                 return false;
             }
         } else if (entry.isFile()) {
+            if (skipExistingFiles && QFileInfo::exists(destination)) {
+                continue;
+            }
             if (QFileInfo::exists(destination) && !QFile::remove(destination)) {
                 if (error) {
                     *error = QObject::tr("Could not replace %1.").arg(entry.fileName());
@@ -88,17 +96,6 @@ bool copyDirectoryContents(const QString &sourcePath, const QString &destination
     return true;
 }
 
-qint64 directorySize(const QString &directoryPath)
-{
-    qint64 total = 0;
-    QDirIterator iterator(directoryPath, QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden,
-                          QDirIterator::Subdirectories);
-    while (iterator.hasNext()) {
-        iterator.next();
-        total += iterator.fileInfo().size();
-    }
-    return total;
-}
 
 QStringList includedBackupCategories(const QString &serverDirectory)
 {
@@ -213,7 +210,7 @@ ServerBackupInfo inspectBackup(const std::shared_ptr<ServerInstance> &server,
     ServerBackupInfo info;
     info.path = QFileInfo(backupPath).absoluteFilePath();
     info.name = QFileInfo(backupPath).fileName();
-    info.size = directorySize(backupPath);
+    info.size = ServerFiles::directorySize(backupPath);
 
     QFile manifestFile(QDir(backupPath).filePath(BACKUP_MANIFEST));
     if (!manifestFile.open(QIODevice::ReadOnly)) {
@@ -331,15 +328,147 @@ ServerManager::ServerManager(const QString &dataDir, QObject *parent)
     : QObject(parent)
     , m_dataDir(dataDir)
     , m_serversFile(QDir(dataDir).filePath("servers.json"))
+    , m_dataStore(QDir(dataDir).filePath("server-records"))
 {
     // Ensure servers directory exists
     QDir dir(dataDir);
     dir.mkpath("servers");
+    m_automationTimer.setInterval(30000);
+    connect(&m_automationTimer, &QTimer::timeout, this, [this]() {
+        runDueAutomations(QDateTime::currentDateTime());
+    });
 }
 
 ServerManager::~ServerManager()
 {
     save();
+}
+
+void ServerManager::shutdownAllServers()
+{
+    m_automationTimer.stop();
+    const QList<std::shared_ptr<ServerInstance>> servers = getAllServers();
+    int largestGracefulTimeoutSeconds = 0;
+    for (const auto &server : servers) {
+        if (server->status() == ServerStatus::Running
+            || server->status() == ServerStatus::Starting
+            || server->status() == ServerStatus::Stopping) {
+            largestGracefulTimeoutSeconds =
+                qMax(largestGracefulTimeoutSeconds, server->gracefulStopTimeoutSeconds());
+        }
+    }
+    for (const auto &server : servers) {
+        server->requestShutdownForExit();
+    }
+
+    QDeadlineTimer deadline(largestGracefulTimeoutSeconds * 1000);
+    for (const auto &server : servers) {
+        const qint64 remainingTime = qMax<qint64>(0, deadline.remainingTime());
+        server->waitForShutdown(static_cast<int>(remainingTime));
+    }
+}
+
+void ServerManager::startAutomationScheduler()
+{
+    m_automationTimer.start();
+}
+
+void ServerManager::runDueAutomations(const QDateTime &now)
+{
+    const QString date = now.date().toString(Qt::ISODate);
+    const QString &automation = ServerDataGroup::Automation;
+    for (const auto &server : getAllServers()) {
+        const QString id = server->id();
+        if (!m_dataStore.value(id, automation, "enabled", false).toBool()) {
+            continue;
+        }
+        const QTime scheduled = QTime::fromString(
+            m_dataStore.value(id, automation, "time").toString(), "HH:mm");
+        if (!scheduled.isValid() || scheduled.hour() != now.time().hour()
+            || scheduled.minute() != now.time().minute()
+            || m_dataStore.value(id, automation, "lastRun").toString() == date) {
+            continue;
+        }
+        m_dataStore.setValue(id, automation, "lastRun", date);
+        runAutomation(server, m_dataStore.value(id, automation, "action", "start").toString(),
+                      m_dataStore.value(id, automation, "retention", 0).toInt());
+    }
+}
+
+void ServerManager::runAutomation(const std::shared_ptr<ServerInstance> &server,
+                                  const QString &action, int retentionLimit)
+{
+    if (!server) {
+        return;
+    }
+    if (action == "start") {
+        if (server->isRunning()) {
+            recordAutomation(server, action, tr("Skipped — server is already running."));
+        } else if (server->start()) {
+            recordAutomation(server, action, tr("Start requested."));
+        } else {
+            recordAutomation(server, action, tr("Could not start the server."));
+        }
+        return;
+    }
+    if (action == "stop") {
+        if (!server->isRunning()) {
+            recordAutomation(server, action, tr("Skipped — server is already stopped."));
+        } else if (server->stop()) {
+            recordAutomation(server, action, tr("Stop requested."));
+        } else {
+            recordAutomation(server, action, tr("Could not stop the server."));
+        }
+        return;
+    }
+    if (action == "restart") {
+        if (server->restart()) {
+            recordAutomation(server, action, tr("Restart requested."));
+        } else {
+            recordAutomation(server, action, tr("Could not restart the server."));
+        }
+        return;
+    }
+    if (action != "backup") {
+        return;
+    }
+    if (server->isRunning()) {
+        recordAutomation(server, action, tr("Skipped — backups require a stopped server."));
+        return;
+    }
+    const QString automaticPrefix = QStringLiteral("Automatic backup ");
+    const QString name = automaticPrefix
+        + QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss");
+    QString error;
+    ServerBackupInfo backup;
+    if (!createServerBackup(server->id(), name, &backup, &error)) {
+        server->appendLog("[BACKUP ERROR] " + error);
+        recordAutomation(server, action, tr("Backup failed: %1").arg(error));
+        return;
+    }
+    server->appendLog("[BACKUP] Created automatic backup: " + backup.name);
+    recordAutomation(server, action, tr("Created backup %1.").arg(backup.name));
+    if (retentionLimit > 0
+        && !enforceServerBackupRetention(server->id(), automaticPrefix,
+                                         retentionLimit, &error)) {
+        server->appendLog("[BACKUP ERROR] " + error);
+        recordAutomation(server, action,
+                         tr("Backup was created, but retention failed: %1").arg(error));
+    }
+}
+
+void ServerManager::recordAutomation(const std::shared_ptr<ServerInstance> &server,
+                                     const QString &action, const QString &result)
+{
+    if (!server) {
+        return;
+    }
+    m_dataStore.addToList(server->id(), ServerDataGroup::Automation, "history",
+                          QString("%1 — %2: %3")
+                              .arg(QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm:ss"),
+                                   action.toUpper(), result),
+                          50, ServerDataStore::Order::NewestFirst);
+    emit automationRecorded(server->id());
 }
 
 std::shared_ptr<ServerInstance> ServerManager::createServer(const QString &name, const QString &version,
@@ -359,6 +488,7 @@ std::shared_ptr<ServerInstance> ServerManager::createServer(const QString &name,
     QDir().mkpath(serverDir);
 
     m_servers[id] = server;
+    attachServerRecording(server);
     save();
 
     emit serverAdded(id);
@@ -441,6 +571,8 @@ bool ServerManager::deleteServerPermanently(const QString &id)
         return false;
     }
 
+    // The server is gone for good, so its records are too.
+    m_dataStore.removeServer(id);
     emit serverRemoved(id);
     return true;
 }
@@ -463,6 +595,7 @@ bool ServerManager::restoreLastDeletedServer(QString *restoredId)
 
     item.server->setServerDirectory(targetPath);
     m_servers.insert(item.id, item.server);
+    attachServerRecording(item.server);
     if (!save()) {
         m_servers.remove(item.id);
         if (!item.trashPath.isEmpty()) {
@@ -571,6 +704,16 @@ bool ServerManager::restoreServerBackup(const QString &id, const QString &backup
     }
 
     if (!clearServerContents(serverDirectory, error)) {
+        QString rollbackError;
+        if (copyDirectoryContents(rollbackBackup.path, serverDirectory, &rollbackError,
+                                  { BACKUP_MANIFEST }, true)) {
+            if (error) {
+                *error += tr(" The previous server files were restored from the automatic '%1' backup.")
+                              .arg(rollbackName);
+            }
+        } else if (error) {
+            *error += tr(" Automatic rollback also failed: %1").arg(rollbackError);
+        }
         return false;
     }
     if (!copyDirectoryContents(stagedReplacement, serverDirectory, error)) {
@@ -582,6 +725,8 @@ bool ServerManager::restoreServerBackup(const QString &id, const QString &backup
         }
         return false;
     }
+
+    server->syncPortFromServerProperties();
 
     const QString previousMinecraftVersion = server->version();
     const QString previousLoaderType = server->loaderType();
@@ -606,6 +751,7 @@ bool ServerManager::restoreServerBackup(const QString &id, const QString &backup
         } else if (error) {
             *error = tr("Could not save restored server metadata. The previous server state was restored.");
         }
+        server->syncPortFromServerProperties();
         save();
         return false;
     }
@@ -741,15 +887,65 @@ bool ServerManager::load()
 
     m_servers.clear();
 
+    QSet<QString> listedIds;
     for (const auto &value : serversArray) {
         QJsonObject serverJson = value.toObject();
+        listedIds.insert(serverJson.value(QStringLiteral("id")).toString());
         auto server = ServerInstance::fromJson(serverJson, m_dataDir);
         if (server) {
             m_servers[server->id()] = server;
+            attachServerRecording(server);
+            // Records written by versions that kept them in the Windows registry.
+            m_dataStore.importLegacySettings(server->id());
+        }
+    }
+
+    // A server deleted to the Recycle Bin keeps its records so Undo Delete can bring them back.
+    // Undo only lasts for the session that deleted it, so once a server is neither listed nor
+    // waiting to be undone, its records are unreachable. Listed servers that failed to load
+    // keep theirs.
+    QSet<QString> undoableIds;
+    for (const TrashHistoryItem &item : m_trashHistory) {
+        undoableIds.insert(item.id);
+    }
+    for (const QString &id : m_dataStore.serverIds()) {
+        if (!listedIds.contains(id) && !undoableIds.contains(id)) {
+            m_dataStore.removeServer(id);
         }
     }
 
     return true;
+}
+
+QString ServerManager::serversRoot() const
+{
+    return QDir(m_dataDir).filePath(QStringLiteral("servers"));
+}
+
+void ServerManager::attachServerRecording(const std::shared_ptr<ServerInstance> &server)
+{
+    if (!server || server->property("serverManagerRecordingAttached").toBool()) {
+        return;
+    }
+    server->setProperty("serverManagerRecordingAttached", true);
+    ServerInstance *instance = server.get();
+    connect(server.get(), &ServerInstance::serverCrashed, this,
+            [this, instance](const QString &message, const QString &details) {
+        m_dataStore.setValue(instance->id(), ServerDataGroup::Diagnostics, QStringLiteral("lastCrash"),
+                             ServerDiagnostics::crashSummary(message, details));
+        m_dataStore.setValue(instance->id(), ServerDataGroup::Diagnostics, QStringLiteral("details"),
+                             ServerDiagnostics::structuredCrashDetails(*instance, message, details));
+        emit serverDiagnosticsRecorded(instance->id());
+    });
+    connect(server.get(), &ServerInstance::playerActivity, this,
+            [this, instance](const QString &player, bool joined) {
+        m_dataStore.addToList(instance->id(), ServerDataGroup::PlayerHistory, QStringLiteral("events"),
+                              QStringLiteral("%1 — %2 %3")
+                                  .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm")),
+                                       player, joined ? tr("joined") : tr("left")),
+                              100, ServerDataStore::Order::NewestLast);
+        emit playerHistoryRecorded(instance->id());
+    });
 }
 
 QString ServerManager::generateId() const

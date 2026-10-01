@@ -16,6 +16,12 @@ namespace Privacy {
 constexpr int DefaultLogLimit = 4096;
 
 QString sanitizeText(const QString& text, int maxLength = DefaultLogLimit);
+/*! Redacts secrets and user paths in text of any length without truncating it.
+ *
+ *  For whole logs (uploads, clipboard copies) and individual game log lines, where cutting
+ *  the text would lose the part the user needs (usually the crash at the end).
+ */
+QString sanitizeLongText(const QString& text);
 QString sanitizeCommandForDisplay(const QString& command,
                                   int maxLength = DefaultLogLimit);
 QString sanitizeJson(const QByteArray& json, int maxLength = DefaultLogLimit);

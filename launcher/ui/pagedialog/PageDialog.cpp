@@ -26,7 +26,7 @@
 #include "ui/widgets/PageContainer.h"
 
 PageDialog::PageDialog(BasePageProvider* pageProvider, QString defaultId, QWidget* parent)
-    : QDialog(parent), m_settingsLock(std::make_unique<SettingsObject::Lock>(APPLICATION->settings()))
+    : QDialog(parent)
 {
     setWindowTitle(pageProvider->dialogTitle());
     m_container = new PageContainer(pageProvider, std::move(defaultId), this);
@@ -73,6 +73,10 @@ void PageDialog::closeEvent(QCloseEvent* event)
 bool PageDialog::handleClose()
 {
     qDebug() << "Paged dialog close requested";
+    // Pages write many settings when they apply; save the file once at the end rather than
+    // after each one. The lock covers only this step: the dialog is modeless and may stay
+    // open for a long time, and holding it longer would hold back every other settings save.
+    const SettingsObject::Lock saveOnce(APPLICATION->settings());
     if (!m_container->prepareToClose())
         return false;
 

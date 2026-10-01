@@ -40,6 +40,5 @@ class PageDialog : public QDialog {
     bool handleClose();
 
    private:
-    std::unique_ptr<SettingsObject::Lock> m_settingsLock;
     PageContainer* m_container;
 };

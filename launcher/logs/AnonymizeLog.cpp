@@ -39,5 +39,6 @@
 
 void anonymizeLog(QString& log)
 {
-    log = Privacy::sanitizeText(log, 256 * 1024);
+    // Uploads and clipboard copies need the whole log: the crash is usually at the end.
+    log = Privacy::sanitizeLongText(log);
 }

@@ -69,6 +69,8 @@ private:
     QCheckBox *m_autoMemoryCheck = nullptr;
     QLabel *m_autoMemoryLabel = nullptr;
     bool m_memoryAutomatic = true;
+    /// Name the last template filled in; replaced by the next template unless the user edited it.
+    QString m_templateName;
     QPushButton *m_createButton = nullptr;
     QPushButton *m_cancelButton = nullptr;
     QPushButton *m_retryVersionsButton = nullptr;

@@ -56,6 +56,8 @@ class AutoInstallJava : public LaunchStep {
     void setJavaPath(QString path);
     void setJavaPathFromPartial();
     void downloadJava(Meta::Version::Ptr version, QString javaName);
+    /// Waits for another task already downloading into directory; false when there is none.
+    bool waitForOtherRuntimeInstall(const QString& directory);
     void tryNextMajorJava();
 
    private:

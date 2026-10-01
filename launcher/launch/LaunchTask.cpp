@@ -252,7 +252,7 @@ bool LaunchTask::parseXmlLogs(QString const& line, MessageLevel level)
                            .arg(entry.levelText)
                            .arg(entry.logger)
                            .arg(entry.message);
-            msg = Privacy::sanitizeText(censorPrivateInfo(msg));
+            msg = Privacy::sanitizeLongText(censorPrivateInfo(msg));
             model->append(entry.level, msg);
         } else if (std::holds_alternative<LogParser::PlainText>(item)) {
             auto msg = std::get<LogParser::PlainText>(item).message;
@@ -262,7 +262,7 @@ bool LaunchTask::parseXmlLogs(QString const& line, MessageLevel level)
             if (newLevel == MessageLevel::Unknown)
                 newLevel = LogParser::guessLevel(line, model->previousLevel());
 
-            msg = Privacy::sanitizeText(censorPrivateInfo(msg));
+            msg = Privacy::sanitizeLongText(censorPrivateInfo(msg));
 
             model->append(newLevel, msg);
         }
@@ -285,7 +285,7 @@ void LaunchTask::onLogLine(QString line, MessageLevel level)
     }
 
     // censor private user info
-    line = Privacy::sanitizeText(censorPrivateInfo(line));
+    line = Privacy::sanitizeLongText(censorPrivateInfo(line));
 
     getLogModel()->append(level, line);
 }

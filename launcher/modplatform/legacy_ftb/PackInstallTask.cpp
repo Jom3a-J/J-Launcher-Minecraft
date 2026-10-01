@@ -311,7 +311,11 @@ bool PackInstallTask::abort()
         return false;
     }
 
-    m_netJobContainer->abort();
+    // The download job is released once it finishes; after that the only abortable step is the
+    // game-file download InstanceTask runs (its "Skip" button).
+    if (m_netJobContainer) {
+        m_netJobContainer->abort();
+    }
     return InstanceTask::abort();
 }
 

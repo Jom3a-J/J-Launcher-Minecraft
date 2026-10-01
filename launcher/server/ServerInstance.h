@@ -16,10 +16,13 @@
 #pragma once
 
 #include <QObject>
+#include <QByteArray>
+#include <QDateTime>
+#include <QList>
 #include <QString>
+#include <QStringList>
 #include <QProcess>
 #include <QTimer>
-#include <QDateTime>
 #include <QJsonObject>
 #include <memory>
 
@@ -43,6 +46,14 @@ enum class ServerContentType {
     Plugin
 };
 
+/*! One managed Minecraft server: its settings, its folder, and its running process.
+ *
+ *  The implementation is split by concern: ServerInstance.cpp (settings, saving, the log),
+ *  ServerInstanceProcess.cpp (start, stop, restarts, console output, live player commands),
+ *  ServerInstanceFiles.cpp (paths, launch scripts, content, server packs, properties, EULA),
+ *  ServerInstanceJava.cpp (choosing and installing Java) and ServerInstanceSoftware.cpp
+ *  (downloading the server software).
+ */
 class ServerInstance : public QObject
 {
     Q_OBJECT
@@ -68,6 +79,7 @@ public:
     bool autoRestartOnCrash() const { return m_autoRestartOnCrash; }
     bool eulaAccepted() const { return m_eulaAccepted; }
     int gracefulStopTimeoutSeconds() const { return m_gracefulStopTimeoutSeconds; }
+    bool hasPendingCrashRestart() const { return m_crashRestartTimer.isActive(); }
     QString serverDirectory() const { return m_serverDirectory; }
     ServerStatus status() const { return m_status; }
     bool isOnline() const { return m_status == ServerStatus::Running; }
@@ -89,12 +101,15 @@ public:
     void setEulaAccepted(bool accepted);
     void setGracefulStopTimeoutSeconds(int seconds);
     void setStartupTimeoutSeconds(int seconds);
+    void setCrashRestartDelayMs(int ms);
     void setServerDirectory(const QString &dir);
 
     // Server operations
     bool start();
     bool stop();
     bool restart();
+    void requestShutdownForExit();
+    bool waitForShutdown(int timeoutMs);
     bool isRunning() const;
     bool prepareServerSoftware();
     bool hasInstalledLaunchTarget() const { return hasLaunchTarget(); }
@@ -108,6 +123,14 @@ public:
     bool cancelDownload();
     bool addMods(const QStringList &paths, QString *error = nullptr);
     bool importServerPack(const QString &archivePath, QString *error = nullptr);
+    /*! The three steps of importServerPack, for callers that run the file work on another
+     *  thread. begin checks the server can take the pack and blocks starting it until finish;
+     *  importServerPackFiles touches no ServerInstance state and is safe on a worker thread.
+     */
+    bool beginServerPackImport(const QString &archivePath, QString *error = nullptr);
+    static bool importServerPackFiles(const QString &serverDirectory,
+                                      const QString &archivePath, QString *error = nullptr);
+    void finishServerPackImport(bool imported);
     bool kickPlayer(const QString &name, const QString &reason = QString(),
                     QString *error = nullptr);
     bool setPlayerWhitelistedLive(const QString &name, bool enabled,
@@ -123,6 +146,8 @@ public:
     static bool isReadyOutput(const QString &line);
     static bool isPortAvailable(quint16 port);
     static bool isJavaMajorCompatible(int requiredVersion, int detectedVersion);
+    static int javaProbeCountForTesting();
+    static void clearJavaProbeCacheForTesting();
     static int recommendedJavaMajor(const QString &minecraftVersion,
                                     const QString &loaderType);
 
@@ -145,7 +170,15 @@ public:
     ServerContentType contentType() const;
     static ServerContentType contentTypeForLoader(const QString &loaderType);
     bool addContentFiles(const QStringList &paths, QString *error = nullptr);
+    /// Moves one of the server's mod or plugin files to the Recycle Bin. The server must be
+    /// stopped. pathInTrash receives where the file went, when the system reports it.
+    bool removeContentFile(const QString &path, QString *error = nullptr,
+                           QString *pathInTrash = nullptr);
     bool invalidateContentCaches(QString *error = nullptr) const;
+    void syncPortFromServerProperties();
+    bool cancelPendingCrashRestart();
+    static QStringList takeCompleteLines(QByteArray &buffer);
+    static bool parsePlayerActivity(const QString &line, QString *player, bool *joined);
 
 signals:
     void statusChanged(ServerStatus status);
@@ -158,6 +191,7 @@ signals:
                                         bool cancelled, const QString &errorMessage);
     void serverCrashed(const QString &message, const QString &details);
     void playerActivity(const QString &playerName, bool joined);
+    void crashRestartPendingChanged(bool pending);
 
 private slots:
     void onProcessStarted();
@@ -167,9 +201,16 @@ private slots:
     void onProcessError(QProcess::ProcessError error);
 
 private:
+    /// Running or changing state (starting, stopping, downloading): not Stopped and not Error.
+    bool isActive() const { return m_status != ServerStatus::Stopped && m_status != ServerStatus::Error; }
+    /// Active, or a server pack is being imported: nothing else may start it or write its files.
+    bool isBusy() const { return isActive() || m_serverPackImportInProgress; }
+    /// Stores a line that has already been through Privacy::sanitizeText.
+    void appendSanitizedLog(const QString &line);
     void setStatus(ServerStatus status);
+    void scheduleStopEscalation(int graceMs);
+    void forceKillProcessTree();
     bool createServerProperties();
-    void syncPortFromServerProperties();
     bool acceptEULA();
     bool hasLaunchTarget() const;
     QString loaderScriptPath() const;
@@ -180,13 +221,13 @@ private:
     bool installCompatibleJava(int requiredVersion,
                                bool startAfterInstall = true,
                                bool prepareServerAfterInstall = false);
-    bool extractServerPack(const QString &archivePath, QString *error);
     void handleConsoleLine(const QString &line, bool error = false);
     bool beginServerDownload(const QString &targetVersion, const QString &targetLoaderVersion,
                              const QString &javaPath, bool startAfterDownload,
                              bool commitTargetVersion, bool commitTargetLoaderVersion);
     bool sendPlayerAdministrationCommand(const QString &verb, const QString &name,
                                          const QString &reason, QString *error);
+    void processOutputBuffer(QByteArray &buffer, bool error);
 
     QString m_id;
     QString m_name;
@@ -205,14 +246,22 @@ private:
     ServerStatus m_status = ServerStatus::Stopped;
 
     std::unique_ptr<QProcess> m_process;
+    quint64 m_processGeneration = 0;
+    QByteArray m_standardOutputBuffer;
+    QByteArray m_standardErrorBuffer;
     ServerDownloader *m_downloader = nullptr;
     std::shared_ptr<const ServerProviderEndpoints> m_providerEndpoints;
     Task::Ptr m_javaInstallTask;
     QString m_consoleLog;
     bool m_restartRequested = false;
     bool m_downloadCancelRequested = false;
+    bool m_serverPackImportInProgress = false;
     bool m_startupTimedOut = false;
     bool m_startupTimeoutOverridden = false;
     QDateTime m_startedAt;
     QTimer m_startupTimeoutTimer;
+    QTimer m_crashRestartTimer;
+    QList<QDateTime> m_crashRestartTimestamps;
+    int m_crashRestartDelayMs = 5000;
+    bool m_crashRestartStarting = false;
 };

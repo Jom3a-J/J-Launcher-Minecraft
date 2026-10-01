@@ -58,6 +58,7 @@ private slots:
     void escapedQDebugPayloadIsRedacted();
     void commandCredentialsAreRedacted();
     void lateDiagnosticsSurviveRequestedLimit();
+    void longLogsAreRedactedWithoutTruncation();
     void environmentAndPathsUseSafePresentation();
     void harmlessDiagnosticsRemainReadable();
     void netRequestFormattingIsSafe();
@@ -258,6 +259,26 @@ void PrivacyTest::lateDiagnosticsSurviveRequestedLimit()
     const QString bounded = Privacy::sanitizeResponseBody(huge, 128);
     QVERIFY(bounded.size() <= 128);
     QVERIFY(!containsCanary(bounded));
+}
+
+void PrivacyTest::longLogsAreRedactedWithoutTruncation()
+{
+    // A whole game log: several megabytes, secrets scattered through it, the crash at the end.
+    QString log;
+    for (int line = 0; line < 60000; ++line) {
+        log += QStringLiteral("[12:00:00] [Render thread/INFO]: line %1 of ordinary output").arg(line);
+        if (line % 997 == 0) {
+            log += QStringLiteral(" access_token=") + AccessToken;
+        }
+        log += QLatin1Char('\n');
+    }
+    log += QStringLiteral("LATE-CRASH-MARKER\n");
+
+    const QString safe = Privacy::sanitizeLongText(log);
+    QVERIFY(!containsCanary(safe));
+    QVERIFY(safe.contains(QStringLiteral("line 59999 of ordinary output")));
+    QVERIFY(safe.endsWith(QStringLiteral("LATE-CRASH-MARKER\n")));
+    QCOMPARE(safe.count(QLatin1Char('\n')), log.count(QLatin1Char('\n')));
 }
 
 void PrivacyTest::environmentAndPathsUseSafePresentation()

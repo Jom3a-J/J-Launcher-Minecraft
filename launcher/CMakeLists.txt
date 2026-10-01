@@ -835,10 +835,19 @@ SET(LAUNCHER_SOURCES
     server/ServerManager.cpp
     server/ServerModpackInstaller.h
     server/ServerModpackInstaller.cpp
+    server/ServerModpackContent.h
+    server/ServerModpackContent.cpp
+    server/ServerModpackDependencies.cpp
+    server/ServerModpackTracking.h
+    server/ServerModpackTracking.cpp
     server/ServerPackCompatibility.h
     server/ServerPackCompatibility.cpp
     server/ServerInstance.h
     server/ServerInstance.cpp
+    server/ServerInstanceProcess.cpp
+    server/ServerInstanceFiles.cpp
+    server/ServerInstanceJava.cpp
+    server/ServerInstanceSoftware.cpp
     server/ServerJvmArgs.h
     server/ServerJvmArgs.cpp
     server/ServerMemory.h
@@ -847,6 +856,14 @@ SET(LAUNCHER_SOURCES
     server/ServerPackImportTransaction.cpp
     server/ServerDiagnostics.h
     server/ServerDiagnostics.cpp
+    server/ServerDataStore.h
+    server/ServerDataStore.cpp
+    server/ServerFiles.h
+    server/ServerFiles.cpp
+    server/ServerPaths.h
+    server/ServerPaths.cpp
+    server/ServerProcessStats.h
+    server/ServerProcessStats.cpp
     server/ServerContentUpdater.h
     server/ServerContentUpdater.cpp
     server/ServerPlayerAccess.h
@@ -855,8 +872,33 @@ SET(LAUNCHER_SOURCES
     server/ServerProperties.cpp
     server/ServerDownloader.h
     server/ServerDownloader.cpp
+    server/ServerDownloaderShared.h
+    server/ServerDownloaderCatalog.cpp
+    server/ServerDownloaderVanilla.cpp
+    server/ServerDownloaderPaper.cpp
+    server/ServerDownloaderFabric.cpp
+    server/ServerDownloaderForge.cpp
     ui/pages/server/ServerListPage.h
     ui/pages/server/ServerListPage.cpp
+    ui/pages/server/ServerAutomationTab.h
+    ui/pages/server/ServerAutomationTab.cpp
+    ui/pages/server/ServerBackupsTab.h
+    ui/pages/server/ServerBackupsTab.cpp
+    ui/pages/server/ServerBusyDialog.h
+    ui/pages/server/ServerConsoleTab.h
+    ui/pages/server/ServerConsoleTab.cpp
+    ui/pages/server/ServerContentTab.h
+    ui/pages/server/ServerContentTab.cpp
+    ui/pages/server/ServerOverviewTab.h
+    ui/pages/server/ServerOverviewTab.cpp
+    ui/pages/server/ServerFilesTab.h
+    ui/pages/server/ServerFilesTab.cpp
+    ui/pages/server/ServerPlayersTab.h
+    ui/pages/server/ServerPlayersTab.cpp
+    ui/pages/server/ServerUpdatesTab.h
+    ui/pages/server/ServerUpdatesTab.cpp
+    ui/pages/server/ServerPageStyle.h
+    ui/pages/server/ServerPageStyle.cpp
     ui/pages/server/ServerListPage.ui
     ui/pages/server/ServerSettingsPage.h
     ui/pages/server/ServerSettingsPage.cpp

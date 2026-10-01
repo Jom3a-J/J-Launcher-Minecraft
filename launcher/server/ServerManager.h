@@ -21,8 +21,11 @@
 #include <QMap>
 #include <QStack>
 #include <QDateTime>
+#include <QTimer>
 #include <QStringList>
 #include <memory>
+
+#include "ServerDataStore.h"
 
 class ServerInstance;
 
@@ -55,6 +58,11 @@ public:
                                                  const QString &loaderVersion = QString());
     bool deleteServer(const QString &id);
     bool deleteServerPermanently(const QString &id);
+    void shutdownAllServers();
+    void startAutomationScheduler();
+    void runDueAutomations(const QDateTime &now);
+    void runAutomation(const std::shared_ptr<ServerInstance> &server,
+                       const QString &action, int retentionLimit);
     bool hasDeletedServer() const { return !m_trashHistory.isEmpty(); }
     bool restoreLastDeletedServer(QString *restoredId = nullptr);
     bool createServerBackup(const QString &id, const QString &requestedName,
@@ -70,6 +78,10 @@ public:
     std::shared_ptr<ServerInstance> getServer(const QString &id) const;
     QList<std::shared_ptr<ServerInstance>> getAllServers() const;
     int serverCount() const { return m_servers.size(); }
+    QString serversRoot() const;
+    /// Records kept for each server besides its settings: schedules, histories, mod sources.
+    ServerDataStore &dataStore() { return m_dataStore; }
+    const ServerDataStore &dataStore() const { return m_dataStore; }
 
     // Save/Load
     bool save();
@@ -79,12 +91,19 @@ signals:
     void serverAdded(const QString &id);
     void serverRemoved(const QString &id);
     void serverChanged(const QString &id);
+    void automationRecorded(const QString &serverId);
+    void serverDiagnosticsRecorded(const QString &serverId);
+    void playerHistoryRecorded(const QString &serverId);
 
 private:
     QString generateId() const;
+    void recordAutomation(const std::shared_ptr<ServerInstance> &server,
+                          const QString &action, const QString &result);
+    void attachServerRecording(const std::shared_ptr<ServerInstance> &server);
 
     QString m_dataDir;
     QString m_serversFile;
+    ServerDataStore m_dataStore;
     QMap<QString, std::shared_ptr<ServerInstance>> m_servers;
     struct TrashHistoryItem {
         QString id;
@@ -93,4 +112,5 @@ private:
         std::shared_ptr<ServerInstance> server;
     };
     QStack<TrashHistoryItem> m_trashHistory;
+    QTimer m_automationTimer;
 };

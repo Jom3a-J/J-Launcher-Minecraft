@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 #include "ServerPackImportTransaction.h"
+#include "ServerPaths.h"
 
 #include "archive/ArchiveReader.h"
 #include <archive.h>
@@ -139,57 +140,14 @@ bool copyFileContents(const QString& sourcePath, const QString& targetPath,
     return true;
 }
 
-bool validateWindowsPathComponents(const QString& path, QString* unsafeComponent)
-{
-    static const QStringList reservedDevices = {
-        QStringLiteral("CON"), QStringLiteral("PRN"), QStringLiteral("AUX"),
-        QStringLiteral("NUL"), QStringLiteral("COM1"), QStringLiteral("COM2"),
-        QStringLiteral("COM3"), QStringLiteral("COM4"), QStringLiteral("COM5"),
-        QStringLiteral("COM6"), QStringLiteral("COM7"), QStringLiteral("COM8"),
-        QStringLiteral("COM9"), QStringLiteral("LPT1"), QStringLiteral("LPT2"),
-        QStringLiteral("LPT3"), QStringLiteral("LPT4"), QStringLiteral("LPT5"),
-        QStringLiteral("LPT6"), QStringLiteral("LPT7"), QStringLiteral("LPT8"),
-        QStringLiteral("LPT9")
-    };
-
-    const QStringList components = path.split('/', Qt::KeepEmptyParts);
-    for (const QString& component : components) {
-        if (component.isEmpty()) {
-            continue;
-        }
-
-        bool invalid = component == QStringLiteral(".");
-        for (const QChar character : component) {
-            const ushort code = character.unicode();
-            if (code < 0x20 || (code >= 0x7f && code <= 0x9f)
-                || QStringLiteral("<>:\"|?*").contains(character)) {
-                invalid = true;
-                break;
-            }
-        }
-        if (component.endsWith('.') || component.endsWith(' ')) {
-            invalid = true;
-        }
-
-        QString deviceStem = component.section('.', 0, 0).trimmed();
-        if (reservedDevices.contains(deviceStem, Qt::CaseInsensitive)) {
-            invalid = true;
-        }
-
-        if (invalid) {
-            if (unsafeComponent) {
-                *unsafeComponent = component;
-            }
-            return false;
-        }
-    }
-    return true;
-}
 
 bool normalizeServerPackPath(QString path, QString* normalized,
-                             QString* unsafeComponent)
+                             QString* unsafeComponent, const QString& wrapperFolder = {})
 {
     path.replace('\\', '/');
+    if (!wrapperFolder.isEmpty() && path.startsWith(wrapperFolder)) {
+        path.remove(0, wrapperFolder.size());
+    }
     while (path.startsWith("overrides/")) {
         path.remove(0, QStringLiteral("overrides/").size());
     }
@@ -197,9 +155,18 @@ bool normalizeServerPackPath(QString path, QString* normalized,
         path.remove(0, QStringLiteral(".minecraft/").size());
     }
 
-    if (path.isEmpty() || path.startsWith('/') || QDir::isAbsolutePath(path)
-        || path.contains(QStringLiteral(".."))) {
+    // ".." is rejected per component below; a plain substring test would also refuse
+    // harmless names such as "mods/Mod..Extras.jar".
+    if (path.isEmpty() || path.startsWith('/') || QDir::isAbsolutePath(path)) {
         return false;
+    }
+    // Entries that climb out of the pack are skipped, not treated as a broken archive, so this
+    // runs before the Windows name checks (which would reject ".." as a name ending in a dot).
+    const QStringList components = path.split('/', Qt::KeepEmptyParts);
+    for (const QString& component : components) {
+        if (component == QStringLiteral("..")) {
+            return false;
+        }
     }
     if (path.contains(QChar::Null)) {
         if (unsafeComponent) {
@@ -207,15 +174,8 @@ bool normalizeServerPackPath(QString path, QString* normalized,
         }
         return false;
     }
-    if (!validateWindowsPathComponents(path, unsafeComponent)) {
+    if (!ServerPaths::hasValidWindowsNames(path, unsafeComponent)) {
         return false;
-    }
-
-    const QStringList components = path.split('/', Qt::KeepEmptyParts);
-    for (const QString& component : components) {
-        if (component == QStringLiteral("..")) {
-            return false;
-        }
     }
 
     path = QDir::cleanPath(path);
@@ -226,6 +186,66 @@ bool normalizeServerPackPath(QString path, QString* normalized,
 
     *normalized = path;
     return true;
+}
+
+bool isAllowedServerPackPath(const QString& relativePath)
+{
+    static const QStringList allowedRootFiles = {
+        "server.properties", "default-server.properties", "server-icon.png"
+    };
+    static const QStringList allowedRoots = {
+        "mods/", "config/", "configureddefaults/", "datapacks/",
+        "defaultconfigs/", "ftbteambases/", "global_packs/", "kubejs/",
+        "openloader/", "patchouli_books/", "resources/", "scripts/",
+        "structures/"
+    };
+    if (allowedRootFiles.contains(relativePath, Qt::CaseInsensitive)) {
+        return true;
+    }
+    for (const QString& root : allowedRoots) {
+        if (relativePath.startsWith(root)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/*! Server packs are often zipped with everything inside one folder ("MyPack-Server/mods/...").
+ *
+ *  Returns that folder, with a trailing '/', when nothing is usable at the top of the archive
+ *  but something is once the folder is removed. Otherwise returns an empty string.
+ */
+QString findWrapperFolder(const QStringList& fileNames)
+{
+    QString wrapper;
+    bool usableInside = false;
+    for (QString name : fileNames) {
+        name.replace('\\', '/');
+        if (name.startsWith(QStringLiteral("__MACOSX/"))) {
+            continue;
+        }
+        QString normalized;
+        QString unsafeComponent;
+        if (normalizeServerPackPath(name, &normalized, &unsafeComponent)
+            && isAllowedServerPackPath(normalized)) {
+            return {};
+        }
+        const qsizetype slash = name.indexOf('/');
+        if (slash <= 0) {
+            return {};
+        }
+        const QString folder = name.left(slash + 1);
+        if (wrapper.isEmpty()) {
+            wrapper = folder;
+        } else if (folder != wrapper) {
+            return {};
+        }
+        if (normalizeServerPackPath(name, &normalized, &unsafeComponent, wrapper)
+            && isAllowedServerPackPath(normalized)) {
+            usableInside = true;
+        }
+    }
+    return usableInside ? wrapper : QString();
 }
 }  // namespace
 
@@ -267,15 +287,9 @@ class ServerPackImportTransaction::Private final
         QString stageError;
         int extractedCount = 0;
 
-        const QStringList allowedRoots = {
-            "mods/", "config/", "configureddefaults/", "datapacks/",
-            "defaultconfigs/", "ftbteambases/", "global_packs/", "kubejs/",
-            "openloader/", "patchouli_books/", "resources/", "scripts/",
-            "structures/"
-        };
-        const QStringList allowedRootFiles = {
-            "server.properties", "default-server.properties", "server-icon.png"
-        };
+        // A failed listing leaves no wrapper; the parse below then reports the unreadable archive.
+        const QString wrapperFolder =
+            archive.collectFiles(true) ? findWrapperFolder(archive.getFiles()) : QString();
 
         const bool parsed = archive.parse([&](MMCZip::ArchiveReader::File* input) {
             auto skipEntry = [&]() {
@@ -289,7 +303,7 @@ class ServerPackImportTransaction::Private final
             QString relativePath;
             QString unsafeComponent;
             if (!normalizeServerPackPath(input->filename(), &relativePath,
-                                          &unsafeComponent)) {
+                                          &unsafeComponent, wrapperFolder)) {
                 if (!unsafeComponent.isEmpty()) {
                     stageError = QObject::tr(
                         "The server-pack contains an unsafe Windows path '%1'.")
@@ -299,16 +313,7 @@ class ServerPackImportTransaction::Private final
                 return skipEntry();
             }
 
-            bool allowed = allowedRootFiles.contains(relativePath, Qt::CaseInsensitive);
-            if (!allowed) {
-                for (const QString& root : allowedRoots) {
-                    if (relativePath.startsWith(root)) {
-                        allowed = true;
-                        break;
-                    }
-                }
-            }
-            if (!allowed || !input->isFile()) {
+            if (!isAllowedServerPackPath(relativePath) || !input->isFile()) {
                 return skipEntry();
             }
 

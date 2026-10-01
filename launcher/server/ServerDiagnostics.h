@@ -6,6 +6,8 @@
 #include <QString>
 #include <QStringList>
 
+class ServerInstance;
+
 enum class ServerHealthState {
     Inactive,
     Unavailable,
@@ -60,4 +62,12 @@ public:
     static QString crashCauseExplanation(ServerCrashCause cause);
     static QString crashRelevantLine(const QString& log);
     static QStringList suspectedModIds(const QString& log);
+    /// Lower-case mod ids a jar declares (Fabric, Quilt, Forge and NeoForge metadata).
+    static QStringList modIdsFromJar(const QString& path);
+    /// Jars in modsDirectory whose mod ids the crash log names as the likely cause.
+    static QStringList suspectedModFiles(const QString& modsDirectory, const QString& log);
+    static QString crashSummary(const QString &message, const QString &rawLog);
+    static QString structuredCrashDetails(const ServerInstance &server,
+                                         const QString &message,
+                                         const QString &rawLog);
 };

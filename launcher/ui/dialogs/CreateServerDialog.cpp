@@ -324,7 +324,11 @@ void CreateServerDialog::applyTemplate(int index)
     if (m_memoryAutomatic) {
         updateAutomaticMemory();
     }
-    if (m_nameEdit->text().trimmed().isEmpty()) m_nameEdit->setText(tr(selected.name));
+    const QString currentName = m_nameEdit->text().trimmed();
+    if (currentName.isEmpty() || currentName == m_templateName) {
+        m_templateName = tr(selected.name);
+        m_nameEdit->setText(m_templateName);
+    }
 }
 
 void CreateServerDialog::updateAutomaticMemory()

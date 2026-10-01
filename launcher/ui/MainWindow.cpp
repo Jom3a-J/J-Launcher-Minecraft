@@ -1551,14 +1551,21 @@ void MainWindow::on_actionManageSkins_triggered()
     auto account = APPLICATION->accounts()->defaultAccount();
 
     if (account && (account->accountType() == AccountType::MSA) && !account->isActive()) {
+        static const char* accountProperty = "jlauncherSkinAccountId";
         if (m_skinManageWindow) {
-            UI::Modeless::activate(m_skinManageWindow.data());
-            return;
+            if (m_skinManageWindow->property(accountProperty).toString() == account->internalId()) {
+                UI::Modeless::activate(m_skinManageWindow.data());
+                return;
+            }
+            // The default account changed since the window opened; it would edit the old one.
+            m_skinManageWindow->close();
+            m_skinManageWindow.clear();
         }
 
         UI::Modeless::showOrActivate(m_skinManageWindow, [this, account] {
             auto* dialog = new SkinManageDialog(this, account);
             dialog->setAttribute(Qt::WA_DeleteOnClose);
+            dialog->setProperty(accountProperty, account->internalId());
             return dialog;
         });
     }
@@ -1747,6 +1754,31 @@ void MainWindow::on_actionViewSelectedInstFolder_triggered()
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
+    if (auto* serverManager = APPLICATION->serverManager()) {
+        int runningServerCount = 0;
+        for (const auto& server : serverManager->getAllServers()) {
+            const ServerStatus status = server->status();
+            if (status == ServerStatus::Running || status == ServerStatus::Starting
+                || status == ServerStatus::Stopping || status == ServerStatus::Downloading) {
+                ++runningServerCount;
+            }
+        }
+        if (runningServerCount > 0) {
+            QMessageBox warning(QMessageBox::Warning, tr("Servers Are Running"),
+                                tr("%n server(s) are still running. Closing J Launcher will stop them safely; each world is saved first.",
+                                   nullptr, runningServerCount),
+                                QMessageBox::NoButton, this);
+            QAbstractButton* stopButton = warning.addButton(
+                tr("Stop Servers and Quit"), QMessageBox::AcceptRole);
+            warning.addButton(QMessageBox::Cancel);
+            warning.setDefaultButton(QMessageBox::Cancel);
+            warning.exec();
+            if (warning.clickedButton() != stopButton) {
+                event->ignore();
+                return;
+            }
+        }
+    }
     // Save the window state and geometry.
     APPLICATION->settings()->set("MainWindowState", QString::fromUtf8(saveState().toBase64()));
     APPLICATION->settings()->set("MainWindowGeometry", QString::fromUtf8(saveGeometry().toBase64()));

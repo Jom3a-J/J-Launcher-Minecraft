@@ -14,6 +14,7 @@ int main(int argc, char **argv)
     bool versionProbe = false;
     bool exitBeforeReady = false;
     bool suppressReady = false;
+    bool ignoreStop = false;
     bool crashWithMemoryError = false;
     bool installServer = false;
     for (int index = 1; index < argc; ++index) {
@@ -21,6 +22,7 @@ int main(int argc, char **argv)
         versionProbe = versionProbe || argument == "-version";
         exitBeforeReady = exitBeforeReady || argument == "-Dfake.exit-before-ready";
         suppressReady = suppressReady || argument == "-Dfake.no-ready";
+        ignoreStop = ignoreStop || argument == "-Dfake.ignore-stop";
         crashWithMemoryError = crashWithMemoryError || argument == "-Dfake.crash-memory";
         installServer = installServer || argument == "--installServer";
     }
@@ -160,6 +162,10 @@ int main(int argc, char **argv)
     std::string command;
     while (std::getline(std::cin, command)) {
         if (command == "stop") {
+            if (ignoreStop) {
+                std::cout << "COMMAND:stop" << std::endl;
+                continue;
+            }
             std::cout << "[Server thread/INFO]: Stopping server" << std::endl;
             return 0;
         }

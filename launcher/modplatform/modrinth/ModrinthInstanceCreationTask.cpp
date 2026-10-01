@@ -639,7 +639,9 @@ bool ModrinthCreationTask::parseManifest(const QString& indexPath, std::vector<F
 
 void ModrinthCreationTask::ensureMetaLoop()
 {
-    const QDir folder = FS::PathCombine(m_stagingPath, "minecraft", "jarmods");
+    // Mod metadata lives in the mods index folder, next to the mods it describes (the same place
+    // ModFolderModel and the CurseForge installer use).
+    const QDir folder = FS::PathCombine(m_stagingPath, m_rootPath, "mods", ".index");
     auto ensureMetadataTask = makeShared<EnsureMetadataTask>(m_resources, folder, ModPlatform::ResourceProvider::MODRINTH);
     connect(ensureMetadataTask.get(), &Task::succeeded, this, &ModrinthCreationTask::finishInstall);
     connect(ensureMetadataTask.get(), &Task::failed, this, &ModrinthCreationTask::emitFailed);

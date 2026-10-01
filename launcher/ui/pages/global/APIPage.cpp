@@ -215,9 +215,11 @@ bool APIPage::applySettings()
     s->set("MetaRefreshOnLaunch", ui->metaRefreshOnLaunchCB->checkState() == Qt::Checked);
     s->set("ResourceURLOverride", resourceURL.toString());
     s->set("LegacyFMLLibsURLOverride", fmlLibsURL.toString());
+    // Only touch the credential store when a value changed: every write goes through Windows
+    // Credential Manager, and a failure there should not block saving unrelated settings.
     QString credentialError;
-    if (!APPLICATION->setFlameAPIKeyOverride(ui->flameKey->text(),
-                                             &credentialError)) {
+    if (ui->flameKey->text().trimmed() != APPLICATION->getFlameAPIKeyOverride()
+        && !APPLICATION->setFlameAPIKeyOverride(ui->flameKey->text(), &credentialError)) {
         QMessageBox::critical(
             this, tr("CurseForge API Key"),
             tr("The API key could not be saved securely.\n\n%1")
@@ -225,7 +227,8 @@ bool APIPage::applySettings()
         return false;
     }
     QString modrinthCredentialError;
-    if (!APPLICATION->setModrinthAPITokenOverride(
+    if (ui->modrinthToken->text().trimmed() != APPLICATION->getModrinthAPITokenOverride()
+        && !APPLICATION->setModrinthAPITokenOverride(
             ui->modrinthToken->text(), &modrinthCredentialError)) {
         QMessageBox::critical(
             this, tr("Modrinth API Token"),

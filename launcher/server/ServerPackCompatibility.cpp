@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-only */
 
 #include "ServerPackCompatibility.h"
+#include "ServerPaths.h"
 
 #include <QDir>
 #include <QDirIterator>
@@ -16,22 +17,13 @@
 
 namespace {
 
+using ServerPaths::isSafeRelativePath;
+
 QString normalizedPath(QString path)
 {
-    path = QDir::fromNativeSeparators(QDir::cleanPath(path.trimmed()));
-    while (path.startsWith(QStringLiteral("./"))) {
-        path.remove(0, 2);
-    }
-    return path;
+    return ServerPaths::normalizedRelativePath(std::move(path));
 }
 
-bool isSafeRelativePath(const QString &path)
-{
-    const QString normalized = normalizedPath(path);
-    return !normalized.isEmpty() && normalized != QStringLiteral("..")
-        && !normalized.startsWith(QStringLiteral("../"))
-        && !QDir::isAbsolutePath(normalized);
-}
 
 QString normalizedLoader(QString loader)
 {
@@ -259,19 +251,26 @@ void addFile(ServerPackCompatibilityReport &report, const QString &path,
         report.hasClientOnlyFileMetadata = true;
     }
 
-    auto iterator = std::find_if(report.files.begin(), report.files.end(),
-                                 [&normalized](const ServerPackFileDecision &file) {
-                                     return file.path.compare(normalized, Qt::CaseInsensitive) == 0;
-                                 });
-    if (iterator == report.files.end()) {
+    if (report.fileIndexByPath.size() != report.files.size()) {
+        // The files list was filled some other way; rebuild the lookup from it.
+        report.fileIndexByPath.clear();
+        for (qsizetype i = 0; i < report.files.size(); ++i) {
+            report.fileIndexByPath.insert(report.files.at(i).path.toCaseFolded(), i);
+        }
+    }
+    const QString key = normalized.toCaseFolded();
+    const auto found = report.fileIndexByPath.constFind(key);
+    if (found == report.fileIndexByPath.constEnd()) {
         ServerPackFileDecision decision;
         decision.path = normalized;
         decision.side = side;
         if (hashes) {
             setHash(decision, *hashes, hashSource, report);
         }
+        report.fileIndexByPath.insert(key, report.files.size());
         report.files.append(decision);
     } else {
+        auto iterator = report.files.begin() + *found;
         if (iterator->side == ServerPackFileSide::Unknown
             && side != ServerPackFileSide::Unknown) {
             iterator->side = side;
