@@ -197,6 +197,10 @@ private slots:
     void onProcessError(QProcess::ProcessError error);
 
 private:
+    /// Running or changing state (starting, stopping, downloading): not Stopped and not Error.
+    bool isActive() const { return m_status != ServerStatus::Stopped && m_status != ServerStatus::Error; }
+    /// Active, or a server pack is being imported: nothing else may start it or write its files.
+    bool isBusy() const { return isActive() || m_serverPackImportInProgress; }
     /// Stores a line that has already been through Privacy::sanitizeText.
     void appendSanitizedLog(const QString &line);
     void setStatus(ServerStatus status);

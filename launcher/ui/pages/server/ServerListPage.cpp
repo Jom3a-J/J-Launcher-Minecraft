@@ -27,6 +27,7 @@
 #include "ui/dialogs/ProgressDialog.h"
 #include "ui/pages/server/ServerAutomationTab.h"
 #include "ui/pages/server/ServerBackupsTab.h"
+#include "ui/pages/server/ServerBusyDialog.h"
 #include "ui/pages/server/ServerConsoleTab.h"
 #include "ui/pages/server/ServerContentTab.h"
 #include "ui/pages/server/ServerFilesTab.h"
@@ -59,11 +60,9 @@
 #include <QInputDialog>
 #include <QSpinBox>
 #include <QEvent>
-#include <QEventLoop>
 #include <QElapsedTimer>
 #include <QTimeEdit>
 #include <QProgressBar>
-#include <QProgressDialog>
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QTabBar>
@@ -71,8 +70,6 @@
 #include <QRegularExpression>
 #include <QSignalBlocker>
 #include <utility>
-#include <QFutureWatcher>
-#include <QtConcurrent/QtConcurrentRun>
 
 using ServerPageStyle::applyMutedLabelPalette;
 using ServerPageStyle::launcherIcon;
@@ -1071,29 +1068,16 @@ void ServerListPage::onInstallModpack()
     const QString stagingParent = m_serverManager->serversRoot();
     const QStringList knownClientOnlyHashes =
         ServerModpackInstaller::knownClientOnlyHashes();
-    QProgressDialog preparationProgress(
-        tr("Preparing server files from %1...").arg(packName), QString(), 0, 0, this);
-    preparationProgress.setWindowTitle(tr("Creating Server"));
-    preparationProgress.setCancelButton(nullptr);
-    preparationProgress.setWindowModality(Qt::ApplicationModal);
-    preparationProgress.setMinimumDuration(0);
-    preparationProgress.show();
-
-    QFutureWatcher<PreparedServerModpack> watcher;
-    QEventLoop waitLoop;
-    connect(&watcher, &QFutureWatcher<PreparedServerModpack>::finished,
-            &waitLoop, &QEventLoop::quit);
-    watcher.setFuture(QtConcurrent::run(
+    ServerBusyDialog preparationProgress(
+        this, tr("Creating Server"), tr("Preparing server files from %1...").arg(packName));
+    PreparedServerModpack prepared = preparationProgress.run(
         [profile, stagingPath, gameRoot, stagingParent, selectedServerRoot,
          knownClientOnlyHashes]() {
             return ServerModpackInstaller::prepareMatchingServer(
                 profile, stagingPath, gameRoot, stagingParent, selectedServerRoot,
                 knownClientOnlyHashes);
-        }));
-    if (!watcher.isFinished()) {
-        waitLoop.exec();
-    }
-    PreparedServerModpack prepared = watcher.result();
+        });
+    // Installing moves the prepared files into place on this thread; keep the window up.
     const ServerModpackInstallResult result =
         ServerModpackInstaller::installPreparedServer(
             m_serverManager, std::move(prepared), packName + tr(" Server"),

@@ -260,7 +260,7 @@ bool ServerInstance::addContentFiles(const QStringList &paths, QString *error)
         }
         return false;
     }
-    if (m_status != ServerStatus::Stopped && m_status != ServerStatus::Error) {
+    if (isActive()) {
         if (error) {
             *error = tr("Stop the server before adding %1 files.").arg(contentName);
         }
@@ -336,8 +336,7 @@ bool ServerInstance::importServerPack(const QString &archivePath, QString *error
 
 bool ServerInstance::beginServerPackImport(const QString &archivePath, QString *error)
 {
-    if ((m_status != ServerStatus::Stopped && m_status != ServerStatus::Error)
-        || m_serverPackImportInProgress) {
+    if (isBusy()) {
         if (error) {
             *error = m_serverPackImportInProgress
                 ? tr("A server pack is already being imported.")

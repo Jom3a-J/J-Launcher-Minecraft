@@ -882,6 +882,7 @@ SET(LAUNCHER_SOURCES
     ui/pages/server/ServerAutomationTab.cpp
     ui/pages/server/ServerBackupsTab.h
     ui/pages/server/ServerBackupsTab.cpp
+    ui/pages/server/ServerBusyDialog.h
     ui/pages/server/ServerConsoleTab.h
     ui/pages/server/ServerConsoleTab.cpp
     ui/pages/server/ServerContentTab.h

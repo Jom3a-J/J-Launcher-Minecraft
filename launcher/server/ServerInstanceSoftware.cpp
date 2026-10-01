@@ -23,9 +23,7 @@
 
 bool ServerInstance::prepareServerSoftware()
 {
-    if (m_status == ServerStatus::Downloading || m_status == ServerStatus::Running
-        || m_status == ServerStatus::Starting || m_status == ServerStatus::Stopping
-        || m_serverPackImportInProgress) {
+    if (isBusy()) {
         return false;
     }
     if (hasLaunchTarget()) {
@@ -99,9 +97,7 @@ bool ServerInstance::beginServerDownload(const QString &targetVersion,
                                          const QString &javaPath, bool startAfterDownload,
                                          bool commitTargetVersion, bool commitTargetLoaderVersion)
 {
-    if (m_status == ServerStatus::Downloading || m_status == ServerStatus::Running
-        || m_status == ServerStatus::Starting || m_status == ServerStatus::Stopping
-        || m_serverPackImportInProgress) {
+    if (isBusy()) {
         return false;
     }
 

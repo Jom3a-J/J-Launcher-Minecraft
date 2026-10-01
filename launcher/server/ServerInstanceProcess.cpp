@@ -39,8 +39,7 @@ bool ServerInstance::start()
     if (!m_crashRestartStarting) {
         cancelPendingCrashRestart();
     }
-    if (m_status == ServerStatus::Running || m_status == ServerStatus::Starting ||
-        m_status == ServerStatus::Stopping || m_status == ServerStatus::Downloading) {
+    if (isActive()) {
         return false;
     }
     if (m_serverPackImportInProgress) {

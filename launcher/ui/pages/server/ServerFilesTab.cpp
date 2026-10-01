@@ -4,11 +4,9 @@
 
 #include <QDesktopServices>
 #include <QDir>
-#include <QEventLoop>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
-#include <QFutureWatcher>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QJsonDocument>
@@ -17,17 +15,16 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPair>
-#include <QProgressDialog>
 #include <QPushButton>
 #include <QSaveFile>
 #include <QTreeWidget>
 #include <QUrl>
 #include <QVBoxLayout>
-#include <QtConcurrent/QtConcurrentRun>
 
 #include "server/ServerFiles.h"
 #include "server/ServerInstance.h"
 #include "server/ServerManager.h"
+#include "ServerBusyDialog.h"
 #include "ServerPageStyle.h"
 
 using ServerPageStyle::launcherIcon;
@@ -245,27 +242,15 @@ void ServerFilesTab::importServerPack()
 
     // Large packs take a while to unpack and copy; do it off the UI thread so the window
     // keeps painting. The server refuses to start until finishServerPackImport.
-    QProgressDialog importProgress(tr("Importing server pack..."), QString(), 0, 0, this);
-    importProgress.setWindowTitle(tr("Import Server Pack"));
-    importProgress.setCancelButton(nullptr);
-    importProgress.setWindowModality(Qt::ApplicationModal);
-    importProgress.setMinimumDuration(0);
-    importProgress.show();
-
+    ServerBusyDialog importProgress(this, tr("Import Server Pack"), tr("Importing server pack..."));
     using ImportResult = QPair<bool, QString>;
-    QFutureWatcher<ImportResult> watcher;
-    QEventLoop waitLoop;
-    connect(&watcher, &QFutureWatcher<ImportResult>::finished, &waitLoop, &QEventLoop::quit);
-    watcher.setFuture(QtConcurrent::run([serverDirectory = server->serverDirectory(), archive]() {
-        QString importError;
-        const bool imported =
-            ServerInstance::importServerPackFiles(serverDirectory, archive, &importError);
-        return ImportResult(imported, importError);
-    }));
-    if (!watcher.isFinished()) {
-        waitLoop.exec();
-    }
-    const ImportResult imported = watcher.result();
+    const ImportResult imported =
+        importProgress.run([serverDirectory = server->serverDirectory(), archive]() {
+            QString importError;
+            const bool imported =
+                ServerInstance::importServerPackFiles(serverDirectory, archive, &importError);
+            return ImportResult(imported, importError);
+        });
     server->finishServerPackImport(imported.first);
     importProgress.close();
     if (!imported.first) {
