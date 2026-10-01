@@ -107,6 +107,54 @@ class ServerManagementTest : public QObject {
         QVERIFY(QFileInfo::exists(QDir(restored->serverDirectory()).filePath("marker.txt")));
     }
 
+    void keepsRecordsOnlyWhileAServerCanComeBack()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QString records = QDir(temporaryRoot.path()).filePath("server-records");
+        const auto recordFile = [&records](const QString& id) {
+            return QDir(records).filePath(id + QStringLiteral(".json"));
+        };
+
+        QString keptId;
+        {
+            ServerManager manager(temporaryRoot.path());
+            const auto kept = manager.createServer("Kept server", "1.21.8");
+            const auto gone = manager.createServer("Permanently deleted", "1.21.8");
+            QVERIFY(kept && gone);
+            keptId = kept->id();
+            QVERIFY(manager.dataStore().setValue(keptId, ServerDataGroup::Automation, "enabled", true));
+            QVERIFY(manager.dataStore().setValue(gone->id(), ServerDataGroup::Automation, "enabled", true));
+
+            // Deleting for good removes the records with the server.
+            const QString goneId = gone->id();
+            QVERIFY(manager.deleteServerPermanently(goneId));
+            QVERIFY(!QFileInfo::exists(recordFile(goneId)));
+
+            // Records of a server that was deleted earlier and can no longer be undone.
+            QVERIFY(manager.dataStore().setValue("server-from-an-earlier-session",
+                                                 ServerDataGroup::Automation, "enabled", true));
+            QVERIFY(manager.save());
+        }
+        QVERIFY(QFileInfo::exists(recordFile("server-from-an-earlier-session")));
+
+        ServerManager reopened(temporaryRoot.path());
+        QVERIFY(reopened.load());
+        QVERIFY(!QFileInfo::exists(recordFile("server-from-an-earlier-session")));
+        QVERIFY(QFileInfo::exists(recordFile(keptId)));
+        QVERIFY(reopened.dataStore().value(keptId, ServerDataGroup::Automation, "enabled").toBool());
+
+        // A server in the Recycle Bin keeps its records while Undo Delete can still restore it.
+        if (trashIsUnavailable(temporaryRoot.path())) {
+            QSKIP("This environment has no supported desktop trash service.");
+        }
+        QVERIFY(reopened.deleteServer(keptId));
+        QVERIFY(reopened.load());
+        QVERIFY(QFileInfo::exists(recordFile(keptId)));
+        QVERIFY(reopened.restoreLastDeletedServer());
+        QVERIFY(reopened.dataStore().value(keptId, ServerDataGroup::Automation, "enabled").toBool());
+    }
+
     void permanentlyDeletesManagedServer()
     {
         QTemporaryDir temporaryRoot;

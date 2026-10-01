@@ -19,6 +19,7 @@
 #include "ServerDownloader.h"
 #include "ServerPackImportTransaction.h"
 #include "ServerProperties.h"
+#include "FileSystem.h"
 #include <QFile>
 #include <QDir>
 #include <QDirIterator>
@@ -250,6 +251,48 @@ bool ServerInstance::invalidateContentCaches(QString *error) const
     return true;
 }
 
+bool ServerInstance::removeContentFile(const QString &path, QString *error, QString *pathInTrash)
+{
+    const ServerContentType type = contentType();
+    const QString contentName = type == ServerContentType::Plugin ? tr("plugin") : tr("mod");
+    if (isActive()) {
+        if (error) {
+            *error = tr("Stop the server before removing %1 files.").arg(contentName);
+        }
+        return false;
+    }
+    if (m_serverPackImportInProgress) {
+        if (error) {
+            *error = tr("Wait for the server pack import to finish before removing %1 files.").arg(contentName);
+        }
+        return false;
+    }
+    const QFileInfo file(path);
+    const QString folder = QDir::cleanPath(QFileInfo(contentDirectory()).absoluteFilePath());
+    if (type == ServerContentType::None || !file.isFile()
+        || QDir::cleanPath(file.absolutePath()).compare(folder, Qt::CaseInsensitive) != 0) {
+        if (error) {
+            *error = tr("'%1' is not one of this server's %2 files.").arg(file.fileName(), contentName);
+        }
+        return false;
+    }
+    if (!invalidateContentCaches(error)) {
+        return false;
+    }
+    // Moved to the Recycle Bin rather than deleted, so a mistaken removal can be undone.
+    QString trashed;
+    if (!FS::trash(file.absoluteFilePath(), &trashed)) {
+        if (error) {
+            *error = tr("'%1' could not be moved to the Recycle Bin, so it was kept.").arg(file.fileName());
+        }
+        return false;
+    }
+    if (pathInTrash) {
+        *pathInTrash = trashed;
+    }
+    return true;
+}
+
 bool ServerInstance::addContentFiles(const QStringList &paths, QString *error)
 {
     const ServerContentType type = contentType();
@@ -263,6 +306,12 @@ bool ServerInstance::addContentFiles(const QStringList &paths, QString *error)
     if (isActive()) {
         if (error) {
             *error = tr("Stop the server before adding %1 files.").arg(contentName);
+        }
+        return false;
+    }
+    if (m_serverPackImportInProgress) {
+        if (error) {
+            *error = tr("Wait for the server pack import to finish before adding %1 files.").arg(contentName);
         }
         return false;
     }

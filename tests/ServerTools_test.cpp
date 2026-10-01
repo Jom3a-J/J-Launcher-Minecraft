@@ -10,6 +10,8 @@
 #include <QtTest>
 
 #include <archive/ArchiveWriter.h>
+#include <java/JavaRuntimeInstallTask.h>
+#include <tasks/Task.h>
 #include <server/ServerDiagnostics.h>
 #include <server/ServerDownloaderShared.h>
 #include <server/ServerFiles.h>
@@ -17,6 +19,15 @@
 #include <server/ServerProcessStats.h>
 
 namespace {
+/// A task that stays running until finish() is called, standing in for a Java download.
+class IdleTask : public Task {
+public:
+    void finish() { emitSucceeded(); }
+
+protected:
+    void executeTask() override {}
+};
+
 bool writeFile(const QString& path, const QByteArray& contents)
 {
     QDir().mkpath(QFileInfo(path).dir().absolutePath());
@@ -155,6 +166,35 @@ private slots:
         QVERIFY(ServerDownloaderDetail::fileMatchesSha1(root.filePath("empty.bin"), valid.toUpper()));
         QVERIFY(!ServerDownloaderDetail::fileMatchesSha1(root.filePath("empty.bin"), QByteArray()));
         QVERIFY(!ServerDownloaderDetail::fileMatchesSha1(root.filePath("missing.bin"), valid));
+    }
+
+    void onlyOneTaskDownloadsIntoAJavaRuntimeFolder()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        const QString folder = root.filePath("java-runtime-gamma");
+        const QString sameFolderOtherSpelling = QDir::toNativeSeparators(folder).toUpper() + "/";
+        IdleTask server;
+        IdleTask game;
+        QVERIFY(!Java::runtimeInstallInProgress(folder));
+
+        server.start();
+        QVERIFY(Java::claimRuntimeDirectory(folder, &server));
+        QCOMPARE(Java::runtimeInstallInProgress(sameFolderOtherSpelling), &server);
+        // A second downloader must wait; the owner may claim again.
+        QVERIFY(!Java::claimRuntimeDirectory(sameFolderOtherSpelling, &game));
+        QVERIFY(Java::claimRuntimeDirectory(folder, &server));
+        Java::releaseRuntimeDirectory(folder, &game);
+        QCOMPARE(Java::runtimeInstallInProgress(folder), &server);
+
+        // A finished owner no longer blocks anyone, even before it releases its claim.
+        server.finish();
+        QVERIFY(!Java::runtimeInstallInProgress(folder));
+        game.start();
+        QVERIFY(Java::claimRuntimeDirectory(folder, &game));
+        Java::releaseRuntimeDirectory(folder, &game);
+        QVERIFY(!Java::runtimeInstallInProgress(folder));
+        game.finish();
     }
 
     void readsTheLoadOfARunningProcess()

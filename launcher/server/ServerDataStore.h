@@ -59,6 +59,11 @@ public:
      */
     bool importLegacySettings(const QString &serverId);
 
+    /// Ids of the servers that have a records file.
+    QStringList serverIds() const;
+    /// Deletes a server's records file, for a server that is gone for good.
+    bool removeServer(const QString &serverId);
+
 private:
     QJsonObject &document(const QString &serverId) const;
     bool save(const QString &serverId) const;

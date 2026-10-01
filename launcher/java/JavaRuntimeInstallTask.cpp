@@ -24,12 +24,13 @@ namespace Java {
 namespace {
 /*! Runtime folders currently being downloaded, keyed by normalized path.
  *
- *  Two installs of the same runtime (two servers that need Java 21 starting together) must not
- *  share a folder: the second would delete the first one's half-written download.
+ *  Two installs of the same runtime (two servers that need Java 21 starting together, or a
+ *  server and a game launch) must not share a folder: the second would delete the first one's
+ *  half-written download.
  */
-QHash<QString, QPointer<JavaRuntimeInstallTask>>& runtimeInstallsInProgress()
+QHash<QString, QPointer<Task>>& runtimeInstallsInProgress()
 {
-    static QHash<QString, QPointer<JavaRuntimeInstallTask>> installs;
+    static QHash<QString, QPointer<Task>> installs;
     return installs;
 }
 
@@ -38,6 +39,31 @@ QString runtimeKey(const QString& directory)
     return QDir::cleanPath(QDir(directory).absolutePath()).toLower();
 }
 }  // namespace
+
+Task* runtimeInstallInProgress(const QString& directory)
+{
+    Task* owner = runtimeInstallsInProgress().value(runtimeKey(directory));
+    return owner && owner->isRunning() ? owner : nullptr;
+}
+
+bool claimRuntimeDirectory(const QString& directory, Task* task)
+{
+    Task* owner = runtimeInstallInProgress(directory);
+    if (owner && owner != task) {
+        return false;
+    }
+    runtimeInstallsInProgress().insert(runtimeKey(directory), task);
+    return true;
+}
+
+void releaseRuntimeDirectory(const QString& directory, const Task* task)
+{
+    auto& installs = runtimeInstallsInProgress();
+    const QString key = runtimeKey(directory);
+    if (installs.value(key) == task) {
+        installs.remove(key);
+    }
+}
 
 JavaRuntimeInstallTask::JavaRuntimeInstallTask(int majorVersion)
     : Task(), m_majorVersion(majorVersion),
@@ -48,14 +74,11 @@ JavaRuntimeInstallTask::JavaRuntimeInstallTask(int majorVersion)
 
 void JavaRuntimeInstallTask::releaseRuntimeDirectory()
 {
-    if (m_claimedRuntimeKey.isEmpty()) {
+    if (m_claimedRuntimeDirectory.isEmpty()) {
         return;
     }
-    auto& installs = runtimeInstallsInProgress();
-    if (installs.value(m_claimedRuntimeKey) == this) {
-        installs.remove(m_claimedRuntimeKey);
-    }
-    m_claimedRuntimeKey.clear();
+    Java::releaseRuntimeDirectory(m_claimedRuntimeDirectory, this);
+    m_claimedRuntimeDirectory.clear();
 }
 
 bool JavaRuntimeInstallTask::isUsableJava(const QString &javaPath)
@@ -198,21 +221,19 @@ void JavaRuntimeInstallTask::installRuntime(
         return;
     }
 
-    const QString key = runtimeKey(m_runtimeDirectory);
-    const QPointer<JavaRuntimeInstallTask> owner = runtimeInstallsInProgress().value(key);
-    if (owner && owner != this && owner->isRunning()) {
+    if (!claimRuntimeDirectory(m_runtimeDirectory, this)) {
         // Another task is already downloading this exact runtime. Deleting its folder would break
         // both installs, so wait for it and then use whatever it produced.
+        Task *owner = runtimeInstallInProgress(m_runtimeDirectory);
         setStatus(tr("Waiting for another Java %1 download to finish...").arg(m_majorVersion));
         m_currentTask.reset();
         m_waitingForOtherInstall = true;
         emit abortStatusChanged(true);
-        connect(owner.data(), &Task::finished, this, &JavaRuntimeInstallTask::finishAfterOtherInstall);
-        connect(owner.data(), &QObject::destroyed, this, &JavaRuntimeInstallTask::finishAfterOtherInstall);
+        connect(owner, &Task::finished, this, &JavaRuntimeInstallTask::finishAfterOtherInstall);
+        connect(owner, &QObject::destroyed, this, &JavaRuntimeInstallTask::finishAfterOtherInstall);
         return;
     }
-    runtimeInstallsInProgress().insert(key, this);
-    m_claimedRuntimeKey = key;
+    m_claimedRuntimeDirectory = m_runtimeDirectory;
 
     if (QFileInfo::exists(m_runtimeDirectory)) {
         FS::deletePath(m_runtimeDirectory);

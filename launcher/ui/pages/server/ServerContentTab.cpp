@@ -476,19 +476,17 @@ void ServerContentTab::removeSelectedContent()
     const QString path = item->data(0, Qt::UserRole).toString();
     if (path.isEmpty()) return;
     if (QMessageBox::question(this, tr("Remove Installed Content"),
-                              tr("Remove %1 from this server?").arg(QFileInfo(path).fileName()),
+                              tr("Remove %1 from this server? It will be moved to the Recycle Bin.")
+                                  .arg(QFileInfo(path).fileName()),
                               QMessageBox::Yes | QMessageBox::No) != QMessageBox::Yes) {
         return;
     }
     const auto server = m_serverManager
         ? m_serverManager->getServer(m_serverId) : nullptr;
-    QString cacheError;
-    if (server && !server->invalidateContentCaches(&cacheError)) {
-        QMessageBox::warning(this, tr("Could Not Remove Content"), cacheError);
-        return;
-    }
-    if (!QFile::remove(path)) {
-        QMessageBox::warning(this, tr("Could Not Remove Content"), tr("The selected file could not be removed."));
+    QString error;
+    if (!server || !server->removeContentFile(path, &error)) {
+        QMessageBox::warning(this, tr("Could Not Remove Content"),
+                             error.isEmpty() ? tr("The selected file could not be removed.") : error);
         return;
     }
     refresh();

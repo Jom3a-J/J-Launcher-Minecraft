@@ -144,6 +144,23 @@ bool ServerDataStore::addToList(const QString &serverId, const QString &group, c
     return setValue(serverId, group, key, entries);
 }
 
+QStringList ServerDataStore::serverIds() const
+{
+    QStringList ids;
+    const QStringList files = QDir(m_directory).entryList({ QStringLiteral("*.json") }, QDir::Files);
+    for (const QString &file : files) {
+        ids.append(QFileInfo(file).completeBaseName());
+    }
+    return ids;
+}
+
+bool ServerDataStore::removeServer(const QString &serverId)
+{
+    m_documents.remove(serverId);
+    const QString path = filePath(serverId);
+    return !path.isEmpty() && (!QFileInfo::exists(path) || QFile::remove(path));
+}
+
 bool ServerDataStore::importLegacySettings(const QString &serverId)
 {
     const QString path = filePath(serverId);

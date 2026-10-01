@@ -170,6 +170,10 @@ public:
     ServerContentType contentType() const;
     static ServerContentType contentTypeForLoader(const QString &loaderType);
     bool addContentFiles(const QStringList &paths, QString *error = nullptr);
+    /// Moves one of the server's mod or plugin files to the Recycle Bin. The server must be
+    /// stopped. pathInTrash receives where the file went, when the system reports it.
+    bool removeContentFile(const QString &path, QString *error = nullptr,
+                           QString *pathInTrash = nullptr);
     bool invalidateContentCaches(QString *error = nullptr) const;
     void syncPortFromServerProperties();
     bool cancelPendingCrashRestart();

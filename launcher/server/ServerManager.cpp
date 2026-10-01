@@ -571,6 +571,8 @@ bool ServerManager::deleteServerPermanently(const QString &id)
         return false;
     }
 
+    // The server is gone for good, so its records are too.
+    m_dataStore.removeServer(id);
     emit serverRemoved(id);
     return true;
 }
@@ -885,14 +887,30 @@ bool ServerManager::load()
 
     m_servers.clear();
 
+    QSet<QString> listedIds;
     for (const auto &value : serversArray) {
         QJsonObject serverJson = value.toObject();
+        listedIds.insert(serverJson.value(QStringLiteral("id")).toString());
         auto server = ServerInstance::fromJson(serverJson, m_dataDir);
         if (server) {
             m_servers[server->id()] = server;
             attachServerRecording(server);
             // Records written by versions that kept them in the Windows registry.
             m_dataStore.importLegacySettings(server->id());
+        }
+    }
+
+    // A server deleted to the Recycle Bin keeps its records so Undo Delete can bring them back.
+    // Undo only lasts for the session that deleted it, so once a server is neither listed nor
+    // waiting to be undone, its records are unreachable. Listed servers that failed to load
+    // keep theirs.
+    QSet<QString> undoableIds;
+    for (const TrashHistoryItem &item : m_trashHistory) {
+        undoableIds.insert(item.id);
+    }
+    for (const QString &id : m_dataStore.serverIds()) {
+        if (!listedIds.contains(id) && !undoableIds.contains(id)) {
+            m_dataStore.removeServer(id);
         }
     }
 

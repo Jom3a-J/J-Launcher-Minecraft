@@ -391,6 +391,13 @@ class ServerContentTest : public QObject {
         QVERIFY(error.contains("Stop the server"));
         QVERIFY(!QFileInfo::exists(QDir(server.modsDirectory()).filePath("example.jar")));
 
+        const QString installed = QDir(server.modsDirectory()).filePath("installed.jar");
+        QVERIFY(writeFile(installed, "mod"));
+        error.clear();
+        QVERIFY(!server.removeContentFile(installed, &error));
+        QVERIFY(error.contains("Stop the server"));
+        QVERIFY(QFileInfo::exists(installed));
+
         const QString pack = temporaryRoot.filePath("active-pack.zip");
         QVERIFY(writeArchive(pack, { { "mods/from-pack.jar", "blocked" } }));
         error.clear();
@@ -400,6 +407,45 @@ class ServerContentTest : public QObject {
 
         QVERIFY(server.stop());
         QTRY_COMPARE_WITH_TIMEOUT(server.status(), ServerStatus::Stopped, 5000);
+    }
+
+    void removesContentToTheRecycleBin()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        ServerInstance server("remove-content", "Remove content");
+        server.setServerDirectory(temporaryRoot.filePath("server"));
+        server.setLoaderType("fabric");
+        const QString installed = QDir(server.modsDirectory()).filePath("remove-me.jar");
+        QVERIFY(writeFile(installed, "mod to remove"));
+
+        // Only the server's own content files can be removed.
+        const QString elsewhere = temporaryRoot.filePath("source/remove-me.jar");
+        QVERIFY(writeFile(elsewhere, "not the server's"));
+        QString error;
+        QVERIFY(!server.removeContentFile(elsewhere, &error));
+        QVERIFY(error.contains("not one of this server's"));
+        QVERIFY(QFileInfo::exists(elsewhere));
+
+        QString pathInTrash;
+        error.clear();
+        if (!server.removeContentFile(installed, &error, &pathInTrash)) {
+            QVERIFY(error.contains("Recycle Bin"));
+            QVERIFY(QFileInfo::exists(installed));
+            QSKIP("This system has no Recycle Bin, so the file was kept as intended.");
+        }
+        QVERIFY(!QFileInfo::exists(installed));
+#ifdef Q_OS_WIN
+        // Windows reports where the file went; a plain delete would leave this empty.
+        QVERIFY(!pathInTrash.isEmpty());
+        QVERIFY(QFileInfo::exists(pathInTrash));
+#endif
+        // Take the file back out of the Recycle Bin so the test leaves nothing behind there.
+        if (!pathInTrash.isEmpty()) {
+            const QString restored = temporaryRoot.filePath("restored.jar");
+            QVERIFY(QFile::rename(pathInTrash, restored));
+            QCOMPARE(readFile(restored), QByteArray("mod to remove"));
+        }
     }
 
     void importsOnlyAllowedServerPackPaths()
@@ -494,6 +540,7 @@ class ServerContentTest : public QObject {
 
         ServerInstance server("import-guard-test", "Import guard test");
         server.setServerDirectory(temporaryRoot.filePath("server"));
+        server.setLoaderType("fabric");
         QVERIFY(QDir().mkpath(server.serverDirectory()));
 
         QString error;
@@ -502,6 +549,19 @@ class ServerContentTest : public QObject {
         QVERIFY(!server.start());
         QVERIFY(!server.prepareServerSoftware());
         QCOMPARE(server.status(), ServerStatus::Stopped);
+
+        // Mods can't be added or removed while the import is writing the same folders.
+        const QString source = temporaryRoot.filePath("source/added.jar");
+        QVERIFY(writeFile(source, "mod"));
+        error.clear();
+        QVERIFY(!server.addContentFiles({ source }, &error));
+        QVERIFY2(error.contains("server pack import"), qPrintable(error));
+        const QString existing = QDir(server.modsDirectory()).filePath("existing.jar");
+        QVERIFY(writeFile(existing, "mod"));
+        error.clear();
+        QVERIFY(!server.removeContentFile(existing, &error));
+        QVERIFY2(error.contains("server pack import"), qPrintable(error));
+        QVERIFY(QFileInfo::exists(existing));
 
         QVERIFY(ServerInstance::importServerPackFiles(server.serverDirectory(), archivePath, &error));
         server.finishServerPackImport(true);

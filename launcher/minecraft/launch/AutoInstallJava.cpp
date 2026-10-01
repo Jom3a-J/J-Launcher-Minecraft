@@ -116,6 +116,10 @@ void AutoInstallJava::executeTask()
         setJavaPathFromPartial();
         return;
     }
+    // A server install may be downloading this runtime right now; it is incomplete only until then.
+    if (waitForOtherRuntimeInstall(javaDir.absoluteFilePath(wantedJavaName))) {
+        return;
+    }
     if (QFileInfo::exists(wantedJavaPath)) {
         emit logLine(tr("The installed managed Java runtime is incomplete. Downloading a fresh copy."), MessageLevel::Warning);
         FS::deletePath(javaDir.absoluteFilePath(wantedJavaName));
@@ -170,6 +174,11 @@ void AutoInstallJava::downloadJava(Meta::Version::Ptr version, QString javaName)
         if (java->runtimeOS == m_supported_arch && java->name() == javaName) {
             QDir javaDir(APPLICATION->javaPath());
             auto final_path = javaDir.absoluteFilePath(java->m_name);
+            if (!Java::claimRuntimeDirectory(final_path, this)) {
+                waitForOtherRuntimeInstall(final_path);
+                return;
+            }
+            connect(this, &Task::finished, this, [this, final_path] { Java::releaseRuntimeDirectory(final_path, this); });
             auto deletePath = [final_path] { FS::deletePath(final_path); };
             switch (java->downloadType) {
                 case Java::DownloadType::Manifest:
@@ -244,6 +253,23 @@ void AutoInstallJava::tryNextMajorJava()
         }
     }
 }
+bool AutoInstallJava::waitForOtherRuntimeInstall(const QString& directory)
+{
+    Task* owner = Java::runtimeInstallInProgress(directory);
+    if (!owner || owner == this) {
+        return false;
+    }
+    emit logLine(tr("Another download of this Java runtime is in progress. Waiting for it to finish."), MessageLevel::Launcher);
+    auto finish = [this] {
+        if (isRunning()) {
+            setJavaPathFromPartial();
+        }
+    };
+    connect(owner, &Task::finished, this, finish);
+    connect(owner, &QObject::destroyed, this, finish);
+    return true;
+}
+
 bool AutoInstallJava::abort()
 {
     if (m_current_task && m_current_task->canAbort()) {
