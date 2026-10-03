@@ -14,6 +14,7 @@
  */
 
 #include "ServerDownloader.h"
+#include "ServerDownloaderProvider.h"
 #include "ServerDownloaderShared.h"
 #include "BuildConfig.h"
 #include <QCoreApplication>
@@ -22,22 +23,19 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QUrl>
-#include <QProcess>
-#include <QDirIterator>
 #include <QRegularExpression>
 #include "net/ChecksumValidator.h"
 #include "net/Download.h"
 #include "net/PartFile.h"
 #include "net/SegmentedDownload.h"
-#include "archive/ArchiveReader.h"
-#include <algorithm>
 
 #if defined(LAUNCHER_APPLICATION)
 #include "Application.h"
 #include "settings/SettingsObject.h"
 #endif
 
-namespace {
+namespace ServerDownloaderDetail {
+
 QString platformLoaderScriptName()
 {
 #ifdef Q_OS_WIN
@@ -55,9 +53,6 @@ QString platformLoaderArgumentsFileName()
     return QStringLiteral("unix_args.txt");
 #endif
 }
-}  // namespace
-
-namespace ServerDownloaderDetail {
 
 bool usesLegacyNeoForgeCoordinates(const QString &minecraftVersion,
                                    const QString &loaderVersion)
@@ -189,6 +184,15 @@ QNetworkRequest ServerDownloader::createRequest(const QUrl &url)
     return request;
 }
 
+void ServerDownloader::sendRequest(const QUrl &url)
+{
+    m_fileDownload = FileDownload::None;
+    m_currentReply = m_network->get(createRequest(url));
+    connect(m_currentReply, &QNetworkReply::finished, this, [this]() {
+        handleReply(m_currentReply);
+    });
+}
+
 void ServerDownloader::startDownload(const QString &version, const QString &type, const QString &destinationDir,
                                      const QString &javaPath, const QString &loaderVersion)
 {
@@ -200,15 +204,6 @@ void ServerDownloader::startDownload(const QString &version, const QString &type
     m_javaPath = javaPath;
     m_loaderVersion = loaderVersion.trimmed();
     m_resolvedLoaderVersion.clear();
-    m_pendingForgeVersion.clear();
-    m_pendingForgeMavenVersion.clear();
-    m_fabricJarPendingValidation = false;
-    m_pendingInstallerPath.clear();
-    m_pendingInstallerUrl.clear();
-    m_pendingPurpurBuild.clear();
-    m_legacyForgeServerJarPath.clear();
-    m_fetchingLegacyForgeServerJar = false;
-    m_downloadingLegacyForgeServerJar = false;
     m_pendingInstallerLoader.clear();
     m_pendingInstallerPath.clear();
     m_prefetchLibraryPaths.clear();
@@ -218,29 +213,14 @@ void ServerDownloader::startDownload(const QString &version, const QString &type
 
     QDir().mkpath(m_destinationDir);
 
-    if (m_type == "vanilla") {
-        fetchVanillaManifest();
-    } else if (m_type == "paper") {
-        fetchPaperBuilds();
-    } else if (m_type == "fabric") {
-        fetchFabricInstaller();
-    } else if (m_type == "purpur") {
-        fetchPurpurBuilds();
-    } else if (m_type == "forge") {
-        if (m_loaderVersion.isEmpty()) {
-            fetchForgeVersions();
-        } else {
-            downloadForgeInstaller(m_loaderVersion);
-        }
-    } else if (m_type == "neoforge") {
-        if (m_loaderVersion.isEmpty()) {
-            fetchNeoForgeVersions();
-        } else {
-            downloadNeoForgeInstaller(m_loaderVersion);
-        }
-    } else {
+    m_provider = createServerDownloaderProvider(m_type, *this);
+    if (!m_provider) {
         finishDownload(false, tr("Unsupported server type: %1").arg(type));
+        return;
     }
+    m_activity = Activity::Installing;
+    m_fileDownload = FileDownload::None;
+    m_provider->start();
 }
 
 void ServerDownloader::finishDownload(bool success, const QString &errorMessage)
@@ -248,7 +228,8 @@ void ServerDownloader::finishDownload(bool success, const QString &errorMessage)
     if (m_finishedEmitted)
         return;
     m_finishedEmitted = true;
-    m_step = Step::Idle;
+    m_activity = Activity::Idle;
+    m_fileDownload = FileDownload::None;
     emit finished(success, errorMessage);
 }
 
@@ -264,37 +245,15 @@ void ServerDownloader::fetchAvailableVersions(const QString &type)
         m_versionsType = QStringLiteral("vanilla");
     }
 
-    QUrl url;
-    if (m_versionsType == "vanilla") {
-        m_step = Step::FetchingVersionManifest;
-        url = m_endpoints.vanillaManifest;
-    } else if (m_versionsType == "paper") {
-        m_step = Step::FetchingPaperVersions;
-        url = m_endpoints.paperApiBase.resolved(QUrl("projects/paper"));
-    } else if (m_versionsType == "fabric") {
-        m_step = Step::FetchingFabricGameVersions;
-        url = m_endpoints.fabricApiBase.resolved(QUrl("versions/game"));
-    } else if (m_versionsType == "purpur") {
-        m_step = Step::FetchingPurpurVersions;
-        url = m_endpoints.purpurApiBase.resolved(QUrl("purpur"));
-    } else if (m_versionsType == "forge") {
-        m_step = Step::FetchingForgePromotions;
-        url = m_endpoints.forgeMavenBase.resolved(
-            QUrl(QStringLiteral("net/minecraftforge/forge/maven-metadata.xml")));
-    } else if (m_versionsType == "neoforge") {
-        m_step = Step::FetchingNeoForgeGameVersions;
-        url = m_endpoints.neoForgeVersions;
-    } else {
+    const auto provider = createServerDownloaderProvider(m_versionsType, *this);
+    if (!provider) {
         emit versionsFailed(tr("Unsupported server type: %1").arg(type));
         return;
     }
 
+    m_activity = Activity::ListingVersions;
     emit statusMessage(tr("Fetching available %1 versions...").arg(type));
-    QNetworkRequest request = createRequest(url);
-    m_currentReply = m_network->get(request);
-    connect(m_currentReply, &QNetworkReply::finished, this, [this]() {
-        handleReply(m_currentReply);
-    });
+    sendRequest(provider->versionListUrl());
 }
 
 void ServerDownloader::fetchAvailableBuilds(const QString &version, const QString &type)
@@ -307,54 +266,31 @@ void ServerDownloader::fetchAvailableBuilds(const QString &version, const QStrin
         return;
     }
 
-    QUrl url;
-    if (m_buildsType == "paper") {
-        m_step = Step::FetchingPaperBuildList;
-        url = m_endpoints.paperApiBase.resolved(
-            QUrl(QString("projects/paper/versions/%1/builds").arg(m_buildsVersion)));
-    } else if (m_buildsType == "fabric") {
-        m_step = Step::FetchingFabricBuildList;
-        url = m_endpoints.fabricApiBase.resolved(
-            QUrl(QString("versions/loader/%1").arg(m_buildsVersion)));
-    } else if (m_buildsType == "purpur") {
-        m_step = Step::FetchingPurpurBuildList;
-        url = m_endpoints.purpurApiBase.resolved(
-            QUrl(QString("purpur/%1").arg(m_buildsVersion)));
-    } else if (m_buildsType == "forge") {
-        m_step = Step::FetchingForgeBuildList;
-        url = m_endpoints.forgeMavenBase.resolved(
-            QUrl(QStringLiteral("net/minecraftforge/forge/maven-metadata.xml")));
-    } else if (m_buildsType == "neoforge") {
-        m_step = Step::FetchingNeoForgeBuildList;
-        url = usesLegacyNeoForgeCoordinates(m_buildsVersion, QString())
-            ? m_endpoints.neoForgeMavenBase.resolved(
-                  QUrl(QStringLiteral("net/neoforged/forge/maven-metadata.xml")))
-            : m_endpoints.neoForgeVersions;
-    } else if (m_buildsType == "vanilla") {
-        emit buildsReady({});
-        return;
-    } else {
+    const auto provider = createServerDownloaderProvider(m_buildsType, *this);
+    if (!provider) {
         emit buildsFailed(tr("Unsupported server type: %1").arg(type));
         return;
     }
+    const QUrl url = provider->buildListUrl(m_buildsVersion);
+    if (url.isEmpty()) {
+        emit buildsReady({});
+        return;
+    }
 
+    m_activity = Activity::ListingBuilds;
     emit statusMessage(tr("Fetching %1 builds for Minecraft %2...").arg(type, m_buildsVersion));
-    m_currentReply = m_network->get(createRequest(url));
-    connect(m_currentReply, &QNetworkReply::finished, this, [this]() {
-        handleReply(m_currentReply);
-    });
+    sendRequest(url);
 }
 
 void ServerDownloader::cancel()
 {
-    if (m_step == Step::Idle) {
+    if (m_activity == Activity::Idle) {
         return;
     }
     const QString cancelledServerJarPath =
-        (m_step == Step::DownloadingJar || m_step == Step::DownloadingLegacyForgeServerJar)
+        (m_fileDownload == FileDownload::ServerJar || m_fileDownload == FileDownload::LargeFile)
         ? m_fileDownloadPath : QString();
-    const bool versionRequest = isVersionListStep();
-    const bool buildRequest = isBuildListStep();
+    const Activity cancelled = m_activity;
     cleanUp();
     m_pendingInstallerLoader.clear();
     m_pendingInstallerPath.clear();
@@ -362,10 +298,10 @@ void ServerDownloader::cancel()
     m_prefetchLibraryHashes.clear();
     if (!cancelledServerJarPath.isEmpty())
         QFile::remove(Net::PartFile::partPathFor(cancelledServerJarPath));
-    m_step = Step::Idle;
-    if (versionRequest) {
+    m_activity = Activity::Idle;
+    if (cancelled == Activity::ListingVersions) {
         emit versionsFailed(tr("Version request cancelled."));
-    } else if (buildRequest) {
+    } else if (cancelled == Activity::ListingBuilds) {
         emit buildsFailed(tr("Build request cancelled."));
     } else {
         finishDownload(false, tr("Download cancelled."));
@@ -382,44 +318,6 @@ void ServerDownloader::cleanUp()
         m_currentReply = nullptr;
     }
     retireFileDownloadJob(true);
-}
-
-void ServerDownloader::stopInstallerProcess()
-{
-    if (!m_installerProcess)
-        return;
-
-    QProcess *installer = m_installerProcess;
-    m_installerProcess = nullptr;
-    disconnect(installer, nullptr, this, nullptr);
-    if (installer->state() != QProcess::NotRunning) {
-        installer->kill();
-        installer->waitForFinished(-1);
-    }
-    installer->deleteLater();
-
-    if (!m_activeInstallerPath.isEmpty()) {
-        QFile::remove(m_activeInstallerPath);
-        QFile::remove(m_activeInstallerPath + QStringLiteral(".log"));
-        m_activeInstallerPath.clear();
-    }
-}
-
-bool ServerDownloader::writeLoaderInstallIncompleteMarker(QString *errorMessage) const
-{
-    QFile marker(serverLoaderInstallIncompleteMarkerPath(m_destinationDir));
-    if (!marker.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        *errorMessage = tr("Could not mark the loader installation as incomplete: %1")
-                            .arg(marker.errorString());
-        return false;
-    }
-    if (marker.write(QByteArrayLiteral("J Launcher loader installation in progress\n")) < 0
-        || !marker.flush()) {
-        *errorMessage = tr("Could not write the incomplete loader installation marker: %1")
-                            .arg(marker.errorString());
-        return false;
-    }
-    return true;
 }
 
 void ServerDownloader::retireFileDownloadJob(bool abort)
@@ -447,28 +345,8 @@ void ServerDownloader::handleReply(QNetworkReply *reply)
         QString errorStr = reply->errorString();
         const int statusCode = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         reply->deleteLater();
-        if (m_step == Step::ResolvingForgeInstallerMetadata) {
-            prepareForgeInstaller(m_pendingForgeVersion, QString());
-            return;
-        }
-        if (m_step == Step::FetchingForgeInstallerChecksum
-            || m_step == Step::FetchingNeoForgeInstallerChecksum) {
-            if (statusCode == 404) {
-                emit statusMessage(tr("No checksum is published for this installer; continuing without verification."));
-                const bool forge = m_step == Step::FetchingForgeInstallerChecksum;
-                m_step = forge ? Step::DownloadingForgeInstaller : Step::DownloadingNeoForgeInstaller;
-                startFileDownload(m_pendingInstallerUrl, m_pendingInstallerPath, {},
-                                  QCryptographicHash::Sha1, false);
-                return;
-            }
-            cleanUp();
-            finishDownload(false, tr("Failed to fetch the installer checksum: %1").arg(errorStr));
-            return;
-        }
-        if (m_step == Step::FetchingPurpurBuildInfo) {
-            cleanUp();
-            finishDownload(false, tr("Failed to fetch the Purpur checksum for build %1: %2")
-                                     .arg(m_pendingPurpurBuild, errorStr));
+        if (m_activity == Activity::Installing && m_provider
+            && m_provider->onRequestFailed(statusCode, errorStr)) {
             return;
         }
         cleanUp();
@@ -479,80 +357,34 @@ void ServerDownloader::handleReply(QNetworkReply *reply)
     QByteArray responseData = reply->readAll();
     reply->deleteLater();
 
-    switch (m_step) {
-        case Step::FetchingVersionManifest:
-        case Step::FetchingPaperVersions:
-        case Step::FetchingFabricGameVersions:
-        case Step::FetchingPurpurVersions:
-        case Step::FetchingForgePromotions:
-        case Step::FetchingNeoForgeGameVersions:
+    switch (m_activity) {
+        case Activity::ListingVersions:
             onVersionManifestFetched(responseData);
             break;
-        case Step::FetchingPaperBuildList:
-        case Step::FetchingFabricBuildList:
-        case Step::FetchingPurpurBuildList:
-        case Step::FetchingForgeBuildList:
-        case Step::FetchingNeoForgeBuildList:
+        case Activity::ListingBuilds:
             onBuildManifestFetched(responseData);
             break;
-        case Step::FetchingVanillaManifest:
-            onVanillaManifestFetched(responseData);
+        case Activity::Installing:
+            if (m_provider)
+                m_provider->onReply(responseData);
             break;
-        case Step::FetchingVanillaVersionJson:
-            onVanillaVersionJsonFetched(responseData);
-            break;
-        case Step::FetchingPaperBuilds:
-            onPaperBuildsFetched(responseData);
-            break;
-        case Step::FetchingFabricInstallerList:
-            onFabricInstallerFetched(responseData);
-            break;
-        case Step::FetchingFabricLoaderList:
-            onFabricLoaderFetched(m_fabricInstallerVer, responseData);
-            break;
-        case Step::FetchingPurpurBuilds:
-            onPurpurBuildsFetched(responseData);
-            break;
-        case Step::FetchingPurpurBuildInfo:
-            onPurpurBuildInfoFetched(responseData);
-            break;
-        case Step::FetchingForgeVersions:
-            onForgeVersionsFetched(responseData);
-            break;
-        case Step::ResolvingForgeInstallerMetadata:
-            onForgeInstallerMetadataFetched(responseData);
-            break;
-        case Step::FetchingForgeInstallerChecksum:
-            onForgeInstallerChecksumFetched(responseData);
-            break;
-        case Step::FetchingNeoForgeVersions:
-            onNeoForgeVersionsFetched(responseData);
-            break;
-        case Step::FetchingNeoForgeInstallerChecksum:
-            onNeoForgeInstallerChecksumFetched(responseData);
-            break;
-        default:
+        case Activity::Idle:
             break;
     }
 }
 
-void ServerDownloader::downloadFile(const QString &url, const QString &outputPath,
-                                    const QByteArray &expectedHash,
-                                    QCryptographicHash::Algorithm hashAlgorithm)
+void ServerDownloader::downloadServerJar(const QUrl &url, const QByteArray &expectedHash,
+                                         QCryptographicHash::Algorithm hashAlgorithm)
 {
     cleanUp();
-    m_step = m_downloadingLegacyForgeServerJar
-        ? Step::DownloadingLegacyForgeServerJar : Step::DownloadingJar;
-    emit statusMessage(m_downloadingLegacyForgeServerJar
-                           ? tr("Downloading the vanilla server jar for the Forge installer...")
-                           : tr("Downloading server jar..."));
-    startFileDownload(QUrl(url), outputPath, expectedHash, hashAlgorithm, true);
+    emit statusMessage(tr("Downloading server jar..."));
+    startFileDownload(url, m_targetJarPath, expectedHash, hashAlgorithm, FileDownload::ServerJar);
 }
 
 void ServerDownloader::startFileDownload(const QUrl &url, const QString &outputPath,
                                          const QByteArray &expectedHash,
                                          QCryptographicHash::Algorithm hashAlgorithm,
-                                         bool mayBeLarge)
+                                         FileDownload kind)
 {
 #if defined(LAUNCHER_APPLICATION)
     if (auto *application = APPLICATION_DYN; application && application->network())
@@ -560,9 +392,11 @@ void ServerDownloader::startFileDownload(const QUrl &url, const QString &outputP
 #endif
     auto job = NetJob::Ptr(new NetJob(tr("Server file download"), m_downloadNetwork));
     job->setAskRetry(false);
+    m_fileDownload = kind;
     m_fileDownloadPath = outputPath;
 
-    if (mayBeLarge && (url.scheme() == QStringLiteral("http") || url.scheme() == QStringLiteral("https"))) {
+    const bool serverJar = kind == FileDownload::ServerJar || kind == FileDownload::LargeFile;
+    if (serverJar && (url.scheme() == QStringLiteral("http") || url.scheme() == QStringLiteral("https"))) {
         int segments = Net::SegmentedDownload::DefaultSegments;
 #if defined(LAUNCHER_APPLICATION)
         if (auto *application = APPLICATION_DYN)
@@ -582,8 +416,8 @@ void ServerDownloader::startFileDownload(const QUrl &url, const QString &outputP
         job->addNetAction(download);
     }
 
-    const int progressMaximum =
-        (m_step == Step::DownloadingJar || m_step == Step::DownloadingLegacyForgeServerJar) ? 100 : 50;
+    // A loader installer fills the first half of the bar; running it fills the rest.
+    const int progressMaximum = serverJar ? 100 : 50;
     connect(job.get(), &Task::progress, this, [this, progressMaximum](qint64 current, qint64 total) {
         if (total <= 0)
             return;
@@ -603,38 +437,21 @@ void ServerDownloader::startFileDownload(const QUrl &url, const QString &outputP
 void ServerDownloader::onFileDownloadSucceeded()
 {
     retireFileDownloadJob(false);
+    if (m_activity != Activity::Installing || !m_provider)
+        return;
 
-    switch (m_step) {
-        case Step::DownloadingLegacyForgeServerJar:
-            m_downloadingLegacyForgeServerJar = false;
-            beginForgeInstallerDownload(m_pendingForgeVersion, m_pendingForgeMavenVersion);
-            return;
-        case Step::DownloadingForgeInstaller:
-            emit progress(50);
-            onForgeInstallerDownloaded();
-            return;
-        case Step::DownloadingNeoForgeInstaller:
-            emit progress(50);
-            onNeoForgeInstallerDownloaded();
-            return;
-        case Step::DownloadingJar:
-            if (m_fabricJarPendingValidation) {
-                MMCZip::ArchiveReader archive(m_targetJarPath);
-                if (!archive.goToFile(QStringLiteral("META-INF/MANIFEST.MF"))) {
-                    QFile::remove(m_targetJarPath);
-                    m_fabricJarPendingValidation = false;
-                    finishDownload(false, tr("The downloaded Fabric server launcher is not a valid jar file."));
-                    return;
-                }
-                m_fabricJarPendingValidation = false;
-            }
-            emit statusMessage(tr("Download complete!"));
-            emit progress(100);
-            finishDownload(true);
-            return;
-        default:
-            return;
+    if (m_fileDownload != FileDownload::ServerJar) {
+        m_provider->onFileDownloaded();
+        return;
     }
+    QString error;
+    if (!m_provider->checkServerJar(&error)) {
+        finishDownload(false, error);
+        return;
+    }
+    emit statusMessage(tr("Download complete!"));
+    emit progress(100);
+    finishDownload(true);
 }
 
 void ServerDownloader::onFileDownloadFailed(const QString &reason)
@@ -652,127 +469,13 @@ void ServerDownloader::onFileDownloadFailed(const QString &reason)
     }
 }
 
-bool ServerDownloader::validateLoaderInstallation(const QString &loaderName,
-                                                   QString *errorMessage) const
-{
-    const QDir serverDir(m_destinationDir);
-    const QString normalizedLoader = loaderName.toLower();
-    QStringList rootJarPatterns{ normalizedLoader + QStringLiteral("-*.jar") };
-    if (normalizedLoader == QStringLiteral("forge")) {
-        rootJarPatterns << QStringLiteral("minecraftforge-*.jar");
-    } else if (normalizedLoader == QStringLiteral("neoforge")
-               && usesLegacyNeoForgeCoordinates(m_version,
-                                                 m_resolvedLoaderVersion)) {
-        rootJarPatterns << QStringLiteral("forge-*.jar");
-    }
-    const QStringList rootJars = serverDir.entryList(
-        rootJarPatterns, QDir::Files, QDir::Name);
-    const bool hasRootLauncher = std::any_of(
-        rootJars.cbegin(), rootJars.cend(), [&serverDir](const QString &fileName) {
-            return !fileName.contains(QStringLiteral("installer"), Qt::CaseInsensitive)
-                && QFileInfo(serverDir.filePath(fileName)).size() > 0;
-        });
-
-    const QString scriptName = platformLoaderScriptName();
-    const QString argumentsFileName = platformLoaderArgumentsFileName();
-    const QFileInfo script(serverDir.filePath(scriptName));
-    if (!script.isFile() && !hasRootLauncher) {
-        *errorMessage = tr("%1 installer completed without creating a runnable server.")
-                            .arg(loaderName);
-        return false;
-    }
-
-    // Forge 1.17+ does not normally create server.jar in the server root. It
-    // installs the Mojang server and loader artifacts below libraries/ and
-    // generates a run script that references a platform argument file.
-    if (script.isFile()) {
-        QString expectedArgumentsPath;
-        if (normalizedLoader == QStringLiteral("forge")
-            && !m_resolvedLoaderVersion.isEmpty()) {
-            expectedArgumentsPath = serverDir.filePath(
-                QStringLiteral("libraries/net/minecraftforge/forge/%1-%2/%3")
-                    .arg(m_version, m_resolvedLoaderVersion, argumentsFileName));
-        } else if (normalizedLoader == QStringLiteral("neoforge")
-                   && !m_resolvedLoaderVersion.isEmpty()) {
-            expectedArgumentsPath = usesLegacyNeoForgeCoordinates(
-                                        m_version, m_resolvedLoaderVersion)
-                ? serverDir.filePath(
-                      QStringLiteral("libraries/net/neoforged/forge/%1-%2/%3")
-                          .arg(m_version, m_resolvedLoaderVersion,
-                               argumentsFileName))
-                : serverDir.filePath(
-                      QStringLiteral("libraries/net/neoforged/neoforge/%1/%2")
-                          .arg(m_resolvedLoaderVersion, argumentsFileName));
-        }
-        const bool hasExpectedArgumentsFile =
-            QFileInfo(expectedArgumentsPath).size() > 0;
-        bool hasArgumentsFile = hasExpectedArgumentsFile;
-        // A fresh installer may use an older or provider-specific layout that
-        // is still unambiguous. During an update, however, accepting any
-        // argument file below libraries/ could mistake the previous loader's
-        // files for the requested target build.
-        if (!hasArgumentsFile && !m_loaderScriptExistedBeforeInstall) {
-            QDirIterator arguments(serverDir.filePath(QStringLiteral("libraries")),
-                                   { argumentsFileName }, QDir::Files,
-                                   QDirIterator::Subdirectories);
-            while (arguments.hasNext()) {
-                if (QFileInfo(arguments.next()).size() > 0) {
-                    hasArgumentsFile = true;
-                    break;
-                }
-            }
-        }
-        if (!hasArgumentsFile) {
-            *errorMessage = tr("%1 installer created %2 but did not create its loader argument file.")
-                                .arg(loaderName, scriptName);
-            return false;
-        }
-        if (hasExpectedArgumentsFile && !expectedArgumentsPath.isEmpty()) {
-            QFile scriptFile(script.absoluteFilePath());
-            if (!scriptFile.open(QIODevice::ReadOnly)) {
-                *errorMessage = tr("%1 installer created %2 but J Launcher could not verify it.")
-                                    .arg(loaderName, scriptName);
-                return false;
-            }
-            const QString scriptContents = QDir::fromNativeSeparators(
-                QString::fromLocal8Bit(scriptFile.readAll()));
-            const QString expectedReference = QDir::fromNativeSeparators(
-                serverDir.relativeFilePath(expectedArgumentsPath));
-            if (!scriptContents.contains(expectedReference, Qt::CaseInsensitive)) {
-                *errorMessage = tr("%1 installer did not connect %2 to the requested loader build.")
-                                    .arg(loaderName, scriptName);
-                return false;
-            }
-        }
-
-        bool hasMinecraftServer = false;
-        QDirIterator minecraftServers(
-            serverDir.filePath(QStringLiteral("libraries/net/minecraft/server/%1")
-                                   .arg(m_version)),
-            { QStringLiteral("server-*.jar") }, QDir::Files,
-            QDirIterator::Subdirectories);
-        while (minecraftServers.hasNext()) {
-            if (QFileInfo(minecraftServers.next()).size() > 0) {
-                hasMinecraftServer = true;
-                break;
-            }
-        }
-        if (!hasMinecraftServer) {
-            *errorMessage = tr("%1 installer did not download the Minecraft server files. Check the installer network output and try again.")
-                                .arg(loaderName);
-            return false;
-        }
-    }
-    return true;
-}
-
-// ==================== Version Manifest ====================
+// ==================== Version and build lists ====================
 
 void ServerDownloader::onVersionManifestFetched(const QByteArray &data)
 {
     QString error;
     const QStringList versions = parseAvailableVersions(m_versionsType, data, &error);
-    m_step = Step::Idle;
+    m_activity = Activity::Idle;
     if (versions.isEmpty()) {
         emit versionsFailed(error.isEmpty() ? tr("No compatible versions were returned by the provider.") : error);
         return;
@@ -780,30 +483,11 @@ void ServerDownloader::onVersionManifestFetched(const QByteArray &data)
     emit versionsReady(versions);
 }
 
-bool ServerDownloader::isVersionListStep() const
-{
-    return m_step == Step::FetchingVersionManifest
-        || m_step == Step::FetchingPaperVersions
-        || m_step == Step::FetchingFabricGameVersions
-        || m_step == Step::FetchingPurpurVersions
-        || m_step == Step::FetchingForgePromotions
-        || m_step == Step::FetchingNeoForgeGameVersions;
-}
-
-bool ServerDownloader::isBuildListStep() const
-{
-    return m_step == Step::FetchingPaperBuildList
-        || m_step == Step::FetchingFabricBuildList
-        || m_step == Step::FetchingPurpurBuildList
-        || m_step == Step::FetchingForgeBuildList
-        || m_step == Step::FetchingNeoForgeBuildList;
-}
-
 void ServerDownloader::onBuildManifestFetched(const QByteArray &data)
 {
     QString error;
     const QStringList builds = parseAvailableBuilds(m_buildsType, m_buildsVersion, data, &error);
-    m_step = Step::Idle;
+    m_activity = Activity::Idle;
     if (builds.isEmpty()) {
         emit buildsFailed(error.isEmpty() ? tr("No compatible builds were returned by the provider.") : error);
         return;
@@ -817,11 +501,11 @@ void ServerDownloader::failCurrentRequest(const QString &message)
     const QString contextualMessage = context.isEmpty()
         ? message
         : tr("%1 failed: %2").arg(context, message);
-    if (isVersionListStep()) {
-        m_step = Step::Idle;
+    if (m_activity == Activity::ListingVersions) {
+        m_activity = Activity::Idle;
         emit versionsFailed(contextualMessage);
-    } else if (isBuildListStep()) {
-        m_step = Step::Idle;
+    } else if (m_activity == Activity::ListingBuilds) {
+        m_activity = Activity::Idle;
         emit buildsFailed(contextualMessage);
     } else {
         finishDownload(false, contextualMessage);
@@ -830,58 +514,143 @@ void ServerDownloader::failCurrentRequest(const QString &message)
 
 QString ServerDownloader::currentFailureContext() const
 {
-    QString provider = isVersionListStep() ? m_versionsType
-        : (isBuildListStep() ? m_buildsType : m_type);
+    QString provider = m_activity == Activity::ListingVersions ? m_versionsType
+        : (m_activity == Activity::ListingBuilds ? m_buildsType : m_type);
     if (provider.compare("neoforge", Qt::CaseInsensitive) == 0) {
         provider = QStringLiteral("NeoForge");
     } else if (!provider.isEmpty()) {
         provider[0] = provider[0].toUpper();
     }
 
-    if (isVersionListStep()) {
+    if (m_activity == Activity::ListingVersions) {
         return tr("%1 version discovery").arg(provider);
     }
-    if (isBuildListStep()) {
+    if (m_activity == Activity::ListingBuilds) {
         return tr("%1 build discovery for Minecraft %2").arg(provider, m_buildsVersion);
     }
 
     QString step;
-    switch (m_step) {
-        case Step::FetchingVanillaManifest:
-            step = tr("fetching the version manifest");
-            break;
-        case Step::FetchingVanillaVersionJson:
-            step = tr("fetching version details");
-            break;
-        case Step::FetchingPaperBuilds:
-        case Step::FetchingPurpurBuilds:
-            step = tr("fetching provider builds");
-            break;
-        case Step::FetchingFabricInstallerList:
-            step = tr("fetching Fabric installer versions");
-            break;
-        case Step::FetchingFabricLoaderList:
-            step = tr("fetching Fabric loader versions");
-            break;
-        case Step::FetchingForgeVersions:
-        case Step::FetchingNeoForgeVersions:
-        case Step::ResolvingForgeInstallerMetadata:
-            step = tr("resolving the loader installer");
-            break;
-        case Step::DownloadingForgeInstaller:
-        case Step::DownloadingNeoForgeInstaller:
-        case Step::DownloadingInstallerLibraries:
-            step = tr("downloading the loader installer");
-            break;
-        case Step::DownloadingJar:
-            step = tr("downloading the server JAR");
-            break;
-        case Step::DownloadingLegacyForgeServerJar:
-            step = tr("downloading the vanilla server JAR for Forge");
-            break;
-        default:
-            step = tr("server setup");
-            break;
+    if (m_fileDownload == FileDownload::ServerJar) {
+        step = tr("downloading the server JAR");
+    } else if (m_fileDownload == FileDownload::InstallerLibraries) {
+        step = tr("downloading the loader installer");
+    } else if (m_activity == Activity::Installing && m_provider) {
+        step = m_provider->currentStep();
+    } else {
+        step = tr("server setup");
     }
     return tr("%1 %2").arg(provider, step);
+}
+
+// ==================== Provider services ====================
+
+bool ServerDownloaderProvider::onRequestFailed(int, const QString &)
+{
+    return false;
+}
+
+bool ServerDownloaderProvider::checkServerJar(QString *)
+{
+    return true;
+}
+
+QString ServerDownloaderProvider::tr(const char *text)
+{
+    return ServerDownloader::tr(text);
+}
+
+const QString &ServerDownloaderProvider::version() const
+{
+    return m_downloader.m_version;
+}
+
+const QString &ServerDownloaderProvider::requestedLoaderVersion() const
+{
+    return m_downloader.m_loaderVersion;
+}
+
+const QString &ServerDownloaderProvider::destinationDir() const
+{
+    return m_downloader.m_destinationDir;
+}
+
+const QString &ServerDownloaderProvider::targetJarPath() const
+{
+    return m_downloader.m_targetJarPath;
+}
+
+const ServerProviderEndpoints &ServerDownloaderProvider::endpoints() const
+{
+    return m_downloader.m_endpoints;
+}
+
+void ServerDownloaderProvider::setResolvedLoaderVersion(const QString &loaderVersion)
+{
+    m_downloader.m_resolvedLoaderVersion = loaderVersion;
+}
+
+void ServerDownloaderProvider::status(const QString &message)
+{
+    emit m_downloader.statusMessage(message);
+}
+
+void ServerDownloaderProvider::progress(int percentage)
+{
+    emit m_downloader.progress(percentage);
+}
+
+void ServerDownloaderProvider::request(const QUrl &url)
+{
+    m_downloader.sendRequest(url);
+}
+
+void ServerDownloaderProvider::downloadServerJar(const QUrl &url, const QByteArray &expectedHash,
+                                                 QCryptographicHash::Algorithm hashAlgorithm)
+{
+    m_downloader.downloadServerJar(url, expectedHash, hashAlgorithm);
+}
+
+void ServerDownloaderProvider::downloadFile(const QUrl &url, const QString &path,
+                                            const QByteArray &expectedHash,
+                                            QCryptographicHash::Algorithm hashAlgorithm,
+                                            bool largeServerJar)
+{
+    m_downloader.startFileDownload(url, path, expectedHash, hashAlgorithm,
+                                   largeServerJar ? ServerDownloader::FileDownload::LargeFile
+                                                  : ServerDownloader::FileDownload::SmallFile);
+}
+
+void ServerDownloaderProvider::runLoaderInstaller(const QString &loaderName,
+                                                  const QString &installerPath)
+{
+    m_downloader.runLoaderInstaller(loaderName, installerPath);
+}
+
+void ServerDownloaderProvider::stopActiveWork()
+{
+    m_downloader.cleanUp();
+}
+
+void ServerDownloaderProvider::fail(const QString &message)
+{
+    m_downloader.finishDownload(false, message);
+}
+
+std::unique_ptr<ServerDownloaderProvider> createServerDownloaderProvider(const QString &type,
+                                                                         ServerDownloader &downloader)
+{
+    const QString normalized = type.trimmed().toLower();
+    if (normalized == QStringLiteral("vanilla"))
+        return makeVanillaServerProvider(downloader);
+    if (normalized == QStringLiteral("paper"))
+        return makePaperServerProvider(downloader);
+    if (normalized == QStringLiteral("fabric"))
+        return makeFabricServerProvider(downloader);
+    if (normalized == QStringLiteral("purpur"))
+        return makePurpurServerProvider(downloader);
+    if (normalized == QStringLiteral("forge"))
+        return makeForgeServerProvider(downloader);
+    if (normalized == QStringLiteral("neoforge"))
+        return makeNeoForgeServerProvider(downloader);
+    return nullptr;
 }

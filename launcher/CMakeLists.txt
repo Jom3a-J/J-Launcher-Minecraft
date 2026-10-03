@@ -872,6 +872,7 @@ SET(LAUNCHER_SOURCES
     server/ServerProperties.cpp
     server/ServerDownloader.h
     server/ServerDownloader.cpp
+    server/ServerDownloaderProvider.h
     server/ServerDownloaderShared.h
     server/ServerDownloaderCatalog.cpp
     server/ServerDownloaderVanilla.cpp

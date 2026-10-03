@@ -13,9 +13,11 @@
  * limitations under the License.
  */
 
-// Forge and NeoForge: installer download, library prefetch, and running the installer.
+// Forge and NeoForge: installer download, library prefetch, running the installer and
+// checking what it installed.
 
 #include "ServerDownloader.h"
+#include "ServerDownloaderProvider.h"
 #include "ServerDownloaderShared.h"
 #include <QFile>
 #include <QNetworkRequest>
@@ -34,6 +36,7 @@
 #include "net/Download.h"
 #include "archive/ArchiveReader.h"
 #include <algorithm>
+#include <utility>
 
 #if defined(LAUNCHER_APPLICATION)
 #include "Application.h"
@@ -95,184 +98,426 @@ void addVanillaServerArtifact(const QJsonObject &artifact, const QString &versio
     paths.insert(path);
     libraries.append({path, url, sha1});
 }
-}  // namespace
+/// Forge and NeoForge both fetch an installer with a published SHA-1 and run it in the server folder.
+class LoaderInstallerProvider : public ServerDownloaderProvider
+{
+public:
+    LoaderInstallerProvider(ServerDownloader &downloader, QString loaderName, QString installerFileName)
+        : ServerDownloaderProvider(downloader)
+        , m_loaderName(std::move(loaderName))
+        , m_installerFileName(std::move(installerFileName))
+    {
+    }
+
+    bool onRequestFailed(int httpStatus, const QString &error) override
+    {
+        if (m_installerStep != InstallerStep::FetchingChecksum)
+            return false;
+        if (httpStatus == 404) {
+            status(tr("No checksum is published for this installer; continuing without verification."));
+            m_installerStep = InstallerStep::DownloadingInstaller;
+            downloadFile(m_installerUrl, installerPath(), {}, QCryptographicHash::Sha1, false);
+            return true;
+        }
+        stopActiveWork();
+        fail(tr("Failed to fetch the installer checksum: %1").arg(error));
+        return true;
+    }
+
+    void onFileDownloaded() override
+    {
+        if (m_installerStep != InstallerStep::DownloadingInstaller)
+            return;
+        progress(50);
+        runLoaderInstaller(m_loaderName, installerPath());
+    }
+
+protected:
+    /// Fetches the installer's published SHA-1, then the installer itself.
+    void fetchInstaller(const QUrl &installerUrl)
+    {
+        stopActiveWork();
+        m_installerUrl = installerUrl;
+        QUrl checksumUrl = installerUrl;
+        checksumUrl.setPath(checksumUrl.path() + QStringLiteral(".sha1"));
+        m_installerStep = InstallerStep::FetchingChecksum;
+        status(tr("Fetching %1 installer checksum...").arg(m_loaderName));
+        request(checksumUrl);
+    }
+
+    /// Handles the reply while the installer is being fetched; false before that.
+    bool onInstallerReply(const QByteArray &data)
+    {
+        if (m_installerStep != InstallerStep::FetchingChecksum)
+            return false;
+        const QStringList tokens = QString::fromLatin1(data).split(
+            QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+        const QByteArray token = tokens.isEmpty() ? QByteArray() : tokens.first().toLatin1();
+        if (!isSha1(token)) {
+            fail(tr("The %1 installer checksum is malformed.").arg(m_loaderName));
+            return true;
+        }
+        m_installerStep = InstallerStep::DownloadingInstaller;
+        status(tr("Downloading %1 installer...").arg(m_loaderName));
+        downloadFile(m_installerUrl, installerPath(), token, QCryptographicHash::Sha1, false);
+        return true;
+    }
+
+    bool fetchingInstaller() const { return m_installerStep != InstallerStep::None; }
+
+    QString installerStep() const
+    {
+        return m_installerStep == InstallerStep::DownloadingInstaller
+            ? tr("downloading the loader installer") : tr("server setup");
+    }
+
+    const QString &loaderName() const { return m_loaderName; }
+
+private:
+    QString installerPath() const { return QDir(destinationDir()).filePath(m_installerFileName); }
+
+    enum class InstallerStep { None, FetchingChecksum, DownloadingInstaller };
+    InstallerStep m_installerStep = InstallerStep::None;
+    QString m_loaderName;
+    QString m_installerFileName;
+    QUrl m_installerUrl;
+};
 
 // ==================== Forge ====================
 
-void ServerDownloader::fetchForgeVersions()
+class ForgeServerProvider final : public LoaderInstallerProvider
 {
-    m_step = Step::FetchingForgeVersions;
-    emit statusMessage(tr("Fetching Forge versions..."));
+public:
+    explicit ForgeServerProvider(ServerDownloader &downloader)
+        : LoaderInstallerProvider(downloader, QStringLiteral("Forge"), QStringLiteral("forge-installer.jar"))
+    {
+    }
 
-    // Maven metadata covers every published Forge build. The promotions feed
-    // only contains selected recommended/latest Minecraft versions and can
-    // reject otherwise valid server combinations.
-    const QUrl metadataUrl = m_endpoints.forgeMavenBase.resolved(
-        QUrl(QStringLiteral("net/minecraftforge/forge/maven-metadata.xml")));
-    QNetworkRequest request = createRequest(metadataUrl);
-    m_currentReply = m_network->get(request);
-    connect(m_currentReply, &QNetworkReply::finished, this, [this]() {
-        handleReply(m_currentReply);
-    });
-}
+    QUrl versionListUrl() const override { return mavenMetadataUrl(); }
+    QUrl buildListUrl(const QString &) const override { return mavenMetadataUrl(); }
 
-void ServerDownloader::onForgeVersionsFetched(const QByteArray &data)
-{
-    if (data.trimmed().startsWith('<')) {
+    void start() override
+    {
+        if (requestedLoaderVersion().isEmpty()) {
+            m_step = Step::FetchingVersions;
+            status(tr("Fetching Forge versions..."));
+            // Maven metadata covers every published Forge build. The promotions feed
+            // only contains selected recommended/latest Minecraft versions and can
+            // reject otherwise valid server combinations.
+            request(mavenMetadataUrl());
+        } else {
+            downloadInstaller(requestedLoaderVersion());
+        }
+    }
+
+    void onReply(const QByteArray &data) override
+    {
+        if (onInstallerReply(data))
+            return;
+        switch (m_step) {
+            case Step::FetchingVersions:
+                onVersionsFetched(data);
+                return;
+            case Step::ResolvingInstallerMetadata:
+                prepareInstaller(m_forgeVersion, resolveMavenVersion(data, m_forgeVersion));
+                return;
+            case Step::FetchingVanillaManifest:
+                onVanillaManifestFetched(data);
+                return;
+            case Step::FetchingVanillaDetails:
+                onVanillaDetailsFetched(data);
+                return;
+            case Step::DownloadingVanillaJar:
+                return;
+        }
+    }
+
+    bool onRequestFailed(int httpStatus, const QString &error) override
+    {
+        if (!fetchingInstaller() && m_step == Step::ResolvingInstallerMetadata) {
+            prepareInstaller(m_forgeVersion, QString());
+            return true;
+        }
+        return LoaderInstallerProvider::onRequestFailed(httpStatus, error);
+    }
+
+    void onFileDownloaded() override
+    {
+        if (!fetchingInstaller() && m_step == Step::DownloadingVanillaJar) {
+            fetchInstallerFor(m_forgeVersion, m_mavenVersion);
+            return;
+        }
+        LoaderInstallerProvider::onFileDownloaded();
+    }
+
+    QString currentStep() const override
+    {
+        if (fetchingInstaller())
+            return installerStep();
+        switch (m_step) {
+            case Step::FetchingVersions:
+            case Step::ResolvingInstallerMetadata:
+                return tr("resolving the loader installer");
+            case Step::FetchingVanillaManifest:
+                return tr("fetching the version manifest");
+            case Step::FetchingVanillaDetails:
+                return tr("fetching version details");
+            case Step::DownloadingVanillaJar:
+                return tr("downloading the vanilla server JAR for Forge");
+        }
+        return tr("server setup");
+    }
+
+private:
+    QUrl mavenMetadataUrl() const
+    {
+        return endpoints().forgeMavenBase.resolved(
+            QUrl(QStringLiteral("net/minecraftforge/forge/maven-metadata.xml")));
+    }
+
+    void onVersionsFetched(const QByteArray &data)
+    {
+        if (data.trimmed().startsWith('<')) {
+            QString error;
+            const QStringList builds = ServerDownloader::parseAvailableBuilds(
+                QStringLiteral("forge"), version(), data, &error);
+            if (builds.isEmpty()) {
+                fail(error.isEmpty()
+                    ? tr("No Forge version found for Minecraft %1.").arg(version())
+                    : error);
+                return;
+            }
+            prepareInstaller(builds.first(), resolveMavenVersion(data, builds.first()));
+            return;
+        }
+
+        QJsonDocument doc = QJsonDocument::fromJson(data);
+        if (doc.isNull()) {
+            fail(tr("Failed to parse Forge promotions."));
+            return;
+        }
+
+        QJsonObject promos = doc.object()["promos"].toObject();
+
+        // Try recommended first, then latest
+        QString forgeVersion;
+        QString recKey = version() + "-recommended";
+        QString latKey = version() + "-latest";
+
+        if (promos.contains(recKey)) {
+            forgeVersion = promos[recKey].toString();
+        } else if (promos.contains(latKey)) {
+            forgeVersion = promos[latKey].toString();
+        }
+
+        if (forgeVersion.isEmpty()) {
+            fail(tr("No Forge version found for Minecraft %1.").arg(version()));
+            return;
+        }
+
+        downloadInstaller(forgeVersion);
+    }
+
+    void downloadInstaller(const QString &forgeVersion)
+    {
+        setResolvedLoaderVersion(forgeVersion);
+        m_forgeVersion = forgeVersion;
+        m_step = Step::ResolvingInstallerMetadata;
+        status(tr("Resolving the Forge installer version..."));
+        request(mavenMetadataUrl());
+    }
+
+    QString resolveMavenVersion(const QByteArray &data, const QString &forgeVersion) const
+    {
+        QXmlStreamReader xml(data);
+        const QString exactVersion = version() + QLatin1Char('-') + forgeVersion;
+        const QString suffixedPrefix = exactVersion + QLatin1Char('-');
+        QString suffixedVersion;
+        while (!xml.atEnd()) {
+            xml.readNext();
+            if (!xml.isStartElement() || xml.name() != QStringLiteral("version"))
+                continue;
+            const QString candidate = xml.readElementText().trimmed();
+            if (candidate == exactVersion)
+                return candidate;
+            if (suffixedVersion.isEmpty() && candidate.startsWith(suffixedPrefix))
+                suffixedVersion = candidate;
+        }
+        return xml.hasError() ? QString() : suffixedVersion;
+    }
+
+    void prepareInstaller(const QString &forgeVersion, const QString &mavenVersion)
+    {
+        setResolvedLoaderVersion(forgeVersion);
+        m_forgeVersion = forgeVersion;
+        m_mavenVersion = mavenVersion;
+
+        // Installers for Minecraft before 1.13 expect the vanilla server jar beside them,
+        // and the address they would fetch it from no longer works.
+        if (isBeforeMinecraft113(version())) {
+            m_step = Step::FetchingVanillaManifest;
+            status(tr("Fetching Mojang version manifest..."));
+            request(endpoints().vanillaManifest);
+            return;
+        }
+
+        fetchInstallerFor(forgeVersion, mavenVersion);
+    }
+
+    void onVanillaManifestFetched(const QByteArray &data)
+    {
+        QString detailsUrl;
         QString error;
-        const QStringList builds = parseAvailableBuilds(
-            QStringLiteral("forge"), m_version, data, &error);
+        if (!findVanillaVersionDetails(data, version(), &detailsUrl, &error)) {
+            fail(error);
+            return;
+        }
+        m_step = Step::FetchingVanillaDetails;
+        status(tr("Fetching version details..."));
+        request(QUrl(detailsUrl));
+    }
+
+    void onVanillaDetailsFetched(const QByteArray &data)
+    {
+        QString jarUrl;
+        QByteArray sha1;
+        QString error;
+        if (!findVanillaServerJar(data, &jarUrl, &sha1, &error)) {
+            fail(error);
+            return;
+        }
+        const QString jarPath = QDir(destinationDir()).filePath(
+            QStringLiteral("minecraft_server.%1.jar").arg(version()));
+        if (fileMatchesSha1(jarPath, sha1)) {
+            fetchInstallerFor(m_forgeVersion, m_mavenVersion);
+            return;
+        }
+        m_step = Step::DownloadingVanillaJar;
+        stopActiveWork();
+        status(tr("Downloading the vanilla server jar for the Forge installer..."));
+        downloadFile(QUrl(jarUrl), jarPath, sha1, QCryptographicHash::Sha1, true);
+    }
+
+    void fetchInstallerFor(const QString &forgeVersion, const QString &mavenVersion)
+    {
+        // Download the exact loader selected by the modpack when one is supplied.
+        const QString resolvedMavenVersion = mavenVersion.isEmpty()
+            ? version() + QLatin1Char('-') + forgeVersion : mavenVersion;
+        fetchInstaller(endpoints().forgeMavenBase.resolved(
+            QUrl(QStringLiteral("net/minecraftforge/forge/%1/forge-%1-installer.jar")
+                     .arg(resolvedMavenVersion))));
+    }
+
+    enum class Step {
+        FetchingVersions,
+        ResolvingInstallerMetadata,
+        FetchingVanillaManifest,
+        FetchingVanillaDetails,
+        DownloadingVanillaJar
+    };
+    Step m_step = Step::FetchingVersions;
+    QString m_forgeVersion;
+    QString m_mavenVersion;
+};
+
+// ==================== NeoForge ====================
+
+class NeoForgeServerProvider final : public LoaderInstallerProvider
+{
+public:
+    explicit NeoForgeServerProvider(ServerDownloader &downloader)
+        : LoaderInstallerProvider(downloader, QStringLiteral("NeoForge"), QStringLiteral("neoforge-installer.jar"))
+    {
+    }
+
+    QUrl versionListUrl() const override { return endpoints().neoForgeVersions; }
+
+    QUrl buildListUrl(const QString &minecraftVersion) const override
+    {
+        // NeoForge 1.20.1 builds are listed under the Forge-style coordinates.
+        return usesLegacyNeoForgeCoordinates(minecraftVersion, QString())
+            ? endpoints().neoForgeMavenBase.resolved(
+                  QUrl(QStringLiteral("net/neoforged/forge/maven-metadata.xml")))
+            : endpoints().neoForgeVersions;
+    }
+
+    void start() override
+    {
+        if (requestedLoaderVersion().isEmpty()) {
+            status(tr("Fetching NeoForge versions..."));
+            request(buildListUrl(version()));
+        } else {
+            downloadInstaller(requestedLoaderVersion());
+        }
+    }
+
+    void onReply(const QByteArray &data) override
+    {
+        if (onInstallerReply(data))
+            return;
+        onVersionsFetched(data);
+    }
+
+    QString currentStep() const override
+    {
+        return fetchingInstaller() ? installerStep() : tr("resolving the loader installer");
+    }
+
+private:
+    void onVersionsFetched(const QByteArray &data)
+    {
+        if (!data.trimmed().startsWith('<') && QJsonDocument::fromJson(data).isNull()) {
+            fail(tr("Failed to parse NeoForge version list."));
+            return;
+        }
+
+        QString error;
+        const QStringList builds = ServerDownloader::parseAvailableBuilds(
+            QStringLiteral("neoforge"), version(), data, &error);
         if (builds.isEmpty()) {
-            m_step = Step::Idle;
-            finishDownload(false, error.isEmpty()
-                ? tr("No Forge version found for Minecraft %1.").arg(m_version)
+            fail(error.isEmpty()
+                ? tr("No NeoForge version found for Minecraft %1.").arg(version())
                 : error);
             return;
         }
-        prepareForgeInstaller(builds.first(), resolveForgeMavenVersion(data, builds.first()));
+
+        downloadInstaller(builds.first());
+    }
+
+    void downloadInstaller(const QString &neoforgeVersion)
+    {
+        setResolvedLoaderVersion(neoforgeVersion);
+        const bool legacyCoordinates = usesLegacyNeoForgeCoordinates(version(), neoforgeVersion);
+        const QString installerRelativePath = legacyCoordinates
+            ? QStringLiteral(
+                  "net/neoforged/forge/%1-%2/forge-%1-%2-installer.jar")
+                  .arg(version(), neoforgeVersion)
+            : QStringLiteral(
+                  "net/neoforged/neoforge/%1/neoforge-%1-installer.jar")
+                  .arg(neoforgeVersion);
+        fetchInstaller(endpoints().neoForgeMavenBase.resolved(QUrl(installerRelativePath)));
+    }
+};
+
+}  // namespace
+
+std::unique_ptr<ServerDownloaderProvider> makeForgeServerProvider(ServerDownloader &downloader)
+{
+    return std::make_unique<ForgeServerProvider>(downloader);
+}
+
+std::unique_ptr<ServerDownloaderProvider> makeNeoForgeServerProvider(ServerDownloader &downloader)
+{
+    return std::make_unique<NeoForgeServerProvider>(downloader);
+}
+
+// ==================== Running a Forge-style installer ====================
+
+void ServerDownloader::runLoaderInstaller(const QString &loaderName, const QString &installerPath)
+{
+    if (prefetchModernInstallerLibraries(installerPath, loaderName))
         return;
-    }
-
-    QJsonDocument doc = QJsonDocument::fromJson(data);
-    if (doc.isNull()) {
-        m_step = Step::Idle;
-        finishDownload(false, tr("Failed to parse Forge promotions."));
-        return;
-    }
-
-    QJsonObject promos = doc.object()["promos"].toObject();
-
-    // Try recommended first, then latest
-    QString forgeVersion;
-    QString recKey = m_version + "-recommended";
-    QString latKey = m_version + "-latest";
-
-    if (promos.contains(recKey)) {
-        forgeVersion = promos[recKey].toString();
-    } else if (promos.contains(latKey)) {
-        forgeVersion = promos[latKey].toString();
-    }
-
-    if (forgeVersion.isEmpty()) {
-        m_step = Step::Idle;
-        finishDownload(false, tr("No Forge version found for Minecraft %1.").arg(m_version));
-        return;
-    }
-
-    downloadForgeInstaller(forgeVersion);
-}
-
-void ServerDownloader::downloadForgeInstaller(const QString &forgeVersion)
-{
-    m_resolvedLoaderVersion = forgeVersion;
-    m_pendingForgeVersion = forgeVersion;
-    m_step = Step::ResolvingForgeInstallerMetadata;
-    emit statusMessage(tr("Resolving the Forge installer version..."));
-
-    const QUrl metadataUrl = m_endpoints.forgeMavenBase.resolved(
-        QUrl(QStringLiteral("net/minecraftforge/forge/maven-metadata.xml")));
-    m_currentReply = m_network->get(createRequest(metadataUrl));
-    connect(m_currentReply, &QNetworkReply::finished, this, [this]() {
-        handleReply(m_currentReply);
-    });
-}
-
-void ServerDownloader::onForgeInstallerMetadataFetched(const QByteArray &data)
-{
-    const QString requestedVersion = m_pendingForgeVersion;
-    prepareForgeInstaller(requestedVersion, resolveForgeMavenVersion(data, requestedVersion));
-}
-
-QString ServerDownloader::resolveForgeMavenVersion(const QByteArray &data,
-                                                    const QString &forgeVersion) const
-{
-    QXmlStreamReader xml(data);
-    const QString exactVersion = m_version + QLatin1Char('-') + forgeVersion;
-    const QString suffixedPrefix = exactVersion + QLatin1Char('-');
-    QString suffixedVersion;
-    while (!xml.atEnd()) {
-        xml.readNext();
-        if (!xml.isStartElement() || xml.name() != QStringLiteral("version"))
-            continue;
-        const QString candidate = xml.readElementText().trimmed();
-        if (candidate == exactVersion)
-            return candidate;
-        if (suffixedVersion.isEmpty() && candidate.startsWith(suffixedPrefix))
-            suffixedVersion = candidate;
-    }
-    return xml.hasError() ? QString() : suffixedVersion;
-}
-
-void ServerDownloader::prepareForgeInstaller(const QString &forgeVersion,
-                                              const QString &mavenVersion)
-{
-    m_resolvedLoaderVersion = forgeVersion;
-    m_pendingForgeVersion = forgeVersion;
-    m_pendingForgeMavenVersion = mavenVersion;
-
-    if (isBeforeMinecraft113(m_version)) {
-        m_fetchingLegacyForgeServerJar = true;
-        fetchVanillaManifest();
-        return;
-    }
-
-    beginForgeInstallerDownload(forgeVersion, mavenVersion);
-}
-
-void ServerDownloader::beginForgeInstallerDownload(const QString &forgeVersion,
-                                                    const QString &mavenVersion)
-{
-    // Download the exact loader selected by the modpack when one is supplied.
-    const QString resolvedMavenVersion = mavenVersion.isEmpty()
-        ? m_version + QLatin1Char('-') + forgeVersion : mavenVersion;
-    const QUrl installerUrl = m_endpoints.forgeMavenBase.resolved(
-        QUrl(QStringLiteral("net/minecraftforge/forge/%1/forge-%1-installer.jar")
-                 .arg(resolvedMavenVersion)));
-
-    QString installerPath = QDir(m_destinationDir).filePath("forge-installer.jar");
-
-    cleanUp();
-    m_pendingInstallerUrl = installerUrl;
-    m_pendingInstallerPath = installerPath;
-    fetchForgeInstallerChecksum(installerUrl, installerPath);
-}
-
-void ServerDownloader::fetchForgeInstallerChecksum(const QUrl &installerUrl,
-                                                    const QString &installerPath)
-{
-    QUrl checksumUrl = installerUrl;
-    checksumUrl.setPath(checksumUrl.path() + QStringLiteral(".sha1"));
-    m_pendingInstallerUrl = installerUrl;
-    m_pendingInstallerPath = installerPath;
-    m_step = Step::FetchingForgeInstallerChecksum;
-    emit statusMessage(tr("Fetching Forge installer checksum..."));
-    m_currentReply = m_network->get(createRequest(checksumUrl));
-    connect(m_currentReply, &QNetworkReply::finished, this, [this]() {
-        handleReply(m_currentReply);
-    });
-}
-
-void ServerDownloader::onForgeInstallerChecksumFetched(const QByteArray &data)
-{
-    const QStringList tokens = QString::fromLatin1(data).split(
-        QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
-    const QByteArray token = tokens.isEmpty() ? QByteArray() : tokens.first().toLatin1();
-    if (!isSha1(token)) {
-        finishDownload(false, tr("The Forge installer checksum is malformed."));
-        return;
-    }
-    m_step = Step::DownloadingForgeInstaller;
-    emit statusMessage(tr("Downloading Forge installer..."));
-    startFileDownload(m_pendingInstallerUrl, m_pendingInstallerPath, token,
-                      QCryptographicHash::Sha1, false);
-}
-
-void ServerDownloader::onForgeInstallerDownloaded()
-{
-    const QString installerPath = QDir(m_destinationDir).filePath("forge-installer.jar");
-    if (prefetchModernInstallerLibraries(installerPath, QStringLiteral("Forge")))
-        return;
-    startInstallerProcess(QStringLiteral("Forge"), installerPath);
+    startInstallerProcess(loaderName, installerPath);
 }
 
 bool ServerDownloader::prefetchModernInstallerLibraries(const QString &installerPath,
@@ -354,7 +599,6 @@ bool ServerDownloader::prefetchModernInstallerLibraries(const QString &installer
 
     QString markerError;
     if (!writeLoaderInstallIncompleteMarker(&markerError)) {
-        m_step = Step::Idle;
         finishDownload(false, markerError);
         return true;
     }
@@ -363,7 +607,7 @@ bool ServerDownloader::prefetchModernInstallerLibraries(const QString &installer
     m_pendingInstallerPath = installerPath;
     m_prefetchLibraryPaths = downloadPaths;
     m_prefetchLibraryHashes.clear();
-    m_step = Step::DownloadingInstallerLibraries;
+    m_fileDownload = FileDownload::InstallerLibraries;
     emit statusMessage(tr("Downloading %1 %2 libraries...").arg(downloadPaths.size()).arg(loaderName));
 
 #if defined(LAUNCHER_APPLICATION)
@@ -447,7 +691,6 @@ void ServerDownloader::startInstallerProcess(const QString &loaderName,
         const QString processError = installer->errorString();
         QFile::remove(installerPath);
         installer->deleteLater();
-        m_step = Step::Idle;
         finishDownload(false, tr("%1 installer could not start: %2").arg(loaderName, processError));
     });
     connect(installer, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
@@ -465,22 +708,19 @@ void ServerDownloader::startInstallerProcess(const QString &loaderName,
         QFile::remove(installerPath);
 
         if (exitStatus != QProcess::NormalExit || exitCode != 0) {
-            m_step = Step::Idle;
-            finishDownload(false, tr("%1 installer failed with exit code %2.").arg(loaderName).arg(exitCode));
+                finishDownload(false, tr("%1 installer failed with exit code %2.").arg(loaderName).arg(exitCode));
             return;
         }
 
         QString validationError;
         if (!validateLoaderInstallation(loaderName, &validationError)) {
-            m_step = Step::Idle;
-            finishDownload(false, validationError);
+                finishDownload(false, validationError);
             return;
         }
 
         const QString markerPath = serverLoaderInstallIncompleteMarkerPath(m_destinationDir);
         if (!QFile::remove(markerPath) && QFileInfo::exists(markerPath)) {
-            m_step = Step::Idle;
-            finishDownload(false, tr("Could not clear the incomplete loader installation marker."));
+                finishDownload(false, tr("Could not clear the incomplete loader installation marker."));
             return;
         }
 
@@ -495,7 +735,6 @@ void ServerDownloader::startInstallerProcess(const QString &loaderName,
         m_installerProcess = nullptr;
         m_activeInstallerPath.clear();
         installer->deleteLater();
-        m_step = Step::Idle;
         finishDownload(false, markerError);
         return;
     }
@@ -503,119 +742,154 @@ void ServerDownloader::startInstallerProcess(const QString &loaderName,
                      QStringList() << "-jar" << installerPath << "--installServer");
 }
 
-// ==================== NeoForge ====================
-
-void ServerDownloader::fetchNeoForgeVersions()
+void ServerDownloader::stopInstallerProcess()
 {
-    m_step = Step::FetchingNeoForgeVersions;
-    emit statusMessage(tr("Fetching NeoForge versions..."));
+    if (!m_installerProcess)
+        return;
 
-    const QUrl versionsUrl = usesLegacyNeoForgeCoordinates(m_version, QString())
-        ? m_endpoints.neoForgeMavenBase.resolved(
-              QUrl(QStringLiteral("net/neoforged/forge/maven-metadata.xml")))
-        : m_endpoints.neoForgeVersions;
-    QNetworkRequest request = createRequest(versionsUrl);
-    m_currentReply = m_network->get(request);
-    connect(m_currentReply, &QNetworkReply::finished, this, [this]() {
-        handleReply(m_currentReply);
-    });
+    QProcess *installer = m_installerProcess;
+    m_installerProcess = nullptr;
+    disconnect(installer, nullptr, this, nullptr);
+    if (installer->state() != QProcess::NotRunning) {
+        installer->kill();
+        installer->waitForFinished(-1);
+    }
+    installer->deleteLater();
+
+    if (!m_activeInstallerPath.isEmpty()) {
+        QFile::remove(m_activeInstallerPath);
+        QFile::remove(m_activeInstallerPath + QStringLiteral(".log"));
+        m_activeInstallerPath.clear();
+    }
 }
 
-void ServerDownloader::onNeoForgeVersionsFetched(const QByteArray &data)
+bool ServerDownloader::writeLoaderInstallIncompleteMarker(QString *errorMessage) const
 {
-    if (data.trimmed().startsWith('<')) {
-        QString error;
-        const QStringList builds = parseAvailableBuilds(
-            QStringLiteral("neoforge"), m_version, data, &error);
-        if (builds.isEmpty()) {
-            m_step = Step::Idle;
-            finishDownload(false, error.isEmpty()
-                ? tr("No NeoForge version found for Minecraft %1.").arg(m_version)
-                : error);
-            return;
+    QFile marker(serverLoaderInstallIncompleteMarkerPath(m_destinationDir));
+    if (!marker.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        *errorMessage = tr("Could not mark the loader installation as incomplete: %1")
+                            .arg(marker.errorString());
+        return false;
+    }
+    if (marker.write(QByteArrayLiteral("J Launcher loader installation in progress\n")) < 0
+        || !marker.flush()) {
+        *errorMessage = tr("Could not write the incomplete loader installation marker: %1")
+                            .arg(marker.errorString());
+        return false;
+    }
+    return true;
+}
+
+bool ServerDownloader::validateLoaderInstallation(const QString &loaderName,
+                                                   QString *errorMessage) const
+{
+    const QDir serverDir(m_destinationDir);
+    const QString normalizedLoader = loaderName.toLower();
+    QStringList rootJarPatterns{ normalizedLoader + QStringLiteral("-*.jar") };
+    if (normalizedLoader == QStringLiteral("forge")) {
+        rootJarPatterns << QStringLiteral("minecraftforge-*.jar");
+    } else if (normalizedLoader == QStringLiteral("neoforge")
+               && usesLegacyNeoForgeCoordinates(m_version,
+                                                 m_resolvedLoaderVersion)) {
+        rootJarPatterns << QStringLiteral("forge-*.jar");
+    }
+    const QStringList rootJars = serverDir.entryList(
+        rootJarPatterns, QDir::Files, QDir::Name);
+    const bool hasRootLauncher = std::any_of(
+        rootJars.cbegin(), rootJars.cend(), [&serverDir](const QString &fileName) {
+            return !fileName.contains(QStringLiteral("installer"), Qt::CaseInsensitive)
+                && QFileInfo(serverDir.filePath(fileName)).size() > 0;
+        });
+
+    const QString scriptName = platformLoaderScriptName();
+    const QString argumentsFileName = platformLoaderArgumentsFileName();
+    const QFileInfo script(serverDir.filePath(scriptName));
+    if (!script.isFile() && !hasRootLauncher) {
+        *errorMessage = tr("%1 installer completed without creating a runnable server.")
+                            .arg(loaderName);
+        return false;
+    }
+
+    // Forge 1.17+ does not normally create server.jar in the server root. It
+    // installs the Mojang server and loader artifacts below libraries/ and
+    // generates a run script that references a platform argument file.
+    if (script.isFile()) {
+        QString expectedArgumentsPath;
+        if (normalizedLoader == QStringLiteral("forge")
+            && !m_resolvedLoaderVersion.isEmpty()) {
+            expectedArgumentsPath = serverDir.filePath(
+                QStringLiteral("libraries/net/minecraftforge/forge/%1-%2/%3")
+                    .arg(m_version, m_resolvedLoaderVersion, argumentsFileName));
+        } else if (normalizedLoader == QStringLiteral("neoforge")
+                   && !m_resolvedLoaderVersion.isEmpty()) {
+            expectedArgumentsPath = usesLegacyNeoForgeCoordinates(
+                                        m_version, m_resolvedLoaderVersion)
+                ? serverDir.filePath(
+                      QStringLiteral("libraries/net/neoforged/forge/%1-%2/%3")
+                          .arg(m_version, m_resolvedLoaderVersion,
+                               argumentsFileName))
+                : serverDir.filePath(
+                      QStringLiteral("libraries/net/neoforged/neoforge/%1/%2")
+                          .arg(m_resolvedLoaderVersion, argumentsFileName));
         }
-        downloadNeoForgeInstaller(builds.first());
-        return;
+        const bool hasExpectedArgumentsFile =
+            QFileInfo(expectedArgumentsPath).size() > 0;
+        bool hasArgumentsFile = hasExpectedArgumentsFile;
+        // A fresh installer may use an older or provider-specific layout that
+        // is still unambiguous. During an update, however, accepting any
+        // argument file below libraries/ could mistake the previous loader's
+        // files for the requested target build.
+        if (!hasArgumentsFile && !m_loaderScriptExistedBeforeInstall) {
+            QDirIterator arguments(serverDir.filePath(QStringLiteral("libraries")),
+                                   { argumentsFileName }, QDir::Files,
+                                   QDirIterator::Subdirectories);
+            while (arguments.hasNext()) {
+                if (QFileInfo(arguments.next()).size() > 0) {
+                    hasArgumentsFile = true;
+                    break;
+                }
+            }
+        }
+        if (!hasArgumentsFile) {
+            *errorMessage = tr("%1 installer created %2 but did not create its loader argument file.")
+                                .arg(loaderName, scriptName);
+            return false;
+        }
+        if (hasExpectedArgumentsFile && !expectedArgumentsPath.isEmpty()) {
+            QFile scriptFile(script.absoluteFilePath());
+            if (!scriptFile.open(QIODevice::ReadOnly)) {
+                *errorMessage = tr("%1 installer created %2 but J Launcher could not verify it.")
+                                    .arg(loaderName, scriptName);
+                return false;
+            }
+            const QString scriptContents = QDir::fromNativeSeparators(
+                QString::fromLocal8Bit(scriptFile.readAll()));
+            const QString expectedReference = QDir::fromNativeSeparators(
+                serverDir.relativeFilePath(expectedArgumentsPath));
+            if (!scriptContents.contains(expectedReference, Qt::CaseInsensitive)) {
+                *errorMessage = tr("%1 installer did not connect %2 to the requested loader build.")
+                                    .arg(loaderName, scriptName);
+                return false;
+            }
+        }
+
+        bool hasMinecraftServer = false;
+        QDirIterator minecraftServers(
+            serverDir.filePath(QStringLiteral("libraries/net/minecraft/server/%1")
+                                   .arg(m_version)),
+            { QStringLiteral("server-*.jar") }, QDir::Files,
+            QDirIterator::Subdirectories);
+        while (minecraftServers.hasNext()) {
+            if (QFileInfo(minecraftServers.next()).size() > 0) {
+                hasMinecraftServer = true;
+                break;
+            }
+        }
+        if (!hasMinecraftServer) {
+            *errorMessage = tr("%1 installer did not download the Minecraft server files. Check the installer network output and try again.")
+                                .arg(loaderName);
+            return false;
+        }
     }
-
-    QJsonDocument doc = QJsonDocument::fromJson(data);
-    if (doc.isNull()) {
-        m_step = Step::Idle;
-        finishDownload(false, tr("Failed to parse NeoForge version list."));
-        return;
-    }
-
-    QString error;
-    const QStringList builds = parseAvailableBuilds(
-        QStringLiteral("neoforge"), m_version, data, &error);
-    if (builds.isEmpty()) {
-        m_step = Step::Idle;
-        finishDownload(false, error.isEmpty()
-            ? tr("No NeoForge version found for Minecraft %1.").arg(m_version)
-            : error);
-        return;
-    }
-
-    downloadNeoForgeInstaller(builds.first());
-}
-
-void ServerDownloader::downloadNeoForgeInstaller(const QString &neoforgeVersion)
-{
-    m_resolvedLoaderVersion = neoforgeVersion;
-    const bool legacyCoordinates = usesLegacyNeoForgeCoordinates(
-        m_version, neoforgeVersion);
-    const QString installerRelativePath = legacyCoordinates
-        ? QStringLiteral(
-              "net/neoforged/forge/%1-%2/forge-%1-%2-installer.jar")
-              .arg(m_version, neoforgeVersion)
-        : QStringLiteral(
-              "net/neoforged/neoforge/%1/neoforge-%1-installer.jar")
-              .arg(neoforgeVersion);
-    const QUrl installerUrl = m_endpoints.neoForgeMavenBase.resolved(
-        QUrl(installerRelativePath));
-
-    QString installerPath = QDir(m_destinationDir).filePath("neoforge-installer.jar");
-
-    cleanUp();
-    m_pendingInstallerUrl = installerUrl;
-    m_pendingInstallerPath = installerPath;
-    fetchNeoForgeInstallerChecksum(installerUrl, installerPath);
-}
-
-void ServerDownloader::fetchNeoForgeInstallerChecksum(const QUrl &installerUrl,
-                                                       const QString &installerPath)
-{
-    QUrl checksumUrl = installerUrl;
-    checksumUrl.setPath(checksumUrl.path() + QStringLiteral(".sha1"));
-    m_pendingInstallerUrl = installerUrl;
-    m_pendingInstallerPath = installerPath;
-    m_step = Step::FetchingNeoForgeInstallerChecksum;
-    emit statusMessage(tr("Fetching NeoForge installer checksum..."));
-    m_currentReply = m_network->get(createRequest(checksumUrl));
-    connect(m_currentReply, &QNetworkReply::finished, this, [this]() {
-        handleReply(m_currentReply);
-    });
-}
-
-void ServerDownloader::onNeoForgeInstallerChecksumFetched(const QByteArray &data)
-{
-    const QStringList tokens = QString::fromLatin1(data).split(
-        QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
-    const QByteArray token = tokens.isEmpty() ? QByteArray() : tokens.first().toLatin1();
-    if (!isSha1(token)) {
-        finishDownload(false, tr("The NeoForge installer checksum is malformed."));
-        return;
-    }
-    m_step = Step::DownloadingNeoForgeInstaller;
-    emit statusMessage(tr("Downloading NeoForge installer..."));
-    startFileDownload(m_pendingInstallerUrl, m_pendingInstallerPath, token,
-                      QCryptographicHash::Sha1, false);
-}
-
-void ServerDownloader::onNeoForgeInstallerDownloaded()
-{
-    const QString installerPath = QDir(m_destinationDir).filePath("neoforge-installer.jar");
-    if (prefetchModernInstallerLibraries(installerPath, QStringLiteral("NeoForge")))
-        return;
-    startInstallerProcess(QStringLiteral("NeoForge"), installerPath);
+    return true;
 }

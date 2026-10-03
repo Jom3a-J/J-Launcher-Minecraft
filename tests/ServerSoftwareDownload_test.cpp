@@ -18,6 +18,7 @@
 #include <QTest>
 
 #include <algorithm>
+#include <tuple>
 #include <utility>
 
 #include <archive/ArchiveWriter.h>
@@ -592,6 +593,44 @@ class ServerSoftwareDownloadTest : public QObject {
             QVERIFY(!QFileInfo::exists(QDir(destination).filePath("run.bat")));
             QVERIFY(!QFileInfo::exists(
                 QDir(destination).filePath(provider.first + "-installer.jar")));
+        }
+    }
+
+    void failedInstallStepsSayWhatWasBeingFetched()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        FixtureHttpServer fixtureHttp;
+        QVERIFY(fixtureHttp.start());
+        // Each install gets partway, then asks for an address the fixture server does not know.
+        fixtureHttp.addRoute("/fabric/versions/installer", R"([{"version":"1.0.0","stable":true}])");
+        fixtureHttp.addRoute("/purpur/purpur/1.21.8", R"({"builds":{"latest":"2412"}})");
+
+        ServerProviderEndpoints endpoints{
+            fixtureHttp.url("/missing/vanilla-manifest"),
+            fixtureHttp.baseUrl("paper"),
+            fixtureHttp.baseUrl("fabric"),
+            fixtureHttp.baseUrl("purpur"),
+            fixtureHttp.url("/forge/promotions"),
+            fixtureHttp.baseUrl("forge-maven"),
+            fixtureHttp.url("/neoforge/versions"),
+            fixtureHttp.baseUrl("neoforge-maven"),
+        };
+        const QList<std::tuple<QString, QString, QString>> cases{
+            { "vanilla", "1.21.8", "Vanilla fetching the version manifest failed" },
+            { "fabric", "1.21.8", "Fabric fetching Fabric loader versions failed" },
+            { "forge", "1.21.1", "Forge resolving the loader installer failed" },
+            { "purpur", "1.21.8", "Failed to fetch the Purpur checksum for build 2412" },
+        };
+
+        for (const auto& [type, version, expected] : cases) {
+            ServerDownloader downloader(endpoints);
+            QSignalSpy finished(&downloader, &ServerDownloader::finished);
+            downloader.startDownload(version, type, temporaryRoot.filePath("failed-step/" + type));
+            QTRY_VERIFY_WITH_TIMEOUT(!finished.isEmpty(), 5000);
+            QVERIFY(!finished.constFirst().at(0).toBool());
+            const QString message = finished.constFirst().at(1).toString();
+            QVERIFY2(message.contains(expected), qPrintable(type + ": " + message));
         }
     }
 
