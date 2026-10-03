@@ -507,6 +507,8 @@ set(API_SOURCES
     modplatform/ModIndex.h
     modplatform/ServerSupport.h
     modplatform/ServerSupportRequestQueue.h
+    modplatform/ServerPackStaging.h
+    modplatform/ServerPackStaging.cpp
     modplatform/ModIndex.cpp
     modplatform/ResourceType.h
     modplatform/ResourceType.cpp
@@ -567,6 +569,8 @@ set(FLAME_SOURCES
     modplatform/flame/FlameCheckUpdate.h
     modplatform/flame/FlameInstanceCreationTask.h
     modplatform/flame/FlameInstanceCreationTask.cpp
+    modplatform/flame/FlameServerPack.h
+    modplatform/flame/FlameServerPack.cpp
     modplatform/flame/FlamePackExportTask.h
     modplatform/flame/FlamePackExportTask.cpp
 )

@@ -3,7 +3,9 @@
 #include "server/ServerPackCompatibility.h"
 #include "server/ServerModpackInstaller.h"
 
+#include "modplatform/ServerPackStaging.h"
 #include "modplatform/flame/CurseForgeHash.h"
+#include "modplatform/flame/FlameServerPack.h"
 
 #include "net/ChecksumValidator.h"
 
@@ -338,6 +340,121 @@ private slots:
         QCOMPARE(report.state, ServerPackCompatibilityState::KnownCompatible);
         QCOMPARE(findFile(report, "mods/client.jar")->side, ServerPackFileSide::ClientOnly);
         QCOMPARE(findFile(report, "mods/server.jar")->side, ServerPackFileSide::ServerOnly);
+    }
+
+    void stagingHelperWritesFilesTheReaderUnderstands()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        writeComponents(root.path(), "1.20.1", "fabric", "0.15.0");
+        QVERIFY(writeJson(
+            QDir(root.path()).filePath("flame/manifest.json"),
+            QJsonObject{
+                {"manifestType", "minecraftModpack"},
+                {"manifestVersion", 1},
+                {"minecraft", QJsonObject{
+                    {"version", "1.20.1"},
+                    {"modLoaders", QJsonArray{QJsonObject{{"id", "fabric-0.15.0"}}}},
+                }},
+            }));
+
+        namespace Staging = ModPlatform::ServerPackStaging;
+        QVERIFY(Staging::writeProviderMarker(Staging::path(root.path(), "provider.txt"), "curseforge"));
+        QVERIFY(Staging::writeProviderMarker(Staging::path(root.path(), "published-server-pack.txt"), "curseforge"));
+        Staging::FileLists lists;
+        QVERIFY(lists.open(root.path(), { Staging::FileLists::ClientOnly, Staging::FileLists::Include }));
+        lists.add(Staging::FileLists::ClientOnly, "mods\\client.jar");
+        lists.add(Staging::FileLists::ServerOnly, "mods/not-opened.jar");
+        lists.close();
+        QVERIFY(writeFile(Staging::serverFilesPath(root.path(), "mods/server.jar"), "server"));
+
+        QVERIFY(!QFileInfo::exists(Staging::path(root.path(), "server-only.txt")));
+        QFile marker(Staging::path(root.path(), "provider.txt"));
+        QVERIFY(marker.open(QIODevice::ReadOnly | QIODevice::Text));
+        QCOMPARE(marker.readAll(), QByteArray("curseforge\n"));
+        const auto report = inspectServerPack(root.path());
+        QCOMPARE(report.provider, QString("curseforge"));
+        QVERIFY(report.hasDedicatedServerPack);
+        QCOMPARE(findFile(report, "mods/client.jar")->side, ServerPackFileSide::ClientOnly);
+        QCOMPARE(findFile(report, "mods/server.jar")->side, ServerPackFileSide::ServerOnly);
+    }
+
+    void sortsCurseForgeFilesIntoServerListsBySide()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        namespace Staging = ModPlatform::ServerPackStaging;
+        Staging::FileLists lists;
+        QVERIFY(lists.open(root.path(), { Staging::FileLists::ClientOnly, Staging::FileLists::ServerOnly,
+                                          Staging::FileLists::Include, Staging::FileLists::Unknown }));
+        Flame::addToServerLists(lists, ModPlatform::SideType::ClientSide, true, "mods/client.jar");
+        Flame::addToServerLists(lists, ModPlatform::SideType::ClientSide, false, "mods/client-optional.jar");
+        Flame::addToServerLists(lists, ModPlatform::SideType::ServerSide, true, "mods/server.jar");
+        Flame::addToServerLists(lists, ModPlatform::SideType::NoSide, true, "mods/unknown.jar");
+        Flame::addToServerLists(lists, ModPlatform::SideType::UniversalSide, true, "mods/both.jar");
+        Flame::addToServerLists(lists, ModPlatform::SideType::UniversalSide, false, "mods/skipped.jar");
+        lists.close();
+
+        const auto lines = [&root](const QString& name) {
+            QFile file(Staging::path(root.path(), name));
+            return file.open(QIODevice::ReadOnly | QIODevice::Text)
+                ? QString::fromUtf8(file.readAll()).split('\n', Qt::SkipEmptyParts)
+                : QStringList{ "<unreadable>" };
+        };
+        QCOMPARE(lines("client-only.txt"), (QStringList{ "mods/client.jar", "mods/client-optional.jar" }));
+        QCOMPARE(lines("server-only.txt"), QStringList{ "mods/server.jar" });
+        QCOMPARE(lines("unknown.txt"), QStringList{ "mods/unknown.jar" });
+        QCOMPARE(lines("include.txt"), QStringList{ "mods/both.jar" });
+    }
+
+    void checksCurseForgeServerPackMetadata()
+    {
+        const Flame::ServerPackRequest request{ "100", "200", "300" };
+        const auto read = [&request](const QJsonObject& data, Flame::ServerPackSource* source, QString* warning) {
+            return Flame::readServerPackFile(QJsonDocument(QJsonObject{ { "data", data } }).toJson(), request, source, warning);
+        };
+        const QJsonObject serverPack{ { "modId", 100 }, { "id", 300 }, { "isServerPack", true }, { "parentProjectFileId", 200 } };
+        const QString sha1(40, 'a');
+
+        Flame::ServerPackSource source;
+        QString warning;
+        QJsonObject hashed = serverPack;
+        hashed["hashes"] = QJsonArray{ QJsonObject{ { "value", sha1 }, { "algo", 1 } } };
+        QCOMPARE(read(hashed, &source, &warning), QString());
+        QCOMPARE(source.hash, sha1);
+        QVERIFY(!source.hashType.isEmpty());
+        QVERIFY(warning.isEmpty());
+
+        source = {};
+        QCOMPARE(read(serverPack, &source, &warning), QString());
+        QVERIFY(source.hash.isEmpty());
+        QVERIFY2(warning.contains("did not publish a supported hash"), qPrintable(warning));
+
+        const auto rejects = [&read](QJsonObject data, const QString& expected) {
+            Flame::ServerPackSource ignored;
+            QString ignoredWarning;
+            const QString error = read(data, &ignored, &ignoredWarning);
+            QVERIFY2(error.contains(expected), qPrintable(error));
+        };
+        QJsonObject other = serverPack;
+        other["id"] = 301;
+        rejects(other, "different server pack");
+        QJsonObject client = serverPack;
+        client["isServerPack"] = false;
+        rejects(client, "not marked as a server pack");
+        QJsonObject wrongVersion = serverPack;
+        wrongVersion["parentProjectFileId"] = 201;
+        rejects(wrongVersion, "different modpack version");
+        QJsonObject badHashes = serverPack;
+        badHashes["hashes"] = "not a list";
+        rejects(badHashes, "malformed server-pack hash");
+        QJsonObject unsupported = serverPack;
+        unsupported["hashes"] = QJsonArray{ QJsonObject{ { "value", "short" }, { "algo", 1 } } };
+        rejects(unsupported, "no valid supported SHA-1 or MD5");
+
+        Flame::ServerPackSource ignored;
+        QString ignoredWarning;
+        QVERIFY(Flame::readServerPackFile("not json", request, &ignored, &ignoredWarning).contains("Could not understand"));
     }
 
     void validatesCurseForgeNeoForgeProjectionVersions()
