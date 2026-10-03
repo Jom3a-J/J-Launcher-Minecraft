@@ -893,6 +893,9 @@ SET(LAUNCHER_SOURCES
     server/ServerDownloaderForge.cpp
     ui/pages/server/ServerListPage.h
     ui/pages/server/ServerListPage.cpp
+    ui/pages/server/ServerListPageActions.cpp
+    ui/pages/server/ServerListPageLayout.cpp
+    ui/pages/server/ServerListPageModpack.cpp
     ui/pages/server/ServerAutomationTab.h
     ui/pages/server/ServerAutomationTab.cpp
     ui/pages/server/ServerBackupsTab.h
