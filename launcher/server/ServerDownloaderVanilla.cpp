@@ -16,100 +16,120 @@
 // Vanilla: Mojang's official server jar, verified against the version manifest.
 
 #include "ServerDownloader.h"
+#include "ServerDownloaderProvider.h"
 #include "ServerDownloaderShared.h"
-#include <QNetworkRequest>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
-#include <QDir>
 #include <QUrl>
-#include <algorithm>
 
-using namespace ServerDownloaderDetail;
+namespace ServerDownloaderDetail {
 
-// ==================== Vanilla ====================
-
-void ServerDownloader::fetchVanillaManifest()
+bool findVanillaVersionDetails(const QByteArray &manifest, const QString &version,
+                               QString *detailsUrl, QString *error)
 {
-    m_step = Step::FetchingVanillaManifest;
-    emit statusMessage(tr("Fetching Mojang version manifest..."));
-
-    QNetworkRequest request = createRequest(m_endpoints.vanillaManifest);
-    m_currentReply = m_network->get(request);
-    connect(m_currentReply, &QNetworkReply::finished, this, [this]() {
-        handleReply(m_currentReply);
-    });
-}
-
-void ServerDownloader::onVanillaManifestFetched(const QByteArray &data)
-{
-    QJsonDocument doc = QJsonDocument::fromJson(data);
+    QJsonDocument doc = QJsonDocument::fromJson(manifest);
     if (doc.isNull()) {
-        finishDownload(false, tr("Failed to parse version manifest."));
-        return;
+        *error = ServerDownloader::tr("Failed to parse version manifest.");
+        return false;
     }
 
     QJsonArray versions = doc.object()["versions"].toArray();
-    QString versionUrl;
-
     for (const auto &val : versions) {
         QJsonObject verObj = val.toObject();
-        if (verObj["id"].toString() == m_version) {
-            versionUrl = verObj["url"].toString();
+        if (verObj["id"].toString() == version) {
+            *detailsUrl = verObj["url"].toString();
             break;
         }
     }
 
-    if (versionUrl.isEmpty()) {
-        finishDownload(false, tr("Version '%1' not found in manifest.").arg(m_version));
-        return;
+    if (detailsUrl->isEmpty()) {
+        *error = ServerDownloader::tr("Version '%1' not found in manifest.").arg(version);
+        return false;
     }
-
-    fetchVanillaVersionJson(versionUrl);
+    return true;
 }
 
-void ServerDownloader::fetchVanillaVersionJson(const QString &url)
+bool findVanillaServerJar(const QByteArray &details, QString *jarUrl, QByteArray *sha1,
+                          QString *error)
 {
-    m_step = Step::FetchingVanillaVersionJson;
-    emit statusMessage(tr("Fetching version details..."));
-
-    QNetworkRequest request = createRequest(QUrl(url));
-    m_currentReply = m_network->get(request);
-    connect(m_currentReply, &QNetworkReply::finished, this, [this]() {
-        handleReply(m_currentReply);
-    });
-}
-
-void ServerDownloader::onVanillaVersionJsonFetched(const QByteArray &data)
-{
-    QJsonDocument doc = QJsonDocument::fromJson(data);
+    QJsonDocument doc = QJsonDocument::fromJson(details);
     if (doc.isNull()) {
-        finishDownload(false, tr("Failed to parse version details."));
-        return;
+        *error = ServerDownloader::tr("Failed to parse version details.");
+        return false;
     }
 
     QJsonObject downloads = doc.object()["downloads"].toObject();
     QJsonObject server = downloads["server"].toObject();
-    QString jarUrl = server["url"].toString();
-    QByteArray sha1 = server["sha1"].toString().toLatin1();
+    *jarUrl = server["url"].toString();
+    *sha1 = server["sha1"].toString().toLatin1();
 
-    if (jarUrl.isEmpty() || sha1.isEmpty()) {
-        finishDownload(false, tr("No server download URL found for this version."));
-        return;
+    if (jarUrl->isEmpty() || sha1->isEmpty()) {
+        *error = ServerDownloader::tr("No server download URL found for this version.");
+        return false;
+    }
+    return true;
+}
+
+}  // namespace ServerDownloaderDetail
+
+using namespace ServerDownloaderDetail;
+
+namespace {
+
+class VanillaServerProvider final : public ServerDownloaderProvider
+{
+public:
+    using ServerDownloaderProvider::ServerDownloaderProvider;
+
+    QUrl versionListUrl() const override { return endpoints().vanillaManifest; }
+    QUrl buildListUrl(const QString &) const override { return {}; }
+
+    void start() override
+    {
+        m_step = Step::FetchingManifest;
+        status(tr("Fetching Mojang version manifest..."));
+        request(endpoints().vanillaManifest);
     }
 
-    if (m_fetchingLegacyForgeServerJar) {
-        m_fetchingLegacyForgeServerJar = false;
-        m_legacyForgeServerJarPath = QDir(m_destinationDir).filePath(
-            QStringLiteral("minecraft_server.%1.jar").arg(m_version));
-        if (fileMatchesSha1(m_legacyForgeServerJarPath, sha1)) {
-            beginForgeInstallerDownload(m_pendingForgeVersion, m_pendingForgeMavenVersion);
+    void onReply(const QByteArray &data) override
+    {
+        QString error;
+        if (m_step == Step::FetchingManifest) {
+            QString detailsUrl;
+            if (!findVanillaVersionDetails(data, version(), &detailsUrl, &error)) {
+                fail(error);
+                return;
+            }
+            m_step = Step::FetchingVersionDetails;
+            status(tr("Fetching version details..."));
+            request(QUrl(detailsUrl));
             return;
         }
-        m_downloadingLegacyForgeServerJar = true;
-        downloadFile(jarUrl, m_legacyForgeServerJarPath, sha1, QCryptographicHash::Sha1);
-        return;
+
+        QString jarUrl;
+        QByteArray sha1;
+        if (!findVanillaServerJar(data, &jarUrl, &sha1, &error)) {
+            fail(error);
+            return;
+        }
+        downloadServerJar(QUrl(jarUrl), sha1, QCryptographicHash::Sha1);
     }
 
-    downloadFile(jarUrl, m_targetJarPath, sha1, QCryptographicHash::Sha1);
+    QString currentStep() const override
+    {
+        return m_step == Step::FetchingManifest ? tr("fetching the version manifest")
+                                                : tr("fetching version details");
+    }
+
+private:
+    enum class Step { FetchingManifest, FetchingVersionDetails };
+    Step m_step = Step::FetchingManifest;
+};
+
+}  // namespace
+
+std::unique_ptr<ServerDownloaderProvider> makeVanillaServerProvider(ServerDownloader &downloader)
+{
+    return std::make_unique<VanillaServerProvider>(downloader);
 }

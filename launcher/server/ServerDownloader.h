@@ -23,10 +23,12 @@
 #include <QStringList>
 #include <QUrl>
 #include <QHash>
+#include <memory>
 
 #include "net/NetJob.h"
 
 class QProcess;
+class ServerDownloaderProvider;
 
 struct ServerProviderEndpoints
 {
@@ -46,11 +48,11 @@ QString serverLoaderInstallIncompleteMarkerPath(const QString &serverDirectory);
 
 /*! Lists and downloads server software for every supported server type.
  *
- *  One object runs one request at a time; m_step says which reply is expected next. The
- *  implementation is split by server type: ServerDownloader.cpp (requests, file downloads,
- *  cancelling, install checks), ServerDownloaderCatalog.cpp (parsing version and build lists),
- *  and ServerDownloaderVanilla/Paper/Fabric/Forge.cpp (each type's download steps; Paper also
- *  holds Purpur, Forge also holds NeoForge and the installer).
+ *  One object runs one request or install at a time. It owns the network requests, file
+ *  downloads and the Forge-style installer process, so cancelling stops all of them; each server
+ *  type's own steps live in a ServerDownloaderProvider (ServerDownloaderVanilla/Paper/Fabric/
+ *  Forge.cpp; Paper also holds Purpur, Forge also holds NeoForge and the installer run).
+ *  ServerDownloaderCatalog.cpp reads the version and build lists the providers publish.
  */
 class ServerDownloader : public QObject
 {
@@ -98,122 +100,56 @@ signals:
     void buildsFailed(const QString &errorMessage);
 
 private:
-    // Network helpers
+    friend class ServerDownloaderProvider;
+
+    enum class Activity {
+        Idle,
+        ListingVersions,
+        ListingBuilds,
+        Installing
+    };
+    //! The file download in progress during an install, if any.
+    enum class FileDownload {
+        None,
+        ServerJar,          //!< The finished server jar; the install ends when it arrives.
+        LargeFile,          //!< Another server jar the install needs, fetched in ranged pieces.
+        SmallFile,          //!< A loader installer.
+        InstallerLibraries  //!< Libraries fetched ahead of a Forge-style installer.
+    };
+
+    // Requests and file downloads (ServerDownloader.cpp)
     QNetworkRequest createRequest(const QUrl &url);
-    void downloadFile(const QString &url, const QString &outputPath,
-                      const QByteArray &expectedHash = QByteArray(),
-                      QCryptographicHash::Algorithm hashAlgorithm = QCryptographicHash::Sha256);
+    void sendRequest(const QUrl &url);
+    void handleReply(QNetworkReply *reply);
+    void downloadServerJar(const QUrl &url, const QByteArray &expectedHash,
+                           QCryptographicHash::Algorithm hashAlgorithm);
     void startFileDownload(const QUrl &url, const QString &outputPath,
                            const QByteArray &expectedHash,
                            QCryptographicHash::Algorithm hashAlgorithm,
-                           bool mayBeLarge);
+                           FileDownload kind);
     void onFileDownloadSucceeded();
     void onFileDownloadFailed(const QString &reason);
-    void finishDownload(bool success, const QString &errorMessage = QString());
     void retireFileDownloadJob(bool abort);
-    bool writeLoaderInstallIncompleteMarker(QString *errorMessage) const;
-    void stopInstallerProcess();
-    bool validateLoaderInstallation(const QString &loaderName,
-                                    QString *errorMessage) const;
+    void finishDownload(bool success, const QString &errorMessage = QString());
+    void failCurrentRequest(const QString &message);
+    QString currentFailureContext() const;
+    void onVersionManifestFetched(const QByteArray &data);
+    void onBuildManifestFetched(const QByteArray &data);
     void cleanUp();
 
-    // Generic reply handler
-    void handleReply(QNetworkReply *reply);
-
-    // Vanilla
-    void fetchVanillaManifest();
-    void onVanillaManifestFetched(const QByteArray &data);
-    void fetchVanillaVersionJson(const QString &url);
-    void onVanillaVersionJsonFetched(const QByteArray &data);
-
-    // Paper (v3 API — fill.papermc.io)
-    void fetchPaperBuilds();
-    void onPaperBuildsFetched(const QByteArray &data);
-
-    // Fabric
-    void fetchFabricInstaller();
-    void onFabricInstallerFetched(const QByteArray &data);
-    void fetchFabricLoader(const QString &installerVer);
-    void onFabricLoaderFetched(const QString &installerVer, const QByteArray &data);
-
-    // Purpur
-    void fetchPurpurBuilds();
-    void onPurpurBuildsFetched(const QByteArray &data);
-    void onPurpurBuildInfoFetched(const QByteArray &data);
-
-    // Forge
-    void fetchForgeVersions();
-    void onForgeVersionsFetched(const QByteArray &data);
-    void downloadForgeInstaller(const QString &forgeVersion);
-    void onForgeInstallerMetadataFetched(const QByteArray &data);
-    QString resolveForgeMavenVersion(const QByteArray &data, const QString &forgeVersion) const;
-    void prepareForgeInstaller(const QString &forgeVersion, const QString &mavenVersion);
-    void beginForgeInstallerDownload(const QString &forgeVersion, const QString &mavenVersion);
-    void fetchForgeInstallerChecksum(const QUrl &installerUrl, const QString &installerPath);
-    void onForgeInstallerChecksumFetched(const QByteArray &data);
-    void onForgeInstallerDownloaded();
+    // Forge-style loader installers (ServerDownloaderForge.cpp)
+    void runLoaderInstaller(const QString &loaderName, const QString &installerPath);
     bool prefetchModernInstallerLibraries(const QString &installerPath, const QString &loaderName);
     void onInstallerLibrariesPrefetched();
     void startInstallerProcess(const QString &loaderName, const QString &installerPath);
+    void stopInstallerProcess();
+    bool writeLoaderInstallIncompleteMarker(QString *errorMessage) const;
+    bool validateLoaderInstallation(const QString &loaderName,
+                                    QString *errorMessage) const;
 
-    // NeoForge
-    void fetchNeoForgeVersions();
-    void onNeoForgeVersionsFetched(const QByteArray &data);
-    void downloadNeoForgeInstaller(const QString &neoForgeVersion);
-    void fetchNeoForgeInstallerChecksum(const QUrl &installerUrl, const QString &installerPath);
-    void onNeoForgeInstallerChecksumFetched(const QByteArray &data);
-    void onNeoForgeInstallerDownloaded();
-
-    // Version manifest fetching
-    void onVersionManifestFetched(const QByteArray &data);
-    void onBuildManifestFetched(const QByteArray &data);
-    bool isVersionListStep() const;
-    bool isBuildListStep() const;
-    void failCurrentRequest(const QString &message);
-    QString currentFailureContext() const;
-
-    enum class Step {
-        Idle,
-        // Version listing
-        FetchingVersionManifest,
-        FetchingPaperVersions,
-        FetchingFabricGameVersions,
-        FetchingPurpurVersions,
-        FetchingForgePromotions,
-        FetchingNeoForgeGameVersions,
-        // Build/loader listing for one Minecraft version
-        FetchingPaperBuildList,
-        FetchingFabricBuildList,
-        FetchingPurpurBuildList,
-        FetchingForgeBuildList,
-        FetchingNeoForgeBuildList,
-        // Vanilla
-        FetchingVanillaManifest,
-        FetchingVanillaVersionJson,
-        // Paper
-        FetchingPaperBuilds,
-        // Fabric
-        FetchingFabricInstallerList,
-        FetchingFabricLoaderList,
-        // Purpur
-        FetchingPurpurBuilds,
-        FetchingPurpurBuildInfo,
-        // Forge
-        FetchingForgeVersions,
-        ResolvingForgeInstallerMetadata,
-        FetchingForgeInstallerChecksum,
-        DownloadingForgeInstaller,
-        DownloadingLegacyForgeServerJar,
-        // NeoForge
-        FetchingNeoForgeVersions,
-        FetchingNeoForgeInstallerChecksum,
-        DownloadingNeoForgeInstaller,
-        DownloadingInstallerLibraries,
-        // Final download
-        DownloadingJar
-    };
-
-    Step m_step = Step::Idle;
+    Activity m_activity = Activity::Idle;
+    FileDownload m_fileDownload = FileDownload::None;
+    std::unique_ptr<ServerDownloaderProvider> m_provider; //!< The server type being installed.
     QString m_version;
     QString m_type;
     QString m_destinationDir;
@@ -225,17 +161,8 @@ private:
     QString m_versionsType;
     QString m_buildsType;
     QString m_buildsVersion;
-    QString m_fabricInstallerVer; // cached for Fabric two-step
-    bool m_fabricJarPendingValidation = false;
-    QString m_pendingInstallerPath;
-    QUrl m_pendingInstallerUrl;
-    QString m_pendingPurpurBuild;
-    QString m_pendingForgeVersion;
-    QString m_pendingForgeMavenVersion;
-    QString m_legacyForgeServerJarPath;
-    bool m_fetchingLegacyForgeServerJar = false;
-    bool m_downloadingLegacyForgeServerJar = false;
     QString m_pendingInstallerLoader;
+    QString m_pendingInstallerPath;
     QStringList m_prefetchLibraryPaths;
     QHash<QString, QByteArray> m_prefetchLibraryHashes;
 
@@ -248,5 +175,4 @@ private:
     QList<NetJob::Ptr> m_retiredJobs;
     QString m_fileDownloadPath;
     ServerProviderEndpoints m_endpoints;
-    bool m_finishedEmitted = false;
-};
+    bool m_finishedEmitted = false;};

@@ -15,4 +15,16 @@ bool fileMatchesSha1(const QString &path, const QByteArray &expectedSha1);
 /// Whether value is a 40-digit hex SHA-1.
 bool isSha1(const QByteArray &value);
 
+/// The run script a Forge-style installer writes on this platform.
+QString platformLoaderScriptName();
+/// The loader argument file that run script reads on this platform.
+QString platformLoaderArgumentsFileName();
+
+/// Finds a version's details URL in Mojang's version manifest. False with *error set otherwise.
+bool findVanillaVersionDetails(const QByteArray &manifest, const QString &version,
+                               QString *detailsUrl, QString *error);
+/// Reads the server jar's URL and SHA-1 from a version's details. False with *error set otherwise.
+bool findVanillaServerJar(const QByteArray &details, QString *jarUrl, QByteArray *sha1,
+                          QString *error);
+
 }  // namespace ServerDownloaderDetail
