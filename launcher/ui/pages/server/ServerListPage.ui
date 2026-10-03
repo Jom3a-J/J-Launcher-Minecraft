@@ -1,13 +1,5 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <ui version="4.0">
- <!--
- THESIS: A server operations workspace keeps fleet state, the selected server, and its tools continuously legible; it refuses crowded horizontal tabs and undifferentiated button rows.
- OWN-WORLD: Native Qt palette surfaces, launcher-palette action emphasis, blue theme icons, restrained separators, compact operational typography, and status colors paired with text.
- STORY: Choose a server, understand its state, take the safest primary action, then move through focused administration tools without losing context.
- FIRST VIEWPORT: A compact command header spans the window; the searchable server rail anchors the left; a persistent server command bar and vertical tool navigation own the workspace.
- FORM: Fleet Operations Workspace, structure 4; seed aa8e1623.
- FINISH: unreviewed and undocumented is unfinished; this build ends with the finish review, the verdict, and DESIGN.md
- -->
  <class>ServerListPage</class>
  <widget class="QWidget" name="ServerListPage">
   <property name="geometry">
