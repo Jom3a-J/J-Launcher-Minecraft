@@ -38,6 +38,7 @@
 
 #include "FTBPackInstallTask.h"
 
+#include <iterator>
 #include <utility>
 
 #include "FileSystem.h"
@@ -86,7 +87,24 @@ QString dedicatedServerInstallerUrl(int packId, int versionId)
         .arg(versionId);
 }
 
-bool verifyTrustedWindowsExecutable(const QString& path, QString* error)
+#ifdef Q_OS_WIN
+/// The name on the certificate that signed a file WinVerifyTrust has just accepted.
+QString verifiedSignerName(HANDLE stateData)
+{
+    CRYPT_PROVIDER_DATA* provider = WTHelperProvDataFromStateData(stateData);
+    CRYPT_PROVIDER_SGNR* signer = provider ? WTHelperGetProvSignerFromChain(provider, 0, FALSE, 0) : nullptr;
+    if (!signer || signer->csCertChain == 0 || !signer->pasCertChain || !signer->pasCertChain[0].pCert) {
+        return {};
+    }
+    wchar_t name[256];
+    const DWORD length = CertGetNameStringW(signer->pasCertChain[0].pCert, CERT_NAME_SIMPLE_DISPLAY_TYPE, 0, nullptr,
+                                            name, static_cast<DWORD>(std::size(name)));
+    return length > 1 ? QString::fromWCharArray(name, static_cast<int>(length - 1)) : QString();
+}
+#endif
+}
+
+bool verifyTrustedWindowsExecutable(const QString& path, const QString& expectedSigner, QString* error)
 {
 #ifdef Q_OS_WIN
     WINTRUST_FILE_INFO fileInfo{};
@@ -105,22 +123,33 @@ bool verifyTrustedWindowsExecutable(const QString& path, QString* error)
 
     GUID policy = WINTRUST_ACTION_GENERIC_VERIFY_V2;
     const LONG status = WinVerifyTrust(nullptr, &policy, &trustData);
+    const QString signer = status == ERROR_SUCCESS ? verifiedSignerName(trustData.hWVTStateData) : QString();
     trustData.dwStateAction = WTD_STATEACTION_CLOSE;
     WinVerifyTrust(nullptr, &policy, &trustData);
-    if (status == ERROR_SUCCESS) {
-        return true;
+    if (status != ERROR_SUCCESS) {
+        if (error) {
+            *error = QObject::tr(
+                "The official FTB server installer did not pass Windows signature "
+                "verification (error 0x%1), so it was not run.")
+                         .arg(static_cast<qulonglong>(
+                                  static_cast<unsigned long>(status)),
+                              8, 16, QLatin1Char('0'));
+        }
+        return false;
     }
-    if (error) {
-        *error = QObject::tr(
-            "The official FTB server installer did not pass Windows signature "
-            "verification (error 0x%1), so it was not run.")
-                     .arg(static_cast<qulonglong>(
-                              static_cast<unsigned long>(status)),
-                          8, 16, QLatin1Char('0'));
+    // A valid signature only proves someone signed it; the installer must come from FTB itself.
+    if (signer != expectedSigner) {
+        if (error) {
+            *error = QObject::tr(
+                "The FTB server installer is signed by \"%1\" instead of \"%2\", so it was not run.")
+                         .arg(signer.isEmpty() ? QObject::tr("an unknown publisher") : signer, expectedSigner);
+        }
+        return false;
     }
-    return false;
+    return true;
 #else
     Q_UNUSED(path)
+    Q_UNUSED(expectedSigner)
     if (error) {
         *error = QObject::tr(
             "Automatic FTB server-package installation is currently supported "
@@ -128,7 +157,6 @@ bool verifyTrustedWindowsExecutable(const QString& path, QString* error)
     }
     return false;
 #endif
-}
 }
 
 ModPlatform::ServerSupport serverPackSupportFromHttpStatus(int status, bool networkError)
@@ -609,7 +637,7 @@ bool PackInstallTask::finalizeServerCompatibilityManifest(QString* error)
 void PackInstallTask::installDedicatedServerPack()
 {
     QString verificationError;
-    if (!verifyTrustedWindowsExecutable(m_serverInstallerPath,
+    if (!verifyTrustedWindowsExecutable(m_serverInstallerPath, ServerInstallerSigner,
                                         &verificationError)) {
         emitFailed(verificationError);
         return;

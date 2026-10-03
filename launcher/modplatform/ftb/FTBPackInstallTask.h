@@ -58,6 +58,10 @@ class QProcess;
 namespace FTB {
 
 inline constexpr int ServerPackProbeConcurrency = 1;
+/// The publisher on the code-signing certificate of FTB's official server installer.
+inline constexpr auto ServerInstallerSigner = "Feed The Beast Ltd";
+/// True when Windows trusts the file's signature and it was signed by expectedSigner.
+bool verifyTrustedWindowsExecutable(const QString& path, const QString& expectedSigner, QString* error);
 ModPlatform::ServerSupport serverPackSupportFromHttpStatus(int status, bool networkError);
 void probeDedicatedServerPack(QNetworkAccessManager* network, int packId, int versionId, QObject* owner,
                               std::function<void(ModPlatform::ServerSupport)> callback);
