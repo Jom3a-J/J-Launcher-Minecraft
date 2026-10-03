@@ -151,6 +151,8 @@ set(NET_SOURCES
     net/ApiUpload.h
     net/NetRequest.cpp
     net/NetRequest.h
+    net/RequestPolicy.cpp
+    net/RequestPolicy.h
 )
 
 # Game launch logic
@@ -682,6 +684,8 @@ set(PRISMUPDATER_SOURCES
     net/Logging.cpp
     net/NetRequest.cpp
     net/NetRequest.h
+    net/RequestPolicy.cpp
+    net/RequestPolicy.h
     net/NetJob.cpp
     net/NetJob.h
     net/NetUtils.h

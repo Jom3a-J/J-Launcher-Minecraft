@@ -41,12 +41,10 @@
 
 #include <QDateTime>
 #include <QFileInfo>
-#include <QHttp1Configuration>
 #include <QLocale>
 #include <QNetworkReply>
 #include <QtMath>
 #include <QUrl>
-#include <array>
 #include <cstdint>
 #include <memory>
 
@@ -61,98 +59,9 @@
 #include "net/HostScheduler.h"
 #include "logs/Privacy.h"
 #include "net/NetUtils.h"
+#include "net/RequestPolicy.h"
 
 namespace Net {
-
-namespace {
-constexpr int MaxRedirects = 10;
-
-int effectivePort(const QUrl& url)
-{
-    if (url.port() != -1) {
-        return url.port();
-    }
-    if (url.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0) {
-        return 443;
-    }
-    if (url.scheme().compare(QStringLiteral("http"), Qt::CaseInsensitive) == 0) {
-        return 80;
-    }
-    return -1;
-}
-
-bool sameOrigin(const QUrl& first, const QUrl& second)
-{
-    return first.scheme().compare(second.scheme(), Qt::CaseInsensitive) == 0
-        && first.host().compare(second.host(), Qt::CaseInsensitive) == 0
-        && effectivePort(first) == effectivePort(second);
-}
-
-bool containsCredentials(const QNetworkRequest& request)
-{
-    static const std::array<QByteArray, 5> credentialHeaders = {
-        QByteArrayLiteral("authorization"),
-        QByteArrayLiteral("proxy-authorization"),
-        QByteArrayLiteral("cookie"),
-        QByteArrayLiteral("set-cookie"),
-        QByteArrayLiteral("x-api-key"),
-    };
-
-    for (const auto& header : request.rawHeaderList()) {
-        const auto lowerHeader = header.toLower();
-        for (const auto credentialHeader : credentialHeaders) {
-            if (lowerHeader == credentialHeader) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-void applyHttp1TransportSettings(QNetworkRequest& request, int connectionCount)
-{
-    auto http1 = request.http1Configuration();
-    http1.setNumberOfConnectionsPerHost(connectionCount);
-    request.setHttp1Configuration(http1);
-    request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
-}
-}  // namespace
-
-bool applyCdnHttp1TransportPolicy(QNetworkRequest& request, bool enabled)
-{
-    if (!enabled)
-        return false;
-
-    // Host classification is an exact allowlist; do not broaden this to a forgecdn.net suffix.
-    if (HostScheduler::classify(request.url()) != HostClass::FlameCdn) {
-        return false;
-    }
-
-    const int connectionCount = HostScheduler::hardCeiling(HostScheduler::classify(request.url()));
-    applyHttp1TransportSettings(request, connectionCount);
-    return true;
-}
-
-bool applyMojangHttp1TransportPolicy(QNetworkRequest& request, bool enabled)
-{
-    if (!enabled)
-        return false;
-
-    const QString host = request.url().host();
-    const HostClass hostClass = HostScheduler::classify(request.url());
-    int connectionCount = 0;
-    if (hostClass == HostClass::MinecraftResources || hostClass == HostClass::MinecraftLibraries) {
-        connectionCount = HostScheduler::hardCeiling(hostClass);
-    } else if (host.compare(QStringLiteral("piston-data.mojang.com"), Qt::CaseInsensitive) == 0) {
-        // Piston data remains in the Unknown scheduler class and keeps its existing ceiling.
-        connectionCount = HostScheduler::UnknownHostCeiling;
-    } else {
-        return false;
-    }
-
-    applyHttp1TransportSettings(request, connectionCount);
-    return true;
-}
 
 NetRequest::NetRequest() : Task()
 {
@@ -456,67 +365,16 @@ auto NetRequest::handleRedirect() -> bool
         return false;
     }
 
-    const QByteArray redirectBytes = m_reply->rawHeader("Location");
-    if (redirectBytes.isEmpty()) {
-        m_state = State::Failed;
-        m_redirectRejected = true;
-        m_failReason = tr("Redirect rejected: the destination was empty.");
-        qCWarning(logCat) << getUid().toString() << m_failReason;
-        return false;
-    }
-
     const QUrl currentUrl = m_reply->url().isValid() ? m_reply->url() : m_url;
-    QUrl redirect(QString::fromUtf8(redirectBytes), QUrl::TolerantMode);
-    if (!redirect.isValid()) {
+    const auto decision = checkRedirect(currentUrl, m_reply->rawHeader("Location"), m_requestHadCredentials, m_redirectCount);
+    if (!decision.rejection.isEmpty()) {
         m_state = State::Failed;
         m_redirectRejected = true;
-        m_failReason = tr("Redirect rejected: the destination was invalid.");
+        m_failReason = decision.rejection;
         qCWarning(logCat) << getUid().toString() << m_failReason;
         return false;
     }
-    redirect = currentUrl.resolved(redirect);
-    if (!redirect.isValid() || redirect.scheme().isEmpty() || redirect.host().isEmpty()) {
-        m_state = State::Failed;
-        m_redirectRejected = true;
-        m_failReason = tr("Redirect rejected: the destination was invalid.");
-        qCWarning(logCat) << getUid().toString() << m_failReason;
-        return false;
-    }
-
-    const QString currentScheme = currentUrl.scheme().toLower();
-    const QString redirectScheme = redirect.scheme().toLower();
-    // Match NoLessSafeRedirectPolicy's permitted HTTP/HTTPS transitions. The credential-origin
-    // check below is intentionally stricter than Qt's scheme-only redirect policy.
-    const bool safeSchemeTransition =
-        (currentScheme == QStringLiteral("http")
-         && (redirectScheme == QStringLiteral("http") || redirectScheme == QStringLiteral("https")))
-        || (currentScheme == QStringLiteral("https") && redirectScheme == QStringLiteral("https"));
-    if (!safeSchemeTransition) {
-        m_state = State::Failed;
-        m_redirectRejected = true;
-        if (currentScheme == QStringLiteral("https") && redirectScheme == QStringLiteral("http"))
-            m_failReason = tr("Redirect rejected: HTTPS cannot be downgraded to HTTP.");
-        else
-            m_failReason = tr("Redirect rejected: the scheme transition is not permitted.");
-        qCWarning(logCat) << getUid().toString() << m_failReason;
-        return false;
-    }
-
-    if (m_requestHadCredentials && !sameOrigin(currentUrl, redirect)) {
-        m_state = State::Failed;
-        m_redirectRejected = true;
-        m_failReason = tr("Redirect rejected: credentials cannot cross origins.");
-        qCWarning(logCat) << getUid().toString() << m_failReason;
-        return false;
-    }
-
-    if (m_redirectCount >= MaxRedirects) {
-        m_state = State::Failed;
-        m_redirectRejected = true;
-        m_failReason = tr("Redirect rejected: too many redirects.");
-        qCWarning(logCat) << getUid().toString() << m_failReason;
-        return false;
-    }
+    const QUrl& redirect = decision.target;
 
     const bool crossHost = redirect.host().compare(currentUrl.host(), Qt::CaseInsensitive) != 0;
 
