@@ -551,6 +551,8 @@ set(FTB_SOURCES
 
     modplatform/ftb/FTBPackInstallTask.h
     modplatform/ftb/FTBPackInstallTask.cpp
+    modplatform/ftb/FTBServerPack.h
+    modplatform/ftb/FTBServerPack.cpp
     modplatform/ftb/FTBPackManifest.h
     modplatform/ftb/FTBPackManifest.cpp
 )
@@ -584,6 +586,8 @@ set(MODRINTH_SOURCES
     modplatform/modrinth/ModrinthDownloadPolicy.h
     modplatform/modrinth/ModrinthInstanceCreationTask.cpp
     modplatform/modrinth/ModrinthInstanceCreationTask.h
+    modplatform/modrinth/ModrinthServerFiles.cpp
+    modplatform/modrinth/ModrinthServerFiles.h
     modplatform/modrinth/ModrinthPackExportTask.cpp
     modplatform/modrinth/ModrinthPackExportTask.h
 )

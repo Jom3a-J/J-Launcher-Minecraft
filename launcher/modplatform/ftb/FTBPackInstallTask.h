@@ -42,30 +42,15 @@
 #include "InstanceTask.h"
 #include "QObjectPtr.h"
 #include "modplatform/flame/FileResolvingTask.h"
-#include "modplatform/ServerSupport.h"
+#include "modplatform/ftb/FTBServerPack.h"
 #include "net/NetJob.h"
 #include "ui/dialogs/BlockedModsDialog.h"
 
 #include <QWidget>
-#include <functional>
 #include <QSet>
 #include <memory>
 
-class QNetworkReply;
-class QNetworkAccessManager;
-class QProcess;
-
 namespace FTB {
-
-inline constexpr int ServerPackProbeConcurrency = 1;
-/// The publisher on the code-signing certificate of FTB's official server installer.
-inline constexpr auto ServerInstallerSigner = "Feed The Beast Ltd";
-/// True when Windows trusts the file's signature and it was signed by expectedSigner.
-bool verifyTrustedWindowsExecutable(const QString& path, const QString& expectedSigner, QString* error);
-ModPlatform::ServerSupport serverPackSupportFromHttpStatus(int status, bool networkError);
-void probeDedicatedServerPack(QNetworkAccessManager* network, int packId, int versionId, QObject* owner,
-                              std::function<void(ModPlatform::ServerSupport)> callback);
-void cancelDedicatedServerPackRequests(QObject* owner);
 
 class PackInstallTask final : public InstanceTask {
     Q_OBJECT
@@ -96,13 +81,12 @@ class PackInstallTask final : public InstanceTask {
     void downloadPack();
     void probeDedicatedServerPack();
     void installDedicatedServerPack();
-    bool finalizeServerCompatibilityManifest(QString *error);
     void copyBlockedMods();
 
    private:
     NetJob::Ptr m_net_job = nullptr;
     shared_qobject_ptr<Flame::FileResolvingTask> m_modIdResolverTask = nullptr;
-    std::unique_ptr<QProcess> m_serverInstallerProcess;
+    std::unique_ptr<ServerInstallerRun> m_serverInstaller;
 
     QList<int> m_fileIds;
 

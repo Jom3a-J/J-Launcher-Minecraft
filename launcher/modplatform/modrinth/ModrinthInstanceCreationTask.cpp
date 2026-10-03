@@ -20,7 +20,9 @@
 #include "logs/Privacy.h"
 
 #include "modplatform/ModIndex.h"
+#include "modplatform/ServerPackStaging.h"
 #include "modplatform/modrinth/ModrinthDownloadPolicy.h"
+#include "modplatform/modrinth/ModrinthServerFiles.h"
 #include "settings/INISettingsObject.h"
 
 #include "ui/dialogs/CustomMessageBox.h"
@@ -28,14 +30,8 @@
 #include "ui/pages/modplatform/OptionalModDialog.h"
 
 #include <QAbstractButton>
-#include <QDir>
 #include <QFileInfo>
 #include <QHash>
-#include <QJsonArray>
-#include <QJsonObject>
-#include <QRegularExpression>
-#include <functional>
-#include <memory>
 #include <vector>
 
 bool ModrinthCreationTask::abort()
@@ -186,13 +182,10 @@ void ModrinthCreationTask::createInstance()
     QString newIndexPlace(FS::PathCombine(parentFolder, "modrinth.index.json"));
     FS::ensureFilePathExists(newIndexPlace);
     FS::move(indexPath, newIndexPlace);
-    if (shouldCreateServerPair()) {
-        QFile providerMarker(FS::PathCombine(parentFolder, "provider.txt"));
-        if (!providerMarker.open(QIODevice::WriteOnly | QIODevice::Text)
-            || providerMarker.write("modrinth\n") != 9) {
-            emitFailed(tr("Could not record the Modrinth compatibility metadata."));
-            return;
-        }
+    if (shouldCreateServerPair()
+        && !ModPlatform::ServerPackStaging::writeProviderMarker(FS::PathCombine(parentFolder, "provider.txt"), "modrinth")) {
+        emitFailed(tr("Could not record the Modrinth compatibility metadata."));
+        return;
     }
 
     auto mcPath = FS::PathCombine(m_stagingPath, m_rootPath);
@@ -330,11 +323,13 @@ void ModrinthCreationTask::createInstance()
         }
     }
 
-    if (shouldCreateServerPair()
-        && !addServerOnlyDownloads(newIndexPlace,
-                                   FS::PathCombine(parentFolder, "server-files"),
-                                   downloadMods.get())) {
-        return;
+    if (shouldCreateServerPair()) {
+        const QString error =
+            Modrinth::addServerOnlyDownloads(newIndexPlace, FS::PathCombine(parentFolder, "server-files"), downloadMods.get());
+        if (!error.isEmpty()) {
+            emitFailed(error);
+            return;
+        }
     }
 
     connect(downloadMods.get(), &NetJob::succeeded, this, &ModrinthCreationTask::ensureMetaLoop);
@@ -349,145 +344,6 @@ void ModrinthCreationTask::createInstance()
     setStatus(tr("Downloading mods..."));
     downloadMods->start();
     m_task = downloadMods;
-}
-
-bool ModrinthCreationTask::addServerOnlyDownloads(const QString& indexPath,
-                                                  const QString& cacheRoot,
-                                                  NetJob* downloads)
-{
-    QJsonDocument document;
-    try {
-        document = Json::requireDocument(indexPath, "modrinth.index.json");
-    } catch (const JSONValidationError& e) {
-        emitFailed(tr("Could not read the Modrinth server file manifest:\n%1").arg(e.cause()));
-        return false;
-    }
-
-    if (!downloads || !document.isObject()) {
-        emitFailed(tr("The Modrinth server file manifest is malformed."));
-        return false;
-    }
-
-    const QJsonArray files = document.object().value(QStringLiteral("files")).toArray();
-    for (const QJsonValue& value : files) {
-        if (!value.isObject()) {
-            emitFailed(tr("The Modrinth server file manifest contains an invalid entry."));
-            return false;
-        }
-        const QJsonObject file = value.toObject();
-        const QJsonValue envValue = file.value(QStringLiteral("env"));
-        const QString filePath = file.value(QStringLiteral("path")).toString();
-        if (!envValue.isUndefined() && !envValue.isObject()) {
-            emitFailed(tr("The Modrinth environment metadata for %1 is malformed.").arg(filePath));
-            return false;
-        }
-        const QJsonObject environment = envValue.toObject();
-        QString clientSupport = QStringLiteral("required");
-        QString serverSupport = QStringLiteral("required");
-        const auto readSupport = [this, &environment, &filePath](const QString& key,
-                                                                  QString& support) {
-            if (!environment.contains(key)) {
-                return true;
-            }
-            const QJsonValue value = environment.value(key);
-            if (!value.isString()) {
-                emitFailed(tr("The Modrinth environment value for %1 is malformed.").arg(filePath));
-                return false;
-            }
-            support = value.toString();
-            if (support != QStringLiteral("required")
-                && support != QStringLiteral("optional")
-                && support != QStringLiteral("unsupported")) {
-                emitFailed(tr("The Modrinth environment value for %1 is unsupported.").arg(filePath));
-                return false;
-            }
-            return true;
-        };
-        if (!readSupport(QStringLiteral("client"), clientSupport)
-            || !readSupport(QStringLiteral("server"), serverSupport)) {
-            return false;
-        }
-        if (clientSupport == QStringLiteral("required")) {
-            continue;
-        }
-        if (serverSupport == QStringLiteral("unsupported")) {
-            continue;
-        }
-
-        const QString relativePath = QDir::cleanPath(filePath).replace('\\', '/');
-        if (relativePath.isEmpty() || relativePath == QStringLiteral("..")
-            || relativePath.startsWith(QStringLiteral("../")) || QDir::isAbsolutePath(relativePath)) {
-            emitFailed(tr("The Modrinth server manifest contains an unsafe path: %1").arg(relativePath));
-            return false;
-        }
-
-        const QJsonValue downloadsValue = file.value(QStringLiteral("downloads"));
-        if (!downloadsValue.isArray()) {
-            emitFailed(tr("The Modrinth server file %1 has invalid download metadata.").arg(relativePath));
-            return false;
-        }
-        const QJsonArray downloadValues = downloadsValue.toArray();
-        QList<QUrl> downloadUrls;
-        for (const QJsonValue& downloadValue : downloadValues) {
-            if (!downloadValue.isString()) {
-                emitFailed(tr("The Modrinth server file %1 has an invalid download URL.").arg(relativePath));
-                return false;
-            }
-            const QString urlText = downloadValue.toString().trimmed();
-            const QUrl url(urlText);
-            if (urlText.isEmpty() || !url.isValid()
-                || url.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) != 0
-                || url.host().isEmpty()) {
-                emitFailed(tr("The Modrinth server file %1 has an invalid HTTPS download URL.").arg(relativePath));
-                return false;
-            }
-            downloadUrls.append(url);
-        }
-        const QString sha512 = file.value(QStringLiteral("hashes")).toObject().value(QStringLiteral("sha512")).toString().trimmed();
-        if (downloadUrls.isEmpty() || sha512.size() != 128
-            || !QRegularExpression(QStringLiteral("^[0-9a-fA-F]{128}$")).match(sha512).hasMatch()) {
-            emitFailed(tr("The required Modrinth server file %1 has incomplete download or checksum metadata.").arg(relativePath));
-            return false;
-        }
-
-        const QString destination = FS::PathCombine(cacheRoot, relativePath);
-        FS::ensureFilePathExists(destination);
-        const QByteArray hash = QByteArray::fromHex(sha512.toLatin1());
-        auto enqueueDownload = [downloads, destination, hash,
-                                urls = std::move(downloadUrls)]() mutable {
-            struct DownloadFallbackState {
-                QList<QUrl> remaining;
-                std::function<void()> enqueue;
-            };
-
-            auto state = std::make_shared<DownloadFallbackState>();
-            state->remaining = std::move(urls);
-            const std::weak_ptr<DownloadFallbackState> weakState = state;
-            state->enqueue = [downloads, destination, hash, weakState]() {
-                auto state = weakState.lock();
-                if (!state || state->remaining.isEmpty()) {
-                    return;
-                }
-
-                auto download = Net::ApiDownload::makeFile(state->remaining.takeFirst(), destination);
-                download->addValidator(new Net::ChecksumValidator(QCryptographicHash::Sha512, hash));
-                if (!state->remaining.isEmpty()) {
-                    const auto previous = download.toWeakRef();
-                    QObject::connect(download.get(), &Task::failed, download.get(),
-                                     [state, previous] {
-                                         state->enqueue();
-                                         if (auto shared = previous.lock()) {
-                                             shared->succeeded();
-                                         }
-                                     });
-                }
-                downloads->addNetAction(download);
-            };
-            state->enqueue();
-        };
-        enqueueDownload();
-    }
-    return true;
 }
 
 bool ModrinthCreationTask::parseManifest(const QString& indexPath, std::vector<File>& files, bool setInternalData, bool showOptionalDialog)
