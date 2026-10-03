@@ -17,6 +17,7 @@
 
 #include "net/HostScheduler.h"
 #include "net/NetRequest.h"
+#include "net/RequestPolicy.h"
 
 using Net::HostClass;
 using Net::HostScheduler;
@@ -161,6 +162,40 @@ class CdnTransportPolicyTest final : public QObject {
         QVERIFY(!Net::applyCdnHttp1TransportPolicy(request, false));
         QVERIFY(!request.attribute(QNetworkRequest::Http2AllowedAttribute).isValid());
         QCOMPARE(request.http1Configuration().numberOfConnectionsPerHost(), originalConnectionCount);
+    }
+
+    void redirectsAreFollowedOnlyWhenSafe()
+    {
+        const QUrl current(QStringLiteral("https://api.example.com/files/1"));
+        const auto check = [&current](const QByteArray& location, bool credentials = false, int followed = 0) {
+            return Net::checkRedirect(current, location, credentials, followed);
+        };
+
+        // Relative and absolute redirects resolve against the current address.
+        QCOMPARE(check("/files/2").target, QUrl(QStringLiteral("https://api.example.com/files/2")));
+        QCOMPARE(check("//cdn.example.com/f").target, QUrl(QStringLiteral("https://cdn.example.com/f")));
+        QVERIFY(check("https://cdn.example.com/f").rejection.isEmpty());
+        // HTTP may move up to HTTPS.
+        QVERIFY(Net::checkRedirect(QUrl(QStringLiteral("http://a.example.com/")), "https://b.example.com/", false, 0)
+                    .rejection.isEmpty());
+
+        const auto rejects = [](const Net::RedirectDecision& decision, const QString& expected) {
+            QVERIFY2(decision.rejection.contains(expected), qPrintable(decision.rejection));
+            QVERIFY(decision.target.isEmpty());
+        };
+        rejects(check(""), QStringLiteral("empty"));
+        rejects(check("http://cdn.example.com/f"), QStringLiteral("cannot be downgraded"));
+        rejects(check("ftp://cdn.example.com/f"), QStringLiteral("not permitted"));
+        rejects(check("https://other.example.com/f", true), QStringLiteral("credentials cannot cross origins"));
+        rejects(check("https://api.example.com:8443/f", true), QStringLiteral("credentials cannot cross origins"));
+        QVERIFY(check("https://api.example.com:443/f", true).rejection.isEmpty());
+        rejects(check("/f", false, Net::MaxRedirects), QStringLiteral("too many redirects"));
+        QVERIFY(check("/f", false, Net::MaxRedirects - 1).rejection.isEmpty());
+
+        QNetworkRequest withKey(QUrl(QStringLiteral("https://api.example.com/")));
+        QVERIFY(!Net::containsCredentials(withKey));
+        withKey.setRawHeader("X-Api-Key", "secret");
+        QVERIFY(Net::containsCredentials(withKey));
     }
 };
 

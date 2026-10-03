@@ -45,6 +45,43 @@ class ModpackServerSupportTest final : public QObject {
         QCOMPARE(FTB::serverPackSupportFromHttpStatus(0, true), ModPlatform::ServerSupport::Unknown);
     }
 
+    void ftbServerIncludeListNeedsEveryRequiredFile()
+    {
+        QTemporaryDir staging;
+        QVERIFY(staging.isValid());
+        const auto file = [](const QString& name, bool clientOnly, bool serverOnly, bool optional) {
+            FTB::VersionFile entry{};
+            entry.path = QStringLiteral("mods");
+            entry.name = name;
+            entry.clientOnly = clientOnly;
+            entry.serverOnly = serverOnly;
+            entry.optional = optional;
+            return entry;
+        };
+        const auto put = [&staging](const QString& relativePath) {
+            const QString path = staging.filePath(relativePath);
+            QDir().mkpath(QFileInfo(path).absolutePath());
+            QFile out(path);
+            return out.open(QIODevice::WriteOnly) && out.write("x") == 1;
+        };
+        QVERIFY(put(".minecraft/mods/shared.jar"));
+        QVERIFY(put("server-pack/server-files/mods/server.jar"));
+        QVector<FTB::VersionFile> files{ file("shared.jar", false, false, false), file("client.jar", true, false, false),
+                                         file("server.jar", false, true, false), file("extra.jar", false, false, true) };
+
+        QString error;
+        QVERIFY2(FTB::writeServerIncludeList(staging.path(), files, &error), qPrintable(error));
+        QFile include(staging.filePath("server-pack/include.txt"));
+        QVERIFY(include.open(QIODevice::ReadOnly | QIODevice::Text));
+        QCOMPARE(QString::fromUtf8(include.readAll()).split('\n', Qt::SkipEmptyParts),
+                 (QStringList{ "mods/shared.jar", "mods/server.jar" }));
+        include.close();
+
+        files.append(file("missing.jar", false, false, false));
+        QVERIFY(!FTB::writeServerIncludeList(staging.path(), files, &error));
+        QVERIFY2(error.contains("mods/missing.jar"), qPrintable(error));
+    }
+
     void ftbInstallerMustBeSignedByFtb()
     {
 #ifdef Q_OS_WIN

@@ -13,7 +13,6 @@
 #include "InstanceTask.h"
 
 class Resource;
-class NetJob;
 
 class ModrinthCreationTask final : public InstanceTask {
     Q_OBJECT
@@ -56,7 +55,6 @@ class ModrinthCreationTask final : public InstanceTask {
 
    private:
     bool parseManifest(const QString&, std::vector<File>&, bool setInternalData = true, bool showOptionalDialog = true);
-    bool addServerOnlyDownloads(const QString& indexPath, const QString& cacheRoot, NetJob* downloads);
 
     void ensureMetaLoop();
     void setManagedPack(BaseInstance* instance);

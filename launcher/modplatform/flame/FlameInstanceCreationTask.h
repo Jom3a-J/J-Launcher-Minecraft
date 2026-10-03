@@ -35,7 +35,6 @@
 
 #pragma once
 
-#include <functional>
 #include <memory>
 #include <optional>
 
@@ -48,19 +47,7 @@
 
 #include "ui/dialogs/BlockedModsDialog.h"
 
-namespace Flame::Internal {
-/*! Connects terminal outcomes separately; never treats Task::finished as success. */
-void connectDownloadJobCompletion(NetJob* job,
-                                  QObject* context,
-                                  std::function<void()> onSucceeded,
-                                  std::function<void(QString)> onFailed,
-                                  std::function<void()> onAborted);
-/*! Fails fast on a watchedTask failure, then aborts the rest of a job before queued work refills. */
-void abortDownloadJobOnTaskFailure(NetJob* job,
-                                   Task* watchedTask,
-                                   QObject* context,
-                                   std::function<void(QString)> onFailure);
-}
+#include "modplatform/flame/FlameServerPack.h"
 
 class FlameCreationTask final : public InstanceTask {
     Q_OBJECT
@@ -117,11 +104,7 @@ class FlameCreationTask final : public InstanceTask {
 
     QString m_managedId, m_managedVersionId;
     QString m_serverPackFileId;
-    QUrl m_serverPackDownloadUrl;
-    QString m_serverPackArchivePath;
-    QString m_serverPackHashType;
-    QString m_serverPackHash;
-    QString m_serverPackError;
+    Flame::ServerPackSource m_serverPack;
 
     QList<std::pair<QString, QString>> m_otherResources;
 

@@ -46,13 +46,13 @@
 #include "FileSystem.h"
 #include "InstanceList.h"
 #include "Json.h"
-#include "MMCZip.h"
 
 #include "minecraft/MinecraftInstance.h"
 #include "minecraft/PackProfile.h"
 
 #include "modplatform/helpers/OverrideUtils.h"
 #include "modplatform/flame/CurseForgeHash.h"
+#include "modplatform/flame/FlameServerPack.h"
 
 #include "settings/INISettingsObject.h"
 
@@ -65,9 +65,6 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
-#include <QJsonArray>
-#include <QJsonObject>
-#include <QPointer>
 #include <utility>
 
 #include "HardwareInfo.h"
@@ -77,50 +74,8 @@
 #include "net/ApiDownload.h"
 #include "logs/Privacy.h"
 #include "net/ChecksumValidator.h"
-#include "net/SegmentedDownload.h"
 #include "ui/dialogs/UntrustedModsDialog.h"
 #include "ui/pages/modplatform/OptionalModDialog.h"
-
-namespace Flame::Internal {
-void connectDownloadJobCompletion(NetJob* job,
-                                  QObject* context,
-                                  std::function<void()> onSucceeded,
-                                  std::function<void(QString)> onFailed,
-                                  std::function<void()> onAborted)
-{
-    // Task::emitFailed() emits failed and then finished too, so the latter must not run success work.
-    QObject::connect(job, &NetJob::failed, context, std::move(onFailed));
-    QObject::connect(job, &NetJob::finished, context,
-                     [job, onSucceeded = std::move(onSucceeded), onAborted = std::move(onAborted)]() mutable {
-                         if (job->wasSuccessful()) {
-                             onSucceeded();
-                         } else if (job->getState() == Task::State::AbortedByUser) {
-                             onAborted();
-                         }
-                     });
-}
-
-void abortDownloadJobOnTaskFailure(NetJob* job,
-                                   Task* watchedTask,
-                                   QObject* context,
-                                   std::function<void(QString)> onFailure)
-{
-    QPointer<NetJob> guardedJob(job);
-    QPointer<Task> guardedTask(watchedTask);
-    QObject::connect(watchedTask, &Task::finished, context,
-                     [guardedJob, guardedTask, onFailure = std::move(onFailure)]() mutable {
-                         if (!guardedJob || !guardedTask || !guardedJob->isRunning()
-                             || guardedTask->getState() != Task::State::Failed) {
-                             return;
-                         }
-
-                         onFailure(guardedTask->failReason());
-                         if (guardedJob && guardedJob->isRunning())
-                             guardedJob->abort();
-                     },
-                     Qt::DirectConnection);
-}
-}  // namespace Flame::Internal
 
 bool FlameCreationTask::abort()
 {
@@ -674,33 +629,15 @@ void FlameCreationTask::setupDownloadJob()
     m_serverPackFailureHandled = false;
     auto results = m_modIdResolver->getResults().files;
 
-    QFile clientOnlyFile;
-    QFile serverOnlyFile;
-    QFile serverIncludeFile;
-    QFile serverUnknownFile;
+    ModPlatform::ServerPackStaging::FileLists serverLists;
     if (shouldCreateServerPair()) {
-        const QString clientOnlyPath = FS::PathCombine(m_stagingPath, "server-pack", "client-only.txt");
-        const QString serverOnlyPath = FS::PathCombine(m_stagingPath, "server-pack", "server-only.txt");
-        const QString serverIncludePath = FS::PathCombine(m_stagingPath, "server-pack", "include.txt");
-        const QString serverUnknownPath = FS::PathCombine(m_stagingPath, "server-pack", "unknown.txt");
-        FS::ensureFilePathExists(clientOnlyPath);
-        FS::ensureFilePathExists(serverOnlyPath);
-        FS::ensureFilePathExists(serverIncludePath);
-        FS::ensureFilePathExists(serverUnknownPath);
-        clientOnlyFile.setFileName(clientOnlyPath);
-        serverOnlyFile.setFileName(serverOnlyPath);
-        serverIncludeFile.setFileName(serverIncludePath);
-        serverUnknownFile.setFileName(serverUnknownPath);
-        if (!clientOnlyFile.open(QIODevice::WriteOnly | QIODevice::Text)
-            || !serverOnlyFile.open(QIODevice::WriteOnly | QIODevice::Text)
-            || !serverIncludeFile.open(QIODevice::WriteOnly | QIODevice::Text)
-            || !serverUnknownFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        using List = ModPlatform::ServerPackStaging::FileLists;
+        if (!serverLists.open(m_stagingPath, { List::ClientOnly, List::ServerOnly, List::Include, List::Unknown })) {
             emitFailed(tr("Could not prepare the CurseForge server compatibility manifest."));
             return;
         }
-        QFile providerMarker(FS::PathCombine(m_stagingPath, "server-pack", "provider.txt"));
-        if (!providerMarker.open(QIODevice::WriteOnly | QIODevice::Text)
-            || providerMarker.write("curseforge\n") != 11) {
+        if (!ModPlatform::ServerPackStaging::writeProviderMarker(ModPlatform::ServerPackStaging::path(m_stagingPath, "provider.txt"),
+                                                                 "curseforge")) {
             emitFailed(tr("Could not record the CurseForge compatibility metadata."));
             return;
         }
@@ -720,21 +657,10 @@ void FlameCreationTask::setupDownloadJob()
         relpath = FS::PathCombine("minecraft", relpath);
         auto path = FS::PathCombine(m_stagingPath, relpath);
 
-        if (clientOnlyFile.isOpen() && result.version.side == ModPlatform::SideType::ClientSide) {
-            clientOnlyFile.write(serverRelativePath.toUtf8());
-            clientOnlyFile.write("\n");
-        }
-        if (serverIncludeFile.isOpen()
-            && (result.required || m_selectedOptionalMods.contains(FS::PathCombine(result.targetFolder, fileName)))
-            && result.version.side != ModPlatform::SideType::ClientSide) {
-            auto* destination = &serverIncludeFile;
-            if (result.version.side == ModPlatform::SideType::ServerSide) {
-                destination = &serverOnlyFile;
-            } else if (result.version.side == ModPlatform::SideType::NoSide) {
-                destination = &serverUnknownFile;
-            }
-            destination->write(serverRelativePath.toUtf8());
-            destination->write("\n");
+        if (serverLists.isOpen()) {
+            Flame::addToServerLists(serverLists, result.version.side,
+                                    result.required || m_selectedOptionalMods.contains(FS::PathCombine(result.targetFolder, fileName)),
+                                    serverRelativePath);
         }
 
         if (!result.version.downloadUrl.isEmpty()) {
@@ -748,38 +674,15 @@ void FlameCreationTask::setupDownloadJob()
         }
     }
 
-    if (clientOnlyFile.isOpen()) {
-        clientOnlyFile.close();
-    }
-    if (serverIncludeFile.isOpen()) {
-        serverIncludeFile.close();
-    }
-    if (serverOnlyFile.isOpen()) {
-        serverOnlyFile.close();
-    }
-    if (serverUnknownFile.isOpen()) {
-        serverUnknownFile.close();
-    }
+    serverLists.close();
 
-    if (shouldCreateServerPair() && !m_serverPackDownloadUrl.isEmpty()) {
-        m_serverPackArchivePath = FS::PathCombine(m_stagingPath, "server-pack", "published-server-pack.zip");
-        // Published server packs are the one file in a CurseForge install that is big enough for a
-        // single connection to dominate the whole download, so this one is allowed to use several.
-        // It falls back to an ordinary single stream download whenever the CDN will not cooperate.
-        auto serverPackDownload = Net::SegmentedDownload::makeApiFile(
-            m_serverPackDownloadUrl, m_serverPackArchivePath, APPLICATION->network(), m_filesJob->scheduler(),
-            APPLICATION->settings()->get("SegmentedDownloadSegments").toInt());
-        if (auto* validator = Flame::createCurseForgeChecksumValidator(m_serverPackHashType, m_serverPackHash)) {
-            serverPackDownload->addValidator(validator);
-        }
-        Flame::Internal::abortDownloadJobOnTaskFailure(
-            m_filesJob.get(), serverPackDownload.get(), this, [this](QString reason) {
-                if (m_serverPackFailureHandled || !isRunning())
-                    return;
-                m_serverPackFailureHandled = true;
-                emitFailed(std::move(reason));
-            });
-        m_filesJob->addTask(serverPackDownload);
+    if (shouldCreateServerPair() && !m_serverPack.downloadUrl.isEmpty()) {
+        Flame::addServerPackDownload(m_filesJob.get(), m_serverPack, m_stagingPath, this, [this](QString reason) {
+            if (m_serverPackFailureHandled || !isRunning())
+                return;
+            m_serverPackFailureHandled = true;
+            emitFailed(std::move(reason));
+        });
     }
 
     Flame::Internal::connectDownloadJobCompletion(
@@ -812,110 +715,14 @@ void FlameCreationTask::setupDownloadJob()
 
 bool FlameCreationTask::resolveServerPackDownload(QEventLoop& loop)
 {
-    m_serverPackDownloadUrl.clear();
-    m_serverPackHashType.clear();
-    m_serverPackHash.clear();
-    m_serverPackError.clear();
+    m_serverPack = {};
     if (!shouldCreateServerPair()) {
         return true;
     }
-    if (m_managedId.isEmpty() || m_serverPackFileId.isEmpty()) {
-        logWarning(tr("CurseForge does not publish a dedicated server pack for this version. "
-                      "The launcher will derive the server content from the client pack and "
-                      "exclude files marked as client-only."));
-        return true;
-    }
-
-    auto [job, response] = FlameAPI::get().getFile(m_managedId, m_serverPackFileId);
-    connect(job.get(), &Task::succeeded, this, [this, response, &loop]() {
-        QJsonParseError parseError{};
-        const QJsonDocument document = QJsonDocument::fromJson(*response, &parseError);
-        if (parseError.error != QJsonParseError::NoError || !document.object().value("data").isObject()) {
-            m_serverPackError = tr("Could not understand the CurseForge server-pack response.");
-            loop.quit();
-            return;
-        }
-        try {
-            const QJsonObject fileObject = document.object().value("data").toObject();
-            const qint64 addonId = Json::requireInteger(fileObject, "modId");
-            const qint64 fileId = Json::requireInteger(fileObject, "id");
-            bool validAddonId = false;
-            bool validFileId = false;
-            const qint64 requestedAddonId = m_managedId.toLongLong(&validAddonId);
-            const qint64 requestedFileId = m_serverPackFileId.toLongLong(&validFileId);
-            if (!validAddonId || !validFileId || addonId != requestedAddonId || fileId != requestedFileId) {
-                m_serverPackError = tr("CurseForge returned metadata for a different server pack.");
-            }
-
-            const QJsonValue isServerPack = fileObject.value(QStringLiteral("isServerPack"));
-            if (m_serverPackError.isEmpty() && isServerPack.isBool() && !isServerPack.toBool()) {
-                m_serverPackError = tr("The file referenced by CurseForge is not marked as a server pack.");
-            }
-
-            const QJsonValue parentFileId = fileObject.value(QStringLiteral("parentProjectFileId"));
-            bool validParentId = false;
-            const qint64 requestedParentId = m_managedVersionId.toLongLong(&validParentId);
-            if (m_serverPackError.isEmpty() && validParentId && parentFileId.isDouble()
-                && parentFileId.toInteger() > 0 && parentFileId.toInteger() != requestedParentId) {
-                m_serverPackError = tr("The CurseForge server pack belongs to a different modpack version.");
-            }
-            if (m_serverPackError.isEmpty()) {
-                const QJsonValue hashesValue = fileObject.value(QStringLiteral("hashes"));
-                if (!hashesValue.isUndefined() && !hashesValue.isArray()) {
-                    m_serverPackError = tr("CurseForge returned malformed server-pack hash metadata.");
-                } else if (hashesValue.isUndefined() || hashesValue.toArray().isEmpty()) {
-                    logWarning(tr("CurseForge did not publish a supported hash for the dedicated server pack. "
-                                  "The archive will be structurally validated but remains unverified."));
-                } else {
-                    bool foundSupportedHash = false;
-                    for (const QJsonValue& hashValue : hashesValue.toArray()) {
-                        if (const auto parsedHash = Flame::parseCurseForgeHash(hashValue.toObject())) {
-                            m_serverPackHashType = parsedHash->algorithmName;
-                            m_serverPackHash = parsedHash->value;
-                            foundSupportedHash = true;
-                            break;
-                        }
-                    }
-                    if (!foundSupportedHash) {
-                        m_serverPackError = tr("CurseForge returned no valid supported SHA-1 or MD5 hash for the dedicated server pack.");
-                    }
-                }
-            }
-        } catch (const JSONValidationError& e) {
-            m_serverPackError = tr("Could not understand the CurseForge server-pack metadata:\n") + e.cause();
-        }
-        loop.quit();
-    });
-    connect(job.get(), &Task::failed, this, [this, &loop](const QString& reason) {
-        m_serverPackError = tr("Could not resolve the CurseForge server pack:\n%1").arg(reason);
-        loop.quit();
-    });
-    job->start();
-    loop.exec();
-    if (!m_serverPackError.isEmpty()) {
-        emitFailed(m_serverPackError);
-        return false;
-    }
-
-    auto [downloadUrlJob, downloadUrlResponse] = FlameAPI::get().getFileDownloadUrl(m_managedId, m_serverPackFileId);
-    connect(downloadUrlJob.get(), &Task::succeeded, this, [this, downloadUrlResponse, &loop]() {
-        QString parseError;
-        m_serverPackDownloadUrl = FlameAPI::loadFileDownloadUrl(*downloadUrlResponse, &parseError);
-        if (m_serverPackDownloadUrl.isEmpty()) {
-            m_serverPackError = parseError.isEmpty()
-                                    ? tr("The CurseForge server pack is not available for third-party download.")
-                                    : parseError;
-        }
-        loop.quit();
-    });
-    connect(downloadUrlJob.get(), &Task::failed, this, [this, &loop](const QString& reason) {
-        m_serverPackError = tr("Could not get the CurseForge server-pack download URL:\n%1").arg(reason);
-        loop.quit();
-    });
-    downloadUrlJob->start();
-    loop.exec();
-    if (!m_serverPackError.isEmpty()) {
-        emitFailed(m_serverPackError);
+    const QString error = Flame::resolveServerPack(this, loop, { m_managedId, m_managedVersionId, m_serverPackFileId },
+                                                   &m_serverPack, [this](const QString& warning) { logWarning(warning); });
+    if (!error.isEmpty()) {
+        emitFailed(error);
         return false;
     }
     return true;
@@ -923,24 +730,11 @@ bool FlameCreationTask::resolveServerPackDownload(QEventLoop& loop)
 
 bool FlameCreationTask::extractServerPack()
 {
-    if (!shouldCreateServerPair() || m_serverPackDownloadUrl.isEmpty()) {
+    if (!shouldCreateServerPair() || m_serverPack.downloadUrl.isEmpty()) {
         return true;
     }
-
-    QString failedEntry;
-    if (!MMCZip::validateArchive(m_serverPackArchivePath, &failedEntry)) {
-        emitFailed(tr("The CurseForge server-pack archive is corrupt (failed integrity check at %1).")
-                       .arg(failedEntry.isEmpty() ? tr("an unknown file") : failedEntry));
-        return false;
-    }
-    const QString serverRoot = FS::PathCombine(m_stagingPath, "server-pack", "server-files");
-    if (!MMCZip::extractDir(m_serverPackArchivePath, serverRoot)) {
-        emitFailed(tr("Failed to extract the CurseForge server-pack archive."));
-        return false;
-    }
-    QFile marker(FS::PathCombine(m_stagingPath, "server-pack", "published-server-pack.txt"));
-    if (!marker.open(QIODevice::WriteOnly | QIODevice::Text) || marker.write("curseforge\n") != 11) {
-        emitFailed(tr("Could not record the downloaded CurseForge server pack."));
+    if (const QString error = Flame::extractServerPack(m_stagingPath); !error.isEmpty()) {
+        emitFailed(error);
         return false;
     }
     return true;

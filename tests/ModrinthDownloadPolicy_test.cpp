@@ -15,6 +15,8 @@
  *  along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
+#include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkAccessManager>
@@ -25,6 +27,7 @@
 #include "Application.h"
 #include "BuildConfig.h"
 #include "modplatform/modrinth/ModrinthDownloadPolicy.h"
+#include "modplatform/modrinth/ModrinthServerFiles.h"
 #include "net/ApiHeaderProxy.h"
 #include "net/HostScheduler.h"
 #include "net/NetJob.h"
@@ -258,6 +261,55 @@ class ModrinthDownloadPolicyTest final : public QObject {
 
         QCOMPARE(job->size(), 3);
         QCOMPARE(scheduler.outstandingPermits(), 0);
+    }
+
+    /*! Only files the client does not require and the server supports are fetched for the server,
+     *  and only with a safe path, HTTPS addresses and a full SHA-512. */
+    void addsOnlyServerFilesWithSafeMetadata()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        const QString sha512(128, 'a');
+        const auto entry = [&sha512](const QString& path, const QString& client, const QString& server,
+                                     const QString& url = QStringLiteral("https://cdn.modrinth.com/data/x/server.jar")) {
+            return QJsonObject{ { "path", path },
+                                { "env", QJsonObject{ { "client", client }, { "server", server } } },
+                                { "downloads", QJsonArray{ url } },
+                                { "hashes", QJsonObject{ { "sha512", sha512 } } } };
+        };
+        const auto addFrom = [&root](const QJsonArray& files, int* added) {
+            const QString index = root.filePath(QStringLiteral("modrinth.index.json"));
+            QFile file(index);
+            if (!file.open(QIODevice::WriteOnly) || file.write(QJsonDocument(QJsonObject{ { "files", files } }).toJson()) < 0)
+                return QStringLiteral("could not write the index");
+            file.close();
+            QNetworkAccessManager network;
+            auto job = makeShared<NetJob>(QStringLiteral("server files"), &network);
+            const QString error = Modrinth::addServerOnlyDownloads(index, root.filePath(QStringLiteral("server-files")), job.get());
+            *added = job->size();
+            return error;
+        };
+
+        int added = -1;
+        QCOMPARE(addFrom({ entry("mods/client-and-server.jar", "required", "required"),
+                           entry("mods/client-only.jar", "optional", "unsupported"),
+                           entry("mods/server-only.jar", "unsupported", "required"),
+                           entry("mods/optional-both.jar", "optional", "optional") },
+                         &added),
+                 QString());
+        QCOMPARE(added, 2);
+
+        const auto rejects = [&addFrom](const QJsonObject& file, const QString& expected) {
+            int ignored = 0;
+            const QString error = addFrom({ file }, &ignored);
+            QVERIFY2(error.contains(expected), qPrintable(error));
+        };
+        rejects(entry("../outside.jar", "unsupported", "required"), "unsafe path");
+        rejects(entry("mods/plain.jar", "unsupported", "required", "http://cdn.modrinth.com/plain.jar"), "invalid HTTPS");
+        rejects(entry("mods/odd.jar", "unsupported", "sometimes"), "is unsupported");
+        QJsonObject shortHash = entry("mods/short.jar", "unsupported", "required");
+        shortHash["hashes"] = QJsonObject{ { "sha512", "abc" } };
+        rejects(shortHash, "incomplete download or checksum");
     }
 };
 

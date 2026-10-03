@@ -151,6 +151,8 @@ set(NET_SOURCES
     net/ApiUpload.h
     net/NetRequest.cpp
     net/NetRequest.h
+    net/RequestPolicy.cpp
+    net/RequestPolicy.h
 )
 
 # Game launch logic
@@ -507,6 +509,8 @@ set(API_SOURCES
     modplatform/ModIndex.h
     modplatform/ServerSupport.h
     modplatform/ServerSupportRequestQueue.h
+    modplatform/ServerPackStaging.h
+    modplatform/ServerPackStaging.cpp
     modplatform/ModIndex.cpp
     modplatform/ResourceType.h
     modplatform/ResourceType.cpp
@@ -549,6 +553,8 @@ set(FTB_SOURCES
 
     modplatform/ftb/FTBPackInstallTask.h
     modplatform/ftb/FTBPackInstallTask.cpp
+    modplatform/ftb/FTBServerPack.h
+    modplatform/ftb/FTBServerPack.cpp
     modplatform/ftb/FTBPackManifest.h
     modplatform/ftb/FTBPackManifest.cpp
 )
@@ -567,6 +573,8 @@ set(FLAME_SOURCES
     modplatform/flame/FlameCheckUpdate.h
     modplatform/flame/FlameInstanceCreationTask.h
     modplatform/flame/FlameInstanceCreationTask.cpp
+    modplatform/flame/FlameServerPack.h
+    modplatform/flame/FlameServerPack.cpp
     modplatform/flame/FlamePackExportTask.h
     modplatform/flame/FlamePackExportTask.cpp
 )
@@ -580,6 +588,8 @@ set(MODRINTH_SOURCES
     modplatform/modrinth/ModrinthDownloadPolicy.h
     modplatform/modrinth/ModrinthInstanceCreationTask.cpp
     modplatform/modrinth/ModrinthInstanceCreationTask.h
+    modplatform/modrinth/ModrinthServerFiles.cpp
+    modplatform/modrinth/ModrinthServerFiles.h
     modplatform/modrinth/ModrinthPackExportTask.cpp
     modplatform/modrinth/ModrinthPackExportTask.h
 )
@@ -674,6 +684,8 @@ set(PRISMUPDATER_SOURCES
     net/Logging.cpp
     net/NetRequest.cpp
     net/NetRequest.h
+    net/RequestPolicy.cpp
+    net/RequestPolicy.h
     net/NetJob.cpp
     net/NetJob.h
     net/NetUtils.h
@@ -881,6 +893,9 @@ SET(LAUNCHER_SOURCES
     server/ServerDownloaderForge.cpp
     ui/pages/server/ServerListPage.h
     ui/pages/server/ServerListPage.cpp
+    ui/pages/server/ServerListPageActions.cpp
+    ui/pages/server/ServerListPageLayout.cpp
+    ui/pages/server/ServerListPageModpack.cpp
     ui/pages/server/ServerAutomationTab.h
     ui/pages/server/ServerAutomationTab.cpp
     ui/pages/server/ServerBackupsTab.h
