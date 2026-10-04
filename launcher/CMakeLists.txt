@@ -896,6 +896,10 @@ SET(LAUNCHER_SOURCES
     ui/pages/server/ServerListPageActions.cpp
     ui/pages/server/ServerListPageLayout.cpp
     ui/pages/server/ServerListPageModpack.cpp
+    ui/pages/server/ServerManagerWindow.cpp
+    ui/pages/server/ServerManagerWindow.h
+    ui/pages/server/ServerStatusIndicator.cpp
+    ui/pages/server/ServerStatusIndicator.h
     ui/pages/server/ServerAutomationTab.h
     ui/pages/server/ServerAutomationTab.cpp
     ui/pages/server/ServerBackupsTab.h

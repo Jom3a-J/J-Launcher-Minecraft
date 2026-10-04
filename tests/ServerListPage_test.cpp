@@ -3,6 +3,7 @@
 // Pins down what the Server Manager page shows and saves, so the page can be split into
 // smaller pieces and its data moved without changing what the user sees.
 
+#include <QAction>
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
@@ -29,6 +30,8 @@
 #include "server/ServerInstance.h"
 #include "server/ServerManager.h"
 #include "ui/pages/server/ServerListPage.h"
+#include "ui/pages/server/ServerManagerWindow.h"
+#include "ui/pages/server/ServerStatusIndicator.h"
 
 namespace {
 bool writeFile(const QString& path, const QByteArray& contents)
@@ -164,6 +167,66 @@ private slots:
             QVERIFY(server);
             QCOMPARE(title->text(), server->name());
         }
+    }
+
+    void statusIndicatorSummarisesActiveServers()
+    {
+        QCOMPARE(ServerStatusIndicator::summaryFor(0, 0).text, QString());
+        QCOMPARE(ServerStatusIndicator::summaryFor(1, 1).text, QStringLiteral("1 server running"));
+        QCOMPARE(ServerStatusIndicator::summaryFor(3, 3).text, QStringLiteral("3 servers running"));
+        QVERIFY(ServerStatusIndicator::summaryFor(3, 3).allRunning);
+        QCOMPARE(ServerStatusIndicator::summaryFor(0, 1).text, QStringLiteral("1 server process active"));
+        QCOMPARE(ServerStatusIndicator::summaryFor(1, 2).text, QStringLiteral("2 server processes active"));
+        QVERIFY(!ServerStatusIndicator::summaryFor(1, 2).allRunning);
+        QVERIFY(ServerStatusIndicator::summaryFor(1, 2).detail.contains("starting, stopping, or downloading"));
+
+        // With only stopped servers the button hides and the action keeps its plain tooltip.
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        ServerManager manager(root.path());
+        QVERIFY(manager.createServer(QStringLiteral("Stopped"), QStringLiteral("1.21.1")));
+        QWidget window;
+        QAction manageServers(&window);
+        ServerStatusIndicator indicator(&manager, &manageServers, &window);
+        window.show();
+        settle();
+        QVERIFY(!indicator.isVisible());
+        QCOMPARE(indicator.objectName(), QStringLiteral("serverStatusButton"));
+        QCOMPARE(manageServers.toolTip(), QStringLiteral("Create and manage local Minecraft servers."));
+    }
+
+    void serverManagerWindowOpensOnceAndReusesItself()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        ServerManager manager(root.path());
+        QVERIFY(manager.createServer(QStringLiteral("Alpha"), QStringLiteral("1.21.1")));
+        QWidget parent;
+        QPointer<QDialog> window;
+
+        ServerManagerWindow::show(nullptr, &parent, window);
+        QVERIFY(!window);
+
+        ServerManagerWindow::show(&manager, &parent, window);
+        settle();
+        QVERIFY(window);
+        QCOMPARE(window->objectName(), QStringLiteral("serverManagerWindow"));
+        QVERIFY(window->findChild<ServerListPage*>());
+        auto* list = child<QListWidget>(*window->findChild<ServerListPage*>(), "serverList");
+        QVERIFY(list);
+        QCOMPARE(list->count(), 1);
+
+        QDialog* first = window.data();
+        ServerManagerWindow::show(&manager, &parent, window);
+        settle();
+        QCOMPARE(window.data(), first);
+        QCOMPARE(parent.findChildren<QDialog*>(QStringLiteral("serverManagerWindow")).size(), 1);
+
+        // Nothing is running, so quitting needs no question.
+        QVERIFY(ServerManagerWindow::confirmQuit(&manager, &parent));
+        QVERIFY(ServerManagerWindow::confirmQuit(nullptr, &parent));
+        window->close();
+        settle();
     }
 
     void searchFiltersServerCards()
