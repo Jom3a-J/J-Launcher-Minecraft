@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 #pragma once
 
+#include <QCoreApplication>
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QJsonValue>
@@ -10,6 +11,29 @@
 namespace ModPlatform {
 
 enum class ServerSupport { Unknown, Official, Website, ClientDerived };
+
+/// The badge a modpack list shows for this kind of server support; empty while it is not known.
+inline QString serverSupportBadge(ServerSupport support)
+{
+    switch (support) {
+        case ServerSupport::Official:
+            return QCoreApplication::translate("ModPlatform", "Official server pack");
+        case ServerSupport::Website:
+            return QCoreApplication::translate("ModPlatform", "Server files on website");
+        case ServerSupport::ClientDerived:
+            return QCoreApplication::translate("ModPlatform", "No official server pack");
+        case ServerSupport::Unknown:
+            break;
+    }
+    return {};
+}
+
+/// What a screen reader says for a pack with that badge, such as "Name. Official server pack."
+inline QString serverSupportAccessibleName(const QString& name, ServerSupport support)
+{
+    const QString badge = serverSupportBadge(support);
+    return badge.isEmpty() ? name : QCoreApplication::translate("ModPlatform", "%1. %2.").arg(name, badge);
+}
 
 inline bool curseForgeFileHasServerPack(const QJsonObject& file)
 {

@@ -40,20 +40,11 @@
 #include "TechnicData.h"
 #include "net/NetJob.h"
 
-#include <QJsonObject>
-#include <functional>
-#include <optional>
-
-class QNetworkAccessManager;
+#include "modplatform/technic/TechnicPackDetails.h"
 
 namespace Technic {
 
-inline constexpr int PackDetailsConcurrency = 4;
 using LogoCallback = std::function<void(QString)>;
-using PackDetailsCallback = std::function<void(std::optional<QJsonObject>)>;
-void requestPackDetails(QNetworkAccessManager* network, const QString& slug, QObject* owner, PackDetailsCallback callback);
-void cachePackDetails(const QString& slug, const QJsonObject& details);
-void cancelPackDetailsRequests(QObject* owner);
 
 class ListModel : public QAbstractListModel {
     Q_OBJECT

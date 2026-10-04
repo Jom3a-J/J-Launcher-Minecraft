@@ -88,19 +88,15 @@ QVariant ListModel::data(const QModelIndex& index, int role) const
         v.setValue(pack);
         return v;
     } else if (role == UserDataTypes::BADGE_TEXT) {
-        if (!m_showServerBadges) return QString();
-        const auto support = m_serverSupport.value(pack.id, ModPlatform::ServerSupport::Unknown);
-        if (support == ModPlatform::ServerSupport::Official) return tr("Official server pack");
-        if (support == ModPlatform::ServerSupport::ClientDerived) return tr("No official server pack");
-        return QString();
+        return m_showServerBadges
+            ? ModPlatform::serverSupportBadge(m_serverSupport.value(pack.id, ModPlatform::ServerSupport::Unknown))
+            : QString();
     } else if (role == UserDataTypes::BADGE_TONE) {
         return m_serverSupport.value(pack.id) == ModPlatform::ServerSupport::Official ? 1 : 0;
     } else if (role == Qt::AccessibleTextRole) {
-        const auto support = m_serverSupport.value(pack.id, ModPlatform::ServerSupport::Unknown);
-        return !m_showServerBadges || support == ModPlatform::ServerSupport::Unknown
-            ? pack.name
-            : tr("%1. %2.").arg(pack.name, support == ModPlatform::ServerSupport::Official
-                ? tr("Official server pack") : tr("No official server pack"));
+        return m_showServerBadges
+            ? ModPlatform::serverSupportAccessibleName(pack.name, m_serverSupport.value(pack.id, ModPlatform::ServerSupport::Unknown))
+            : pack.name;
     }
 
     return QVariant();

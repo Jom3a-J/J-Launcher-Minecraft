@@ -3,6 +3,7 @@
 #include <Json.h>
 #include "Application.h"
 #include "modplatform/ModIndex.h"
+#include "modplatform/ServerSupport.h"
 #include "modplatform/ResourceAPI.h"
 #include "modplatform/flame/FlameAPI.h"
 #include "ui/widgets/ProjectItem.h"
@@ -91,15 +92,11 @@ QVariant ListModel::data(const QModelIndex& index, int role) const
         case UserDataTypes::INSTALLED:
             return false;
         case UserDataTypes::BADGE_TEXT:
-            return m_showServerBadges
-                ? (pack->hasLatestServerPack ? tr("Official server pack") : tr("No official server pack"))
-                : QString();
+            return m_showServerBadges ? ModPlatform::serverSupportBadge((pack->hasLatestServerPack ? ModPlatform::ServerSupport::Official : ModPlatform::ServerSupport::ClientDerived)) : QString();
         case UserDataTypes::BADGE_TONE:
             return pack->hasLatestServerPack ? 1 : 0;
         case Qt::AccessibleTextRole:
-            return m_showServerBadges
-                ? tr("%1. %2.").arg(pack->name, pack->hasLatestServerPack ? tr("Official server pack") : tr("No official server pack"))
-                : pack->name;
+            return m_showServerBadges ? ModPlatform::serverSupportAccessibleName(pack->name, (pack->hasLatestServerPack ? ModPlatform::ServerSupport::Official : ModPlatform::ServerSupport::ClientDerived)) : pack->name;
         default:
             break;
     }
