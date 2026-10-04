@@ -605,6 +605,8 @@ set(TECHNIC_SOURCES
     modplatform/technic/SingleZipPackInstallTask.cpp
     modplatform/technic/SolderPackInstallTask.h
     modplatform/technic/SolderPackInstallTask.cpp
+    modplatform/technic/TechnicPackDetails.h
+    modplatform/technic/TechnicPackDetails.cpp
     modplatform/technic/SolderPackManifest.h
     modplatform/technic/SolderPackManifest.cpp
     modplatform/technic/TechnicPackProcessor.h
@@ -896,6 +898,10 @@ SET(LAUNCHER_SOURCES
     ui/pages/server/ServerListPageActions.cpp
     ui/pages/server/ServerListPageLayout.cpp
     ui/pages/server/ServerListPageModpack.cpp
+    ui/pages/server/ServerManagerWindow.cpp
+    ui/pages/server/ServerManagerWindow.h
+    ui/pages/server/ServerStatusIndicator.cpp
+    ui/pages/server/ServerStatusIndicator.h
     ui/pages/server/ServerAutomationTab.h
     ui/pages/server/ServerAutomationTab.cpp
     ui/pages/server/ServerBackupsTab.h
@@ -1139,6 +1145,8 @@ SET(LAUNCHER_SOURCES
     ui/pages/modplatform/flame/FlameModel.cpp
     ui/pages/modplatform/flame/FlameModel.h
     ui/pages/modplatform/flame/FlamePage.cpp
+    ui/pages/modplatform/flame/CurseForgeSetupPage.cpp
+    ui/pages/modplatform/flame/CurseForgeSetupPage.h
     ui/pages/modplatform/flame/FlamePage.h
     ui/pages/modplatform/flame/FlameResourceModels.cpp
     ui/pages/modplatform/flame/FlameResourceModels.h

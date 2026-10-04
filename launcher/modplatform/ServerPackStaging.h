@@ -18,6 +18,15 @@ QString path(const QString& stagingPath, const QString& fileName = {});
 QString serverFilesPath(const QString& stagingPath, const QString& relativePath = {});
 /// Writes "<provider>\n" to a marker file such as provider.txt. False if it cannot be written whole.
 bool writeProviderMarker(const QString& path, const QString& provider);
+/// Writes server-pack/provider.txt, naming the platform the pack came from.
+bool recordProvider(const QString& stagingPath, const QString& provider);
+/// Writes server-pack/published-server-pack.txt: server-files holds the platform's own server pack.
+bool recordPublishedServerPack(const QString& stagingPath, const QString& provider);
+
+/*! Checks a downloaded server-pack archive, unpacks it into server-files and records it as the
+ *  provider's published pack. Returns an error message naming providerName, or an empty string. */
+QString extractPublishedServerPack(const QString& archivePath, const QString& stagingPath, const QString& provider,
+                                   const QString& providerName);
 
 /// The lists that sort a pack's files for the server, one relative path per line.
 class FileLists {

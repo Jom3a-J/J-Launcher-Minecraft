@@ -37,7 +37,6 @@
 #include "ATLPackInstallTask.h"
 
 #include <QCryptographicHash>
-#include <QFile>
 #include <QtConcurrent>
 #include <algorithm>
 #include <utility>
@@ -54,6 +53,7 @@
 #include "minecraft/PackProfile.h"
 #include "modplatform/atlauncher/ATLPackManifest.h"
 #include "net/ChecksumValidator.h"
+#include "modplatform/ServerPackStaging.h"
 #include "server/ServerProperties.h"
 #include "settings/INISettingsObject.h"
 
@@ -761,21 +761,11 @@ void PackInstallTask::downloadMods()
         ? expandModsForPairedServer(m_version.mods)
         : m_version.mods;
 
-    QFile clientOnlyFile;
-    QFile providerMarker;
+    using ServerLists = ModPlatform::ServerPackStaging::FileLists;
+    ServerLists serverLists;
     if (shouldCreateServerPair()) {
-        const QString clientOnlyPath = FS::PathCombine(
-            m_stagingPath, "server-pack", "client-only.txt");
-        FS::ensureFilePathExists(clientOnlyPath);
-        clientOnlyFile.setFileName(clientOnlyPath);
-        providerMarker.setFileName(
-            FS::PathCombine(m_stagingPath, "server-pack", "provider.txt"));
-        if (!clientOnlyFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
-            emitFailed(tr("Could not prepare the ATLauncher server compatibility manifest."));
-            return;
-        }
-        if (!providerMarker.open(QIODevice::WriteOnly | QIODevice::Text)
-            || providerMarker.write("atlauncher\n") != 11) {
+        if (!serverLists.open(m_stagingPath, { ServerLists::ClientOnly })
+            || !ModPlatform::ServerPackStaging::recordProvider(m_stagingPath, "atlauncher")) {
             emitFailed(tr("Could not prepare the ATLauncher server compatibility manifest."));
             return;
         }
@@ -784,8 +774,7 @@ void PackInstallTask::downloadMods()
         if (!propertyOverrides.isEmpty()) {
             QString propertyError;
             if (!ServerProperties::save(
-                    FS::PathCombine(m_stagingPath, "server-pack",
-                                    "server-properties.txt"),
+                    ModPlatform::ServerPackStaging::path(m_stagingPath, "server-properties.txt"),
                     propertyOverrides, &propertyError)) {
                 emitFailed(tr("Could not prepare the ATLauncher server properties: %1")
                                .arg(propertyError));
@@ -807,13 +796,10 @@ void PackInstallTask::downloadMods()
             continue;
         }
 
-        if (clientOnlyFile.isOpen() && clientOnly) {
+        if (serverLists.isOpen() && clientOnly) {
             const QString directory = getDirForModType(mod.type, mod.type_raw);
             if (!directory.isNull()) {
-                const QString relativePath = QDir::fromNativeSeparators(
-                    FS::PathCombine(directory, mod.file));
-                clientOnlyFile.write(relativePath.toUtf8());
-                clientOnlyFile.write("\n");
+                serverLists.add(ServerLists::ClientOnly, FS::PathCombine(directory, mod.file));
             }
         }
 
@@ -878,8 +864,7 @@ void PackInstallTask::downloadMods()
             jobPtr->addNetAction(dl);
 
             auto path = serverOnly
-                ? FS::PathCombine(m_stagingPath, "server-pack", "server-files",
-                                  FS::PathCombine(relpath, mod.file))
+                ? ModPlatform::ServerPackStaging::serverFilesPath(m_stagingPath, FS::PathCombine(relpath, mod.file))
                 : FS::PathCombine(m_stagingPath, "minecraft", relpath, mod.file);
 
             if (!serverOnly && mod.type == ModType::Forge) {
@@ -904,12 +889,7 @@ void PackInstallTask::downloadMods()
             modsToCopy[entry->getFullPath()] = path;
         }
     }
-    if (clientOnlyFile.isOpen()) {
-        clientOnlyFile.close();
-    }
-    if (providerMarker.isOpen()) {
-        providerMarker.close();
-    }
+    serverLists.close();
     if (!blockedMods.isEmpty()) {
         QList<BlockedMod> mods;
 
@@ -958,9 +938,7 @@ void PackInstallTask::downloadMods()
                     }
 
                     auto path = serverOnly
-                        ? FS::PathCombine(m_stagingPath, "server-pack",
-                                          "server-files",
-                                          FS::PathCombine(relpath, mod.file))
+                        ? ModPlatform::ServerPackStaging::serverFilesPath(m_stagingPath, FS::PathCombine(relpath, mod.file))
                         : FS::PathCombine(m_stagingPath, "minecraft", relpath,
                                           mod.file);
 
@@ -1052,7 +1030,7 @@ bool PackInstallTask::extractMods(const QMap<QString, VersionMod>& toExtract,
 
         const bool serverOnly = mod.server && !mod.client;
         const QString contentRoot = serverOnly
-            ? FS::PathCombine(m_stagingPath, "server-pack", "server-files")
+            ? ModPlatform::ServerPackStaging::serverFilesPath(m_stagingPath)
             : FS::PathCombine(m_stagingPath, "minecraft");
         auto extractToPath = FS::PathCombine(contentRoot, extractToDir);
 
@@ -1082,7 +1060,7 @@ bool PackInstallTask::extractMods(const QMap<QString, VersionMod>& toExtract,
 
         const bool serverOnly = mod.server && !mod.client;
         const QString contentRoot = serverOnly
-            ? FS::PathCombine(m_stagingPath, "server-pack", "server-files")
+            ? ModPlatform::ServerPackStaging::serverFilesPath(m_stagingPath)
             : FS::PathCombine(m_stagingPath, "minecraft");
         const auto extractToDirectory = FS::PathCombine(contentRoot, extractToDir);
 

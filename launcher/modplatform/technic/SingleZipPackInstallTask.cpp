@@ -21,6 +21,7 @@
 #include "FileSystem.h"
 #include "MMCZip.h"
 #include "TechnicPackProcessor.h"
+#include "modplatform/ServerPackStaging.h"
 #include "modplatform/ServerSupport.h"
 
 #include "Application.h"
@@ -46,14 +47,9 @@ bool Technic::SingleZipPackInstallTask::abort()
 
 void Technic::SingleZipPackInstallTask::executeTask()
 {
-    if (shouldCreateServerPair()) {
-        const QString markerPath = FS::PathCombine(m_stagingPath, "server-pack", "provider.txt");
-        FS::ensureFilePathExists(markerPath);
-        QFile marker(markerPath);
-        if (!marker.open(QIODevice::WriteOnly | QIODevice::Text) || marker.write("technic\n") != 8) {
-            emitFailed(tr("Could not record the Technic compatibility metadata."));
-            return;
-        }
+    if (shouldCreateServerPair() && !ModPlatform::ServerPackStaging::recordProvider(m_stagingPath, "technic")) {
+        emitFailed(tr("Could not record the Technic compatibility metadata."));
+        return;
     }
     const auto serverSupport = ModPlatform::technicServerSupport(m_serverPackUrl);
     if (shouldCreateServerPair() && serverSupport == ModPlatform::ServerSupport::ClientDerived) {
@@ -107,19 +103,7 @@ void Technic::SingleZipPackInstallTask::downloadSucceeded()
             return QObject::tr("Failed to extract the Technic modpack archive.");
         }
         if (!serverArchivePath.isEmpty()) {
-            failedEntry.clear();
-            if (!MMCZip::validateArchive(serverArchivePath, &failedEntry)) {
-                return QObject::tr("The Technic server-pack archive is corrupt (failed integrity check at %1).")
-                    .arg(failedEntry.isEmpty() ? QObject::tr("an unknown file") : failedEntry);
-            }
-            const QString serverRoot = FS::PathCombine(stagingPath, "server-pack", "server-files");
-            if (!MMCZip::extractDir(serverArchivePath, serverRoot)) {
-                return QObject::tr("Failed to extract the Technic server-pack archive.");
-            }
-            QFile marker(FS::PathCombine(stagingPath, "server-pack", "published-server-pack.txt"));
-            if (!marker.open(QIODevice::WriteOnly | QIODevice::Text) || marker.write("technic\n") != 8) {
-                return QObject::tr("Could not record the downloaded Technic server pack.");
-            }
+            return ModPlatform::ServerPackStaging::extractPublishedServerPack(serverArchivePath, stagingPath, "technic", "Technic");
         }
         return {};
     });

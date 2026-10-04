@@ -258,8 +258,7 @@ void ServerInstallerRun::start()
                 }
                 QDirIterator installedFiles(serverRoot, QDir::Files | QDir::Hidden | QDir::System, QDirIterator::Subdirectories);
                 if (!installedFiles.hasNext()
-                    || !ModPlatform::ServerPackStaging::writeProviderMarker(
-                        ModPlatform::ServerPackStaging::path(m_stagingPath, "published-server-pack.txt"), "ftb")) {
+                    || !ModPlatform::ServerPackStaging::recordPublishedServerPack(m_stagingPath, "ftb")) {
                     emit failed(installTaskTr("The FTB server installer finished without producing usable "
                                    "server files."));
                     return;

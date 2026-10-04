@@ -207,16 +207,14 @@ QVariant ListModel::data(const QModelIndex& index, int role) const
         case UserDataTypes::INSTALLED:
             return false;
         case UserDataTypes::BADGE_TEXT:
-            if (!m_showServerBadges) return QString();
-            return ModPlatform::legacyFtbServerSupport(pack.serverPack) == ModPlatform::ServerSupport::Official
-                ? tr("Official server pack") : tr("No official server pack");
+            return m_showServerBadges ? ModPlatform::serverSupportBadge(ModPlatform::legacyFtbServerSupport(pack.serverPack))
+                                      : QString();
         case UserDataTypes::BADGE_TONE:
             return ModPlatform::legacyFtbServerSupport(pack.serverPack) == ModPlatform::ServerSupport::Official ? 1 : 0;
         case Qt::AccessibleTextRole:
-            if (!m_showServerBadges) return pack.name;
-            return tr("%1. %2.").arg(pack.name,
-                ModPlatform::legacyFtbServerSupport(pack.serverPack) == ModPlatform::ServerSupport::Official
-                    ? tr("Official server pack") : tr("No official server pack"));
+            return m_showServerBadges
+                ? ModPlatform::serverSupportAccessibleName(pack.name, ModPlatform::legacyFtbServerSupport(pack.serverPack))
+                : pack.name;
         default:
             break;
     }

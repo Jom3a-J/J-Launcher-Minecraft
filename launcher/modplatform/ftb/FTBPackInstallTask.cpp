@@ -343,8 +343,7 @@ void PackInstallTask::downloadPack()
     ServerLists serverLists;
     if (shouldCreateServerPair()
         && (!serverLists.open(m_stagingPath, { ServerLists::ClientOnly, ServerLists::Include })
-            || !ModPlatform::ServerPackStaging::writeProviderMarker(ModPlatform::ServerPackStaging::path(m_stagingPath, "provider.txt"),
-                                                                    "ftb"))) {
+            || !ModPlatform::ServerPackStaging::recordProvider(m_stagingPath, "ftb"))) {
         emitFailed(tr("Could not prepare the FTB server compatibility manifest."));
         return;
     }

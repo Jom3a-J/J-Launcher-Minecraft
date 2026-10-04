@@ -38,6 +38,18 @@ class ModpackServerSupportTest final : public QObject {
         QCOMPARE(ModPlatform::technicServerSupport({}), ModPlatform::ServerSupport::ClientDerived);
     }
 
+    void badgesNameEachKindOfServerSupport()
+    {
+        using ModPlatform::ServerSupport;
+        QCOMPARE(ModPlatform::serverSupportBadge(ServerSupport::Official), QStringLiteral("Official server pack"));
+        QCOMPARE(ModPlatform::serverSupportBadge(ServerSupport::Website), QStringLiteral("Server files on website"));
+        QCOMPARE(ModPlatform::serverSupportBadge(ServerSupport::ClientDerived), QStringLiteral("No official server pack"));
+        QCOMPARE(ModPlatform::serverSupportBadge(ServerSupport::Unknown), QString());
+        QCOMPARE(ModPlatform::serverSupportAccessibleName("Pack", ServerSupport::Official), QStringLiteral("Pack. Official server pack."));
+        QCOMPARE(ModPlatform::serverSupportAccessibleName("Pack", ServerSupport::Website), QStringLiteral("Pack. Server files on website."));
+        QCOMPARE(ModPlatform::serverSupportAccessibleName("Pack", ServerSupport::Unknown), QStringLiteral("Pack"));
+    }
+
     void ftbProbeStatuses()
     {
         QCOMPARE(FTB::serverPackSupportFromHttpStatus(200, false), ModPlatform::ServerSupport::Official);

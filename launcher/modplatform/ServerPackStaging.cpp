@@ -3,7 +3,9 @@
 #include "ServerPackStaging.h"
 
 #include "FileSystem.h"
+#include "MMCZip.h"
 
+#include <QCoreApplication>
 #include <QDir>
 
 namespace ModPlatform::ServerPackStaging {
@@ -43,6 +45,38 @@ bool writeProviderMarker(const QString& path, const QString& provider)
     QFile marker(path);
     const QByteArray contents = provider.toUtf8() + '\n';
     return marker.open(QIODevice::WriteOnly | QIODevice::Text) && marker.write(contents) == contents.size();
+}
+
+bool recordProvider(const QString& stagingPath, const QString& provider)
+{
+    return writeProviderMarker(path(stagingPath, QStringLiteral("provider.txt")), provider);
+}
+
+bool recordPublishedServerPack(const QString& stagingPath, const QString& provider)
+{
+    return writeProviderMarker(path(stagingPath, QStringLiteral("published-server-pack.txt")), provider);
+}
+
+QString extractPublishedServerPack(const QString& archivePath, const QString& stagingPath, const QString& provider,
+                                   const QString& providerName)
+{
+    QString failedEntry;
+    if (!MMCZip::validateArchive(archivePath, &failedEntry)) {
+        return QCoreApplication::translate("ModPlatform::ServerPackStaging",
+                                           "The %1 server-pack archive is corrupt (failed integrity check at %2).")
+            .arg(providerName,
+                 failedEntry.isEmpty() ? QCoreApplication::translate("ModPlatform::ServerPackStaging", "an unknown file")
+                                       : failedEntry);
+    }
+    if (!MMCZip::extractDir(archivePath, serverFilesPath(stagingPath))) {
+        return QCoreApplication::translate("ModPlatform::ServerPackStaging", "Failed to extract the %1 server-pack archive.")
+            .arg(providerName);
+    }
+    if (!recordPublishedServerPack(stagingPath, provider)) {
+        return QCoreApplication::translate("ModPlatform::ServerPackStaging", "Could not record the downloaded %1 server pack.")
+            .arg(providerName);
+    }
+    return {};
 }
 
 bool FileLists::open(const QString& stagingPath, const QList<List>& lists)

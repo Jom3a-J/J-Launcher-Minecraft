@@ -3,6 +3,7 @@
 #include "server/ServerPackCompatibility.h"
 #include "server/ServerModpackInstaller.h"
 
+#include "archive/ArchiveWriter.h"
 #include "modplatform/ServerPackStaging.h"
 #include "modplatform/flame/CurseForgeHash.h"
 #include "modplatform/flame/FlameServerPack.h"
@@ -377,6 +378,35 @@ private slots:
         QVERIFY(report.hasDedicatedServerPack);
         QCOMPARE(findFile(report, "mods/client.jar")->side, ServerPackFileSide::ClientOnly);
         QCOMPARE(findFile(report, "mods/server.jar")->side, ServerPackFileSide::ServerOnly);
+    }
+
+    void extractsAndRecordsAPublishedServerPack()
+    {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        namespace Staging = ModPlatform::ServerPackStaging;
+        const QString archive = root.filePath("pack.zip");
+        MMCZip::ArchiveWriter writer(archive);
+        QVERIFY(writer.open());
+        QVERIFY(writer.addFile("mods/server.jar", QByteArray("server")));
+        QVERIFY(writer.close());
+
+        QCOMPARE(Staging::extractPublishedServerPack(archive, root.path(), "technic", "Technic"), QString());
+        QVERIFY(QFileInfo(Staging::serverFilesPath(root.path(), "mods/server.jar")).isFile());
+        QFile marker(Staging::path(root.path(), "published-server-pack.txt"));
+        QVERIFY(marker.open(QIODevice::ReadOnly | QIODevice::Text));
+        QCOMPARE(marker.readAll(), QByteArray("technic\n"));
+
+        QVERIFY(Staging::recordProvider(root.path(), "atlauncher"));
+        QFile provider(Staging::path(root.path(), "provider.txt"));
+        QVERIFY(provider.open(QIODevice::ReadOnly | QIODevice::Text));
+        QCOMPARE(provider.readAll(), QByteArray("atlauncher\n"));
+
+        const QString broken = root.filePath("broken.zip");
+        QVERIFY(writeFile(broken, "not a zip archive"));
+        const QString error = Staging::extractPublishedServerPack(broken, root.filePath("other"), "curseforge", "CurseForge");
+        QVERIFY2(error.contains("The CurseForge server-pack archive is corrupt"), qPrintable(error));
+        QVERIFY(!QFileInfo::exists(QDir(root.filePath("other")).filePath("server-pack/published-server-pack.txt")));
     }
 
     void sortsCurseForgeFilesIntoServerListsBySide()

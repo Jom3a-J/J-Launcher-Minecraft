@@ -53,11 +53,11 @@
 #include "settings/INISettingsObject.h"
 #include "tasks/Task.h"
 #include "logs/Privacy.h"
+#include "modplatform/ServerPackStaging.h"
 
 #include "net/ApiDownload.h"
 
 #include <QFileInfo>
-#include <QFile>
 #include <QtConcurrentRun>
 #include <memory>
 #include <utility>
@@ -359,16 +359,9 @@ void InstanceImportTask::processFlame()
 
 void InstanceImportTask::processTechnic()
 {
-    if (shouldCreateServerPair()) {
-        const QString providerMarkerPath =
-            FS::PathCombine(m_stagingPath, "server-pack", "provider.txt");
-        FS::ensureFilePathExists(providerMarkerPath);
-        QFile providerMarker(providerMarkerPath);
-        if (!providerMarker.open(QIODevice::WriteOnly | QIODevice::Text)
-            || providerMarker.write("technic\n") != 8) {
-            emitFailed(tr("Could not record the Technic compatibility metadata."));
-            return;
-        }
+    if (shouldCreateServerPair() && !ModPlatform::ServerPackStaging::recordProvider(m_stagingPath, "technic")) {
+        emitFailed(tr("Could not record the Technic compatibility metadata."));
+        return;
     }
     shared_qobject_ptr<Technic::TechnicPackProcessor> packProcessor{ new Technic::TechnicPackProcessor };
     connect(packProcessor.get(), &Technic::TechnicPackProcessor::succeeded, this, &InstanceImportTask::emitSucceeded);
