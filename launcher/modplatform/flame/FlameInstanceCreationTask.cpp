@@ -636,8 +636,7 @@ void FlameCreationTask::setupDownloadJob()
             emitFailed(tr("Could not prepare the CurseForge server compatibility manifest."));
             return;
         }
-        if (!ModPlatform::ServerPackStaging::writeProviderMarker(ModPlatform::ServerPackStaging::path(m_stagingPath, "provider.txt"),
-                                                                 "curseforge")) {
+        if (!ModPlatform::ServerPackStaging::recordProvider(m_stagingPath, "curseforge")) {
             emitFailed(tr("Could not record the CurseForge compatibility metadata."));
             return;
         }

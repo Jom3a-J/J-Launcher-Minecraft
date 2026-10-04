@@ -36,7 +36,6 @@
 #include "PackInstallTask.h"
 
 #include <QtConcurrent>
-#include <QFile>
 #include <utility>
 
 #include "BaseInstance.h"
@@ -50,6 +49,7 @@
 #include "Application.h"
 #include "BuildConfig.h"
 #include "logs/Privacy.h"
+#include "modplatform/ServerPackStaging.h"
 #include "modplatform/ServerSupport.h"
 
 #include "net/ApiDownload.h"
@@ -104,7 +104,7 @@ void PackInstallTask::onClientDownloadSucceeded()
     const bool privatePack = m_pack.type == PackType::Private;
     m_serverPackUrl = ModPlatform::legacyFtbPackUrl(BuildConfig.LEGACY_FTB_CDN_BASE_URL, privatePack,
                                                     m_pack.dir, m_version, m_pack.serverPack);
-    m_serverArchivePath = FS::PathCombine(m_stagingPath, "server-pack", "legacy-server-pack.zip");
+    m_serverArchivePath = ModPlatform::ServerPackStaging::path(m_stagingPath, "legacy-server-pack.zip");
     FS::ensureFilePathExists(m_serverArchivePath);
 
     setStatus(tr("Downloading the official legacy FTB server pack"));
@@ -151,7 +151,7 @@ void PackInstallTask::unzip()
 
     const QString clientExtractPath = extractDir.absolutePath() + "/unzip";
     const QString serverArchivePath = m_serverPackDownloaded ? m_serverArchivePath : QString();
-    const QString serverFilesPath = FS::PathCombine(m_stagingPath, "server-pack", "server-files");
+    const QString serverFilesPath = ModPlatform::ServerPackStaging::serverFilesPath(m_stagingPath);
     m_extractFuture = QtConcurrent::run(QThreadPool::globalInstance(),
         [archivePath = m_archivePath, clientExtractPath, serverArchivePath, serverFilesPath]() {
             ExtractionResult result;
@@ -283,22 +283,13 @@ void PackInstallTask::install()
     }
 
     if (shouldCreateServerPair()) {
-        const QString providerMarkerPath =
-            FS::PathCombine(m_stagingPath, "server-pack", "provider.txt");
-        FS::ensureFilePathExists(providerMarkerPath);
-        QFile providerMarker(providerMarkerPath);
-        if (!providerMarker.open(QIODevice::WriteOnly | QIODevice::Text)
-            || providerMarker.write("ftb-legacy\n") != 11) {
+        if (!ModPlatform::ServerPackStaging::recordProvider(m_stagingPath, "ftb-legacy")) {
             emitFailed(tr("Could not record the legacy FTB compatibility metadata."));
             return;
         }
-        if (m_serverPackExtracted) {
-            QFile publishedMarker(FS::PathCombine(m_stagingPath, "server-pack", "published-server-pack.txt"));
-            if (!publishedMarker.open(QIODevice::WriteOnly | QIODevice::Text)
-                || publishedMarker.write("ftb-legacy\n") != 11) {
-                emitFailed(tr("Could not record the downloaded legacy FTB server pack."));
-                return;
-            }
+        if (m_serverPackExtracted && !ModPlatform::ServerPackStaging::recordPublishedServerPack(m_stagingPath, "ftb-legacy")) {
+            emitFailed(tr("Could not record the downloaded legacy FTB server pack."));
+            return;
         }
     }
 

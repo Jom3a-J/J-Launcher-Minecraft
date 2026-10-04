@@ -4,7 +4,6 @@
 
 #include "Application.h"
 #include "Json.h"
-#include "MMCZip.h"
 #include "modplatform/flame/CurseForgeHash.h"
 #include "modplatform/flame/FlameAPI.h"
 #include "net/ChecksumValidator.h"
@@ -182,21 +181,8 @@ void addServerPackDownload(NetJob* job, const ServerPackSource& source, const QS
 
 QString extractServerPack(const QString& stagingPath)
 {
-    const QString archive = archivePath(stagingPath);
-    QString failedEntry;
-    if (!MMCZip::validateArchive(archive, &failedEntry)) {
-        return tr("The CurseForge server-pack archive is corrupt (failed integrity check at %1).")
-            .arg(failedEntry.isEmpty() ? tr("an unknown file") : failedEntry);
-    }
-    if (!MMCZip::extractDir(archive, ModPlatform::ServerPackStaging::serverFilesPath(stagingPath))) {
-        return tr("Failed to extract the CurseForge server-pack archive.");
-    }
-    if (!ModPlatform::ServerPackStaging::writeProviderMarker(
-            ModPlatform::ServerPackStaging::path(stagingPath, QStringLiteral("published-server-pack.txt")),
-            QStringLiteral("curseforge"))) {
-        return tr("Could not record the downloaded CurseForge server pack.");
-    }
-    return {};
+    return ModPlatform::ServerPackStaging::extractPublishedServerPack(archivePath(stagingPath), stagingPath,
+                                                                      QStringLiteral("curseforge"), QStringLiteral("CurseForge"));
 }
 
 namespace Internal {
