@@ -5,6 +5,7 @@
 #include "Application.h"
 #include "minecraft/MinecraftInstance.h"
 #include "minecraft/MinecraftLoadAndCheck.h"
+#include "minecraft/PackProfile.h"
 #include "settings/SettingsObject.h"
 #include "tasks/SequentialTask.h"
 #include "ui/dialogs/CustomMessageBox.h"
@@ -160,10 +161,14 @@ void InstanceTask::downloadFiles(MinecraftInstance* inst)
     for (const auto& t : updateTasks) {
         task->addTask(t);
     }
-    connect(task.get(), &Task::finished, this, [this, task] {
+    connect(task.get(), &Task::finished, this, [this, task, inst] {
         if (!isRunning()) {
             return;
         }
+        // Resolving the components may have added some (LWJGL, Fabric's intermediary) and only
+        // scheduled their save. Write them now: the instance leaves its staging folder as soon as
+        // this task succeeds, and a deferred save would no longer find it.
+        inst->getPackProfile()->saveNow();
         if (!task->wasSuccessful()) {
             CustomMessageBox::selectable(QApplication::activeWindow(), tr("Error"),
                                          tr("Could not download game files: %1").arg(task->failReason()), QMessageBox::Warning)

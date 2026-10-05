@@ -288,8 +288,9 @@ bool PackProfile::save_internal()
     // Imports are built in instances/.tmp and then moved into their final
     // location. A PackProfile owned by the import task can outlive that move,
     // leaving a deferred save timer pointing at the old staging path. Do not
-    // turn that normal hand-off into a critical error or retry forever; the
-    // published instance is reloaded and saved from its final path.
+    // turn that normal hand-off into a critical error or retry forever.
+    // InstanceTask::downloadFiles saves pending changes before the hand-off;
+    // anything still pending here is lost, not saved again later.
     const QString normalizedRoot = QDir::fromNativeSeparators(
         QDir::cleanPath(d->m_instance->instanceRoot()));
     const bool isMissingStagingRoot =
