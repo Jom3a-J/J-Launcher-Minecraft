@@ -38,11 +38,13 @@ class FileLists {
     bool isOpen() const { return m_open; }
     /// Adds relativePath to a list opened by open(); does nothing otherwise.
     void add(List list, const QString& relativePath);
-    void close();
+    /// Closes the lists. False if any of them could not be written in full.
+    bool close();
 
    private:
     std::array<QFile, 4> m_files;
     bool m_open = false;
+    bool m_writeFailed = false;
 };
 
 }  // namespace ModPlatform::ServerPackStaging

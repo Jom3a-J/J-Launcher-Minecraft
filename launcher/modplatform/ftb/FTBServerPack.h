@@ -23,8 +23,27 @@ inline constexpr int ServerPackProbeConcurrency = 1;
 /// The publisher on the code-signing certificate of FTB's official server installer.
 inline constexpr auto ServerInstallerSigner = "Feed The Beast Ltd";
 
-/// True when Windows trusts the file's signature and it was signed by expectedSigner.
-bool verifyTrustedWindowsExecutable(const QString& path, const QString& expectedSigner, QString* error);
+/*! Holds a file open so that nothing can change, rename or delete it until this is destroyed. The
+ *  file can still be read and run. Windows only; elsewhere isLocked() is always false. */
+class ExecutableLock {
+   public:
+    explicit ExecutableLock(const QString& path);
+    ~ExecutableLock();
+    ExecutableLock(const ExecutableLock&) = delete;
+    ExecutableLock& operator=(const ExecutableLock&) = delete;
+
+    bool isLocked() const { return m_handle != nullptr; }
+    /// The open file's Windows handle, or nullptr.
+    void* handle() const { return m_handle; }
+
+   private:
+    void* m_handle = nullptr;
+};
+
+/*! True when Windows trusts the file's signature and it was signed by expectedSigner. With lock, the
+ *  check reads the locked file through its handle. */
+bool verifyTrustedWindowsExecutable(const QString& path, const QString& expectedSigner, QString* error,
+                                    const ExecutableLock* lock = nullptr);
 ModPlatform::ServerSupport serverPackSupportFromHttpStatus(int status, bool networkError);
 void probeDedicatedServerPack(QNetworkAccessManager* network, int packId, int versionId, QObject* owner,
                               std::function<void(ModPlatform::ServerSupport)> callback);
@@ -45,7 +64,9 @@ class ServerInstallerRun : public QObject {
     ServerInstallerRun(QString installerPath, QString stagingPath, int packId, int versionId, QObject* parent = nullptr);
     ~ServerInstallerRun() override;
 
-    /// Checks the installer's signature and prepares its folder. Returns an error message, or empty.
+    /*! Locks the installer, checks its signature and prepares its folder. Returns an error message,
+     *  or empty. The installer stays locked until it has run, so the file that runs is the one
+     *  that was checked. */
     QString prepare();
     /// Starts the installer; succeeded() or failed() follows.
     void start();
@@ -61,6 +82,7 @@ class ServerInstallerRun : public QObject {
     QString m_stagingPath;
     int m_packId;
     int m_versionId;
+    std::unique_ptr<ExecutableLock> m_lock;
     std::unique_ptr<QProcess> m_process;
 };
 

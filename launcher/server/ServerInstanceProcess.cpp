@@ -34,6 +34,22 @@
 #include <QTimer>
 #include <QProcessEnvironment>
 
+#ifdef Q_OS_WIN
+namespace {
+/// A Windows program's full path in System32, or empty when it is not there. Starting it by name
+/// alone would let a file of the same name in the launcher's folder run instead.
+QString systemProgramPath(const QString &fileName)
+{
+    const QString systemRoot = qEnvironmentVariable("SystemRoot");
+    if (systemRoot.isEmpty()) {
+        return {};
+    }
+    const QString path = QDir(systemRoot).filePath(QStringLiteral("System32/") + fileName);
+    return QFileInfo::exists(path) ? path : QString();
+}
+}  // namespace
+#endif
+
 bool ServerInstance::start()
 {
     if (!m_crashRestartStarting) {
@@ -307,7 +323,8 @@ bool ServerInstance::start()
                          "Pack -Xms/-Xmx inside the opaque wrapper still take precedence and cannot be filtered safely."));
             emit outputReceived(tr("[JVM] Opaque wrapper limit: launcher memory is a fallback; the wrapper's own memory flags win."));
 #ifdef Q_OS_WIN
-            m_process->start("cmd.exe",
+            const QString commandProcessor = systemProgramPath(QStringLiteral("cmd.exe"));
+            m_process->start(commandProcessor.isEmpty() ? QStringLiteral("cmd.exe") : commandProcessor,
                              QStringList() << "/d" << "/c"
                                            << (QStringLiteral(".\\")
                                                + QFileInfo(loaderScriptPath()).fileName())
@@ -406,14 +423,7 @@ void ServerInstance::forceKillProcessTree()
         return;
     }
 #ifdef Q_OS_WIN
-    const QString systemRoot = qEnvironmentVariable("SystemRoot");
-    QString taskkillPath;
-    if (!systemRoot.isEmpty()) {
-        taskkillPath = QDir(systemRoot).filePath(QStringLiteral("System32/taskkill.exe"));
-        if (!QFileInfo::exists(taskkillPath)) {
-            taskkillPath.clear();
-        }
-    }
+    QString taskkillPath = systemProgramPath(QStringLiteral("taskkill.exe"));
     if (taskkillPath.isEmpty()) {
         taskkillPath = QStandardPaths::findExecutable(QStringLiteral("taskkill"));
     }

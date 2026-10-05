@@ -7,6 +7,7 @@
 #include "net/ApiDownload.h"
 #include "net/ChecksumValidator.h"
 #include "net/NetJob.h"
+#include "server/ServerPaths.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -83,9 +84,8 @@ QString addServerOnlyDownloads(const QString& indexPath, const QString& cacheRoo
             continue;
         }
 
-        const QString relativePath = QDir::cleanPath(filePath).replace('\\', '/');
-        if (relativePath.isEmpty() || relativePath == QStringLiteral("..") || relativePath.startsWith(QStringLiteral("../"))
-            || QDir::isAbsolutePath(relativePath)) {
+        const QString relativePath = ServerPaths::normalizedRelativePath(QString(filePath).replace('\\', '/'));
+        if (!ServerPaths::isSafeRelativePath(relativePath) || !ServerPaths::hasValidWindowsNames(relativePath)) {
             return tr("The Modrinth server manifest contains an unsafe path: %1").arg(relativePath);
         }
 
