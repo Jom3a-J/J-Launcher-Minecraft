@@ -17,3 +17,10 @@ class CurseForgeSetupPage final : public QWidget, public BasePage {
     QIcon icon() const override { return QIcon::fromTheme(QStringLiteral("flame")); }
     QString id() const override { return QStringLiteral("curseforge-setup"); }
 };
+
+/*! Sits above the pages of the mod download window when the build has no CurseForge API key,
+ *  explaining why CurseForge is missing and sending the user to the settings page. */
+class CurseForgeSetupRow final : public QWidget {
+   public:
+    explicit CurseForgeSetupRow(QWidget* parent = nullptr);
+};
