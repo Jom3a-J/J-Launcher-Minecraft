@@ -862,7 +862,10 @@ void PackInstallTask::downloadMods()
             modsToCopy[entry->getFullPath()] = path;
         }
     }
-    serverLists.close();
+    if (!serverLists.close()) {
+        emitFailed(tr("Could not prepare the ATLauncher server compatibility manifest."));
+        return;
+    }
     if (!blockedMods.isEmpty()) {
         QList<BlockedMod> mods;
 

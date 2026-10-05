@@ -150,6 +150,10 @@ void NetRequest::executeTask()
     // depend on whether a backend preserves sensitive raw headers in
     // QNetworkReply::request().
     m_requestHadCredentials = containsCredentials(request);
+    // Qt follows redirects itself and would send these headers along to another host. Let it
+    // follow only same-origin ones; any other redirect reaches handleRedirect(), which rejects it.
+    if (m_requestHadCredentials)
+        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::SameOriginRedirectPolicy);
     qCDebug(logCat) << getUid().toString() << "Running"
                     << formatRequestForLogging(request);
 

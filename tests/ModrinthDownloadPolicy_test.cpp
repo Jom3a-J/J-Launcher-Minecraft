@@ -305,6 +305,8 @@ class ModrinthDownloadPolicyTest final : public QObject {
             QVERIFY2(error.contains(expected), qPrintable(error));
         };
         rejects(entry("../outside.jar", "unsupported", "required"), "unsafe path");
+        rejects(entry("mods/CON.jar", "unsupported", "required"), "unsafe path");
+        rejects(entry("config/a:b.toml", "unsupported", "required"), "unsafe path");
         rejects(entry("mods/plain.jar", "unsupported", "required", "http://cdn.modrinth.com/plain.jar"), "invalid HTTPS");
         rejects(entry("mods/odd.jar", "unsupported", "sometimes"), "is unsupported");
         QJsonObject shortHash = entry("mods/short.jar", "unsupported", "required");

@@ -187,15 +187,27 @@ QNetworkRequest ServerDownloader::createRequest(const QUrl &url)
 void ServerDownloader::sendRequest(const QUrl &url)
 {
     m_fileDownload = FileDownload::None;
-    m_currentReply = m_network->get(createRequest(url));
-    connect(m_currentReply, &QNetworkReply::finished, this, [this]() {
-        handleReply(m_currentReply);
+    QNetworkReply *reply = m_network->get(createRequest(url));
+    m_currentReply = reply;
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        // Only the latest request's answer counts; an earlier one is just let go.
+        if (reply != m_currentReply) {
+            reply->deleteLater();
+            return;
+        }
+        handleReply(reply);
     });
 }
 
 void ServerDownloader::startDownload(const QString &version, const QString &type, const QString &destinationDir,
                                      const QString &javaPath, const QString &loaderVersion)
 {
+    // A version or build list still loading is cancelled, so whoever asked for it hears so;
+    // any other work still running is stopped before the new install begins.
+    if (m_activity == Activity::ListingVersions || m_activity == Activity::ListingBuilds) {
+        cancel();
+    }
+    cleanUp();
     m_finishedEmitted = false;
     m_version = version;
     m_type = type.toLower();

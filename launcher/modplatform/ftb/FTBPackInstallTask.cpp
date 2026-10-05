@@ -382,7 +382,10 @@ void PackInstallTask::downloadPack()
             jobPtr->addNetAction(dl);
         }
     }
-    serverLists.close();
+    if (!serverLists.close()) {
+        emitFailed(tr("Could not prepare the FTB server compatibility manifest."));
+        return;
+    }
 
     // HostScheduler pins each FTB host; leave other hosts free to download in parallel.
     connect(jobPtr.get(), &NetJob::succeeded, this, &PackInstallTask::onModDownloadSucceeded);

@@ -673,7 +673,10 @@ void FlameCreationTask::setupDownloadJob()
         }
     }
 
-    serverLists.close();
+    if (!serverLists.close()) {
+        emitFailed(tr("Could not prepare the CurseForge server compatibility manifest."));
+        return;
+    }
 
     if (shouldCreateServerPair() && !m_serverPack.downloadUrl.isEmpty()) {
         Flame::addServerPackDownload(m_filesJob.get(), m_serverPack, m_stagingPath, this, [this](QString reason) {

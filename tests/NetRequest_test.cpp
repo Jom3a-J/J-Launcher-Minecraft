@@ -145,7 +145,8 @@ class LoopbackHttpServer final
 class TestDownload final : public Net::Download
 {
    public:
-    explicit TestDownload(QUrl url)
+    /// With qtFollowsRedirects, redirects are left to Qt's own policy, as in the launcher.
+    explicit TestDownload(QUrl url, bool qtFollowsRedirects = false) : m_qtFollowsRedirects(qtFollowsRedirects)
     {
         setUrl(std::move(url));
         auto sink = std::make_unique<Net::ByteArraySink>();
@@ -158,12 +159,14 @@ class TestDownload final : public Net::Download
    protected:
     QNetworkReply* getReply(QNetworkRequest& request) override
     {
-        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
-                             QNetworkRequest::ManualRedirectPolicy);
+        if (!m_qtFollowsRedirects)
+            request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                                 QNetworkRequest::ManualRedirectPolicy);
         return m_network->get(request);
     }
 
    private:
+    bool m_qtFollowsRedirects = false;
     QByteArray* m_output = nullptr;
 };
 }  // namespace
@@ -233,6 +236,59 @@ class NetRequestTest final : public QObject
         QCOMPARE(origin.requestCount(), 1);
         QCOMPARE(origin.authorizedRequestCount(), 1);
         QCOMPARE(destination.requestCount(), 0);
+    }
+
+    void credentialedCrossOriginRedirectIsNotFollowedByQt()
+    {
+        LoopbackHttpServer origin;
+        LoopbackHttpServer destination;
+        QVERIFY(origin.start());
+        QVERIFY(destination.start());
+        origin.redirect("/cross-origin", destination.url("/received"));
+        destination.body("/received", "must not be requested");
+
+        QNetworkAccessManager network;
+        network.setProxy(QNetworkProxy::NoProxy);
+        TestDownload request(origin.url("/cross-origin"), true);
+        request.setNetwork(&network);
+        auto headers = std::make_unique<Net::RawHeaderProxy>();
+        headers->addHeader("x-api-key", "batch6-test-credential");
+        request.addHeaderProxy(std::move(headers));
+
+        QSignalSpy failed(&request, &Task::failed);
+        QSignalSpy finished(&request, &Task::finished);
+        request.start();
+
+        QTRY_VERIFY_WITH_TIMEOUT(finished.count() == 1, 2000);
+        QCOMPARE(failed.count(), 1);
+        QVERIFY(request.failReason().contains(QStringLiteral("credentials cannot cross origins")));
+        QCOMPARE(origin.requestCount(), 1);
+        QCOMPARE(destination.requestCount(), 0);
+    }
+
+    void credentialedSameOriginRedirectIsFollowedByQt()
+    {
+        LoopbackHttpServer server;
+        QVERIFY(server.start());
+        server.redirect("/start", QByteArrayLiteral("/final"));
+        server.body("/final", "same-origin");
+
+        QNetworkAccessManager network;
+        network.setProxy(QNetworkProxy::NoProxy);
+        TestDownload request(server.url("/start"), true);
+        request.setNetwork(&network);
+        auto headers = std::make_unique<Net::RawHeaderProxy>();
+        headers->addHeader("Authorization", "Bearer batch6-test-credential");
+        request.addHeaderProxy(std::move(headers));
+
+        QSignalSpy succeeded(&request, &Task::succeeded);
+        QSignalSpy finished(&request, &Task::finished);
+        request.start();
+
+        QTRY_VERIFY_WITH_TIMEOUT(finished.count() == 1, 2000);
+        QCOMPARE(succeeded.count(), 1);
+        QCOMPARE(*request.output(), QByteArrayLiteral("same-origin"));
+        QCOMPARE(server.authorizedRequestCount(), 2);
     }
 
     void credentialedSameOriginRelativeRedirectSucceeds()

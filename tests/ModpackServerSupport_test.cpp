@@ -133,6 +133,56 @@ class ModpackServerSupportTest final : public QObject {
 #endif
     }
 
+    void lockedInstallerCannotBeSwappedButStillRuns()
+    {
+#ifdef Q_OS_WIN
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        wchar_t systemDirectory[MAX_PATH];
+        const UINT length = GetSystemDirectoryW(systemDirectory, MAX_PATH);
+        QVERIFY(length > 0 && length < MAX_PATH);
+        const QString program = directory.filePath(QStringLiteral("installer.exe"));
+        QVERIFY(QFile::copy(QDir(QString::fromWCharArray(systemDirectory, static_cast<int>(length))).filePath("cmd.exe"),
+                            program));
+
+        {
+            FTB::ExecutableLock lock(program);
+            QVERIFY(lock.isLocked());
+            QFile writer(program);
+            QVERIFY(!writer.open(QIODevice::ReadWrite));
+            QVERIFY(!QFile::rename(program, directory.filePath(QStringLiteral("moved.exe"))));
+            QVERIFY(!QFile::remove(program));
+
+            QProcess run;
+            run.start(program, { QStringLiteral("/d"), QStringLiteral("/c"), QStringLiteral("exit 7") });
+            QVERIFY(run.waitForFinished(10000));
+            QCOMPARE(run.exitCode(), 7);
+        }
+        QVERIFY(QFile::remove(program));
+
+        // Verifying through the lock reads the same signed file.
+        HMODULE qtCore = nullptr;
+        QVERIFY(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                   reinterpret_cast<LPCWSTR>(&qVersion), &qtCore));
+        wchar_t modulePath[MAX_PATH];
+        const DWORD moduleLength = GetModuleFileNameW(qtCore, modulePath, MAX_PATH);
+        QVERIFY(moduleLength > 0 && moduleLength < MAX_PATH);
+        const QString signedCopy = directory.filePath(QStringLiteral("signed.dll"));
+        QVERIFY(QFile::copy(QString::fromWCharArray(modulePath, static_cast<int>(moduleLength)), signedCopy));
+        FTB::ExecutableLock signedLock(signedCopy);
+        QVERIFY(signedLock.isLocked());
+        QString error;
+        const bool trusted =
+            FTB::verifyTrustedWindowsExecutable(signedCopy, QStringLiteral("The QT Company Oy"), &error, &signedLock);
+        if (!trusted && error.contains(QStringLiteral("signature verification"))) {
+            QSKIP(qPrintable(QStringLiteral("This Qt build carries no trusted signature: %1").arg(error)));
+        }
+        QVERIFY2(trusted, qPrintable(error));
+#else
+        QSKIP("Installers are locked on Windows only.");
+#endif
+    }
+
     void providerQueueLimits()
     {
         QObject owner;

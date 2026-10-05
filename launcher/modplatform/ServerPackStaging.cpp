@@ -101,17 +101,23 @@ void FileLists::add(List list, const QString& relativePath)
     QFile& file = m_files[list];
     if (!file.isOpen())
         return;
-    file.write(QDir::fromNativeSeparators(relativePath).toUtf8());
-    file.write("\n");
+    const QByteArray line = QDir::fromNativeSeparators(relativePath).toUtf8() + '\n';
+    if (file.write(line) != line.size())
+        m_writeFailed = true;
 }
 
-void FileLists::close()
+bool FileLists::close()
 {
+    bool written = !m_writeFailed;
     for (QFile& file : m_files) {
-        if (file.isOpen())
+        if (file.isOpen()) {
+            written = file.flush() && file.error() == QFileDevice::NoError && written;
             file.close();
+        }
     }
     m_open = false;
+    m_writeFailed = false;
+    return written;
 }
 
 }  // namespace ModPlatform::ServerPackStaging

@@ -61,7 +61,32 @@ QString verifiedSignerName(HANDLE stateData)
 #endif
 }
 
-bool verifyTrustedWindowsExecutable(const QString& path, const QString& expectedSigner, QString* error)
+ExecutableLock::ExecutableLock(const QString& path)
+{
+#ifdef Q_OS_WIN
+    // Sharing only reads (which covers running it) refuses every writer, rename and delete.
+    const std::wstring nativePath = QDir::toNativeSeparators(path).toStdWString();
+    HANDLE file = CreateFileW(nativePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        m_handle = file;
+    }
+#else
+    Q_UNUSED(path)
+#endif
+}
+
+ExecutableLock::~ExecutableLock()
+{
+#ifdef Q_OS_WIN
+    if (m_handle) {
+        CloseHandle(m_handle);
+    }
+#endif
+}
+
+bool verifyTrustedWindowsExecutable(const QString& path, const QString& expectedSigner, QString* error,
+                                    const ExecutableLock* lock)
 {
 #ifdef Q_OS_WIN
     WINTRUST_FILE_INFO fileInfo{};
@@ -69,6 +94,9 @@ bool verifyTrustedWindowsExecutable(const QString& path, const QString& expected
     const std::wstring nativePath =
         QDir::toNativeSeparators(path).toStdWString();
     fileInfo.pcwszFilePath = nativePath.c_str();
+    if (lock && lock->isLocked()) {
+        fileInfo.hFile = lock->handle();
+    }
 
     WINTRUST_DATA trustData{};
     trustData.cbStruct = sizeof(trustData);
@@ -107,6 +135,7 @@ bool verifyTrustedWindowsExecutable(const QString& path, const QString& expected
 #else
     Q_UNUSED(path)
     Q_UNUSED(expectedSigner)
+    Q_UNUSED(lock)
     if (error) {
         *error = QObject::tr(
             "Automatic FTB server-package installation is currently supported "
@@ -199,8 +228,16 @@ bool writeServerIncludeList(const QString& stagingPath, const QVector<VersionFil
             }
             return false;
         }
-        includeFile.write(QDir::fromNativeSeparators(relativePath).toUtf8());
-        includeFile.write("\n");
+        const QByteArray line = QDir::fromNativeSeparators(relativePath).toUtf8() + '\n';
+        if (includeFile.write(line) != line.size()) {
+            break;
+        }
+    }
+    if (!includeFile.flush() || includeFile.error() != QFileDevice::NoError) {
+        if (error) {
+            *error = installTaskTr("Could not finalize the FTB server compatibility manifest.");
+        }
+        return false;
     }
     return true;
 }
@@ -217,8 +254,16 @@ ServerInstallerRun::~ServerInstallerRun() = default;
 
 QString ServerInstallerRun::prepare()
 {
+#ifdef Q_OS_WIN
+    m_lock = std::make_unique<ExecutableLock>(m_installerPath);
+    if (!m_lock->isLocked()) {
+        m_lock.reset();
+        return installTaskTr("The FTB server installer could not be opened for verification.");
+    }
+#endif
     QString verificationError;
-    if (!verifyTrustedWindowsExecutable(m_installerPath, ServerInstallerSigner, &verificationError)) {
+    if (!verifyTrustedWindowsExecutable(m_installerPath, ServerInstallerSigner, &verificationError, m_lock.get())) {
+        m_lock.reset();
         return verificationError;
     }
     if (!QDir().mkpath(ModPlatform::ServerPackStaging::serverFilesPath(m_stagingPath))) {
@@ -241,6 +286,7 @@ void ServerInstallerRun::start()
     });
     connect(m_process.get(), &QProcess::errorOccurred, this, [this](QProcess::ProcessError processError) {
         if (processError == QProcess::FailedToStart) {
+            m_lock.reset();
             emit failed(installTaskTr("The verified FTB server installer could not be started."));
         }
     });
@@ -249,6 +295,7 @@ void ServerInstallerRun::start()
                 const QByteArray output = m_process->readAll();
                 QProcess* completedProcess = m_process.release();
                 completedProcess->deleteLater();
+                m_lock.reset();
                 if (status != QProcess::NormalExit || exitCode != 0) {
                     qWarning() << "FTB server installer failed:" << Privacy::sanitizeText(QString::fromUtf8(output));
                     emit failed(installTaskTr("The official FTB server installer could not prepare the server files "
@@ -278,6 +325,7 @@ void ServerInstallerRun::stop()
         disconnect(m_process.get(), nullptr, this, nullptr);
         m_process->kill();
     }
+    m_lock.reset();
 }
 
 }  // namespace FTB

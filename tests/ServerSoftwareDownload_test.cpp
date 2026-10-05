@@ -94,6 +94,43 @@ class ServerSoftwareDownloadTest : public QObject {
         QCOMPARE(preserved.readAll(), workingJar);
     }
 
+    void startingAnInstallCancelsAVersionListStillLoading()
+    {
+        QTemporaryDir temporaryRoot;
+        QVERIFY(temporaryRoot.isValid());
+        const QString payloadPath = temporaryRoot.filePath("provider/server.jar");
+        const QString metadataPath = temporaryRoot.filePath("provider/version.json");
+        const QString manifestPath = temporaryRoot.filePath("provider/manifest.json");
+        QVERIFY(writeFile(payloadPath, "server payload"));
+        const QJsonObject metadata{
+            { "downloads", QJsonObject{ { "server", QJsonObject{ { "url", QUrl::fromLocalFile(payloadPath).toString() },
+                                                                 { "sha1", QString(40, '0') } } } } },
+        };
+        QVERIFY(writeFile(metadataPath, QJsonDocument(metadata).toJson(QJsonDocument::Compact)));
+        const QJsonObject version{
+            { "id", "1.21.8" },
+            { "type", "release" },
+            { "url", QUrl::fromLocalFile(metadataPath).toString() },
+        };
+        QVERIFY(writeFile(manifestPath, QJsonDocument(QJsonObject{ { "versions", QJsonArray{ version } } })
+                                            .toJson(QJsonDocument::Compact)));
+
+        ServerDownloader downloader(QUrl::fromLocalFile(manifestPath));
+        QSignalSpy versionsReady(&downloader, &ServerDownloader::versionsReady);
+        QSignalSpy versionsFailed(&downloader, &ServerDownloader::versionsFailed);
+        QSignalSpy finished(&downloader, &ServerDownloader::finished);
+        downloader.fetchAvailableVersions("vanilla");
+        downloader.startDownload("1.21.8", "vanilla", temporaryRoot.filePath("installed-server"));
+
+        QCOMPARE(versionsFailed.size(), 1);
+        QTRY_VERIFY_WITH_TIMEOUT(!finished.isEmpty(), 5000);
+        QTest::qWait(100);
+        QCOMPARE(finished.size(), 1);
+        // The install went through its own steps: it reached the jar and rejected its hash.
+        QVERIFY2(finished.last().at(1).toString().contains("hash"), qPrintable(finished.last().at(1).toString()));
+        QCOMPARE(versionsReady.size(), 0);
+    }
+
     void serverJarNetworkDownloadsVerifyBothHashAlgorithms()
     {
         QTemporaryDir temporaryRoot;
