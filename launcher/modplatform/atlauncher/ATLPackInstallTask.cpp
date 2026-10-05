@@ -54,7 +54,7 @@
 #include "modplatform/atlauncher/ATLPackManifest.h"
 #include "net/ChecksumValidator.h"
 #include "modplatform/ServerPackStaging.h"
-#include "server/ServerProperties.h"
+#include "modplatform/atlauncher/ATLServerPack.h"
 #include "settings/INISettingsObject.h"
 
 #include "net/ApiDownload.h"
@@ -742,46 +742,19 @@ void PackInstallTask::downloadMods()
     jarmods.clear();
     jobPtr.reset(new NetJob(tr("Mod download"), APPLICATION->network()));
 
+    using ServerLists = ModPlatform::ServerPackStaging::FileLists;
+    ServerLists serverLists;
     if (shouldCreateServerPair()) {
-        for (const auto& mod : m_version.mods) {
-            if (!mod.serverSeparate || !mod.server) {
-                continue;
-            }
-            if (mod.serverUrl.isEmpty() || mod.serverFile.isEmpty()
-                || mod.serverDownload == DownloadType::Unknown
-                || mod.serverType == ModType::Unknown) {
-                emitFailed(tr("The ATLauncher pack has incomplete separate server metadata for %1.")
-                               .arg(mod.name));
-                return;
-            }
+        if (const auto error = prepareServerPack(m_version.mods, m_stagingPath, m_pack_safe_name, serverLists);
+            !error.isEmpty()) {
+            emitFailed(error);
+            return;
         }
     }
 
     const QList<VersionMod> modsForInstall = shouldCreateServerPair()
         ? expandModsForPairedServer(m_version.mods)
         : m_version.mods;
-
-    using ServerLists = ModPlatform::ServerPackStaging::FileLists;
-    ServerLists serverLists;
-    if (shouldCreateServerPair()) {
-        if (!serverLists.open(m_stagingPath, { ServerLists::ClientOnly })
-            || !ModPlatform::ServerPackStaging::recordProvider(m_stagingPath, "atlauncher")) {
-            emitFailed(tr("Could not prepare the ATLauncher server compatibility manifest."));
-            return;
-        }
-        const auto propertyOverrides =
-            serverPropertyOverridesForPack(m_pack_safe_name);
-        if (!propertyOverrides.isEmpty()) {
-            QString propertyError;
-            if (!ServerProperties::save(
-                    ModPlatform::ServerPackStaging::path(m_stagingPath, "server-properties.txt"),
-                    propertyOverrides, &propertyError)) {
-                emitFailed(tr("Could not prepare the ATLauncher server properties: %1")
-                               .arg(propertyError));
-                return;
-            }
-        }
-    }
 
     QList<VersionMod> blockedMods;
     for (const auto& mod : modsForInstall) {

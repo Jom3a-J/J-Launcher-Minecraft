@@ -620,6 +620,8 @@ set(ATLAUNCHER_SOURCES
     modplatform/atlauncher/ATLPackInstallTask.h
     modplatform/atlauncher/ATLPackManifest.cpp
     modplatform/atlauncher/ATLPackManifest.h
+    modplatform/atlauncher/ATLServerPack.cpp
+    modplatform/atlauncher/ATLServerPack.h
     modplatform/atlauncher/ATLShareCode.cpp
     modplatform/atlauncher/ATLShareCode.h
 )
