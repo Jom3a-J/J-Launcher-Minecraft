@@ -40,7 +40,7 @@
 #include "logs/Privacy.h"
 #include "settings/SettingsObject.h"
 
-#include "net/ApiDownload.h"
+#include "net/ApiRequest.h"
 #include "ui/widgets/ProjectItem.h"
 
 #include <QFileInfo>
@@ -168,7 +168,7 @@ void Technic::ListModel::performSearch()
     if (!clientId.isEmpty()) {
         searchUrl += "?cid=" + clientId;
     }
-    auto [action, response] = Net::ApiDownload::makeByteArray(QUrl(searchUrl));
+    auto [action, response] = Net::ApiRequest::makeByteArray(QUrl(searchUrl));
     netJob->addNetAction(action);
     jobPtr = netJob;
     jobPtr->start();
@@ -360,7 +360,7 @@ void Technic::ListModel::requestLogo(QString logo, QString url)
     MetaEntryPtr entry = APPLICATION->metacache()->resolveEntry("TechnicPacks", QString("logos/%1").arg(logo));
     auto job = new NetJob(QString("Technic Icon Download %1").arg(logo), APPLICATION->network());
     job->setAskRetry(false);
-    job->addNetAction(Net::ApiDownload::makeCached(QUrl(url), entry));
+    job->addNetAction(Net::ApiRequest::makeCached(QUrl(url), entry));
 
     auto fullPath = entry->getFullPath();
 

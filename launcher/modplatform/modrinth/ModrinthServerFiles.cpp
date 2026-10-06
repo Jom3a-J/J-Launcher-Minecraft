@@ -4,7 +4,7 @@
 
 #include "FileSystem.h"
 #include "Json.h"
-#include "net/ApiDownload.h"
+#include "net/ApiRequest.h"
 #include "net/ChecksumValidator.h"
 #include "net/NetJob.h"
 #include "server/ServerPaths.h"
@@ -131,7 +131,7 @@ QString addServerOnlyDownloads(const QString& indexPath, const QString& cacheRoo
                     return;
                 }
 
-                auto download = Net::ApiDownload::makeFile(state->remaining.takeFirst(), destination);
+                auto download = Net::ApiRequest::makeFile(state->remaining.takeFirst(), destination);
                 download->addValidator(new Net::ChecksumValidator(QCryptographicHash::Sha512, hash));
                 if (!state->remaining.isEmpty()) {
                     const auto previous = download.toWeakRef();

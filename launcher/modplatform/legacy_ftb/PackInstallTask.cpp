@@ -52,7 +52,7 @@
 #include "modplatform/ServerPackStaging.h"
 #include "modplatform/ServerSupport.h"
 
-#include "net/ApiDownload.h"
+#include "net/ApiRequest.h"
 
 namespace LegacyFTB {
 
@@ -80,7 +80,7 @@ void PackInstallTask::downloadPack()
     const bool privatePack = m_pack.type == PackType::Private;
     const QUrl clientUrl = ModPlatform::legacyFtbPackUrl(BuildConfig.LEGACY_FTB_CDN_BASE_URL, privatePack,
                                                          m_pack.dir, m_version, m_pack.file);
-    m_netJobContainer->addNetAction(Net::ApiDownload::makeCached(clientUrl, entry));
+    m_netJobContainer->addNetAction(Net::ApiRequest::makeCached(clientUrl, entry));
 
     connect(m_netJobContainer.get(), &NetJob::succeeded, this, &PackInstallTask::onClientDownloadSucceeded);
     connect(m_netJobContainer.get(), &NetJob::failed, this, &PackInstallTask::emitFailed);
@@ -110,7 +110,7 @@ void PackInstallTask::onClientDownloadSucceeded()
     setStatus(tr("Downloading the official legacy FTB server pack"));
     auto job = makeShared<NetJob>(tr("Legacy FTB server pack download"), m_network);
     job->setAskRetry(false);
-    job->addNetAction(Net::ApiDownload::makeFile(m_serverPackUrl, m_serverArchivePath));
+    job->addNetAction(Net::ApiRequest::makeFile(m_serverPackUrl, m_serverArchivePath));
     connect(job.get(), &NetJob::succeeded, this, &PackInstallTask::onServerPackDownloadSucceeded);
     connect(job.get(), &NetJob::failed, this, &PackInstallTask::onServerPackDownloadFailed);
     connect(job.get(), &NetJob::aborted, this, &PackInstallTask::onServerPackDownloadAborted);

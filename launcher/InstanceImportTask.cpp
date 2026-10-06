@@ -55,7 +55,7 @@
 #include "logs/Privacy.h"
 #include "modplatform/ServerPackStaging.h"
 
-#include "net/ApiDownload.h"
+#include "net/ApiRequest.h"
 
 #include <QFileInfo>
 #include <QtConcurrentRun>
@@ -103,7 +103,7 @@ void InstanceImportTask::downloadFromUrl()
     m_archivePath = entry->getFullPath();
 
     auto filesNetJob = makeShared<NetJob>(tr("Modpack download"), APPLICATION->network());
-    filesNetJob->addNetAction(Net::ApiDownload::makeCached(m_sourceUrl, entry));
+    filesNetJob->addNetAction(Net::ApiRequest::makeCached(m_sourceUrl, entry));
 
     connect(filesNetJob.get(), &NetJob::succeeded, this, &InstanceImportTask::processZipPack);
     connect(filesNetJob.get(), &NetJob::progress, this, &InstanceImportTask::setProgress);

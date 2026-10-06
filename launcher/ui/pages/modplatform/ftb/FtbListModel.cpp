@@ -123,7 +123,7 @@ void ListModel::request()
 
     auto netJob = makeShared<NetJob>("Ftb::Request", APPLICATION->network());
     auto url = QString(BuildConfig.FTB_API_BASE_URL + "/modpack/all");
-    auto [action, response] = Net::Download::makeByteArray(QUrl(url));
+    auto [action, response] = Net::NetRequest::makeByteArray(QUrl(url));
     netJob->addNetAction(action);
     m_jobPtr = netJob;
     m_jobPtr->start();
@@ -176,7 +176,7 @@ void ListModel::requestPack()
 {
     auto netJob = makeShared<NetJob>("Ftb::Search", APPLICATION->network());
     auto searchUrl = QString(BuildConfig.FTB_API_BASE_URL + "/modpack/%1").arg(m_currentPack);
-    auto [action, response] = Net::Download::makeByteArray(QUrl(searchUrl));
+    auto [action, response] = Net::NetRequest::makeByteArray(QUrl(searchUrl));
     netJob->addNetAction(action);
     m_jobPtr = netJob;
     m_jobPtr->start();
@@ -320,7 +320,7 @@ void ListModel::requestLogo(QString logo, QString url)
 
     auto job = makeShared<NetJob>(QString("FTB Icon Download %1").arg(logo), APPLICATION->network());
     job->setAskRetry(false);
-    job->addNetAction(Net::Download::makeCached(QUrl(url), entry));
+    job->addNetAction(Net::NetRequest::makeCached(QUrl(url), entry));
 
     auto fullPath = entry->getFullPath();
     QObject::connect(job.get(), &NetJob::finished, this, [this, logo, fullPath] { logoLoaded(logo); });

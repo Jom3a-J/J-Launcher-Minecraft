@@ -26,7 +26,7 @@
 
 #include "Application.h"
 
-#include "net/ApiDownload.h"
+#include "net/ApiRequest.h"
 #include "logs/Privacy.h"
 
 Technic::SingleZipPackInstallTask::SingleZipPackInstallTask(const QUrl& sourceUrl, const QString& minecraftVersion,
@@ -65,13 +65,13 @@ void Technic::SingleZipPackInstallTask::executeTask()
     auto entry = APPLICATION->metacache()->resolveEntry("general", path);
     entry->setStale(true);
     m_filesNetJob.reset(new NetJob(tr("Modpack download"), APPLICATION->network()));
-    m_filesNetJob->addNetAction(Net::ApiDownload::makeCached(m_sourceUrl, entry));
+    m_filesNetJob->addNetAction(Net::ApiRequest::makeCached(m_sourceUrl, entry));
     m_archivePath = entry->getFullPath();
     if (shouldCreateServerPair() && serverSupport == ModPlatform::ServerSupport::Official) {
         const QString serverPath = m_serverPackUrl.host() + '/' + m_serverPackUrl.path();
         auto serverEntry = APPLICATION->metacache()->resolveEntry("general", serverPath);
         serverEntry->setStale(true);
-        m_filesNetJob->addNetAction(Net::ApiDownload::makeCached(m_serverPackUrl, serverEntry));
+        m_filesNetJob->addNetAction(Net::ApiRequest::makeCached(m_serverPackUrl, serverEntry));
         m_serverArchivePath = serverEntry->getFullPath();
     }
     auto job = m_filesNetJob.get();

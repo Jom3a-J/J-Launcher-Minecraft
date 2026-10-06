@@ -25,7 +25,7 @@
 #include "MMCTime.h"
 #include "StringUtils.h"
 #include "logs/Privacy.h"
-#include "net/Download.h"
+#include "net/NetRequest.h"
 #include "net/HeaderProxy.h"
 #include "net/Logging.h"
 #include "net/PartFile.h"
@@ -219,18 +219,17 @@ class SegmentSink final : public Sink {
 
 /*! One request of a segmented download.
  *
- *  An ordinary Net::Download in every way that matters to NetJob and to HostScheduler - it is a
+ *  An ordinary Net::NetRequest download in every way that matters to NetJob and to HostScheduler - it is a
  *  Net::NetRequest, so it is admitted with a real permit, reports 429/503, migrates its permit
  *  across a cross host redirect and keeps all of NetRequest's redirect and credential checks.
  */
-class SegmentRequest final : public Download {
+class SegmentRequest final : public NetRequest {
    public:
     using HeaderCallback = std::function<void(QNetworkReply&)>;
 
-    SegmentRequest(QUrl url, std::shared_ptr<PartFile> file, std::shared_ptr<SegmentState> state)
+    SegmentRequest(const QUrl& url, std::shared_ptr<PartFile> file, std::shared_ptr<SegmentState> state)
+        : NetRequest(url, Option::NoOptions, QStringLiteral("SEGMENT:") + Privacy::sanitizeUrl(url))
     {
-        m_url = std::move(url);
-        setObjectName(QStringLiteral("SEGMENT:") + Privacy::sanitizeUrl(m_url));
         m_sink = std::make_unique<SegmentSink>(std::move(file), std::move(state));
     }
 
@@ -239,7 +238,7 @@ class SegmentRequest final : public Download {
    protected:
     QNetworkReply* getReply(QNetworkRequest& request) override
     {
-        auto* reply = Download::getReply(request);
+        auto* reply = NetRequest::getReply(request);
         if (!reply)
             return nullptr;
         // Bound per-reply buffering; the opted-in HTTP/1 CDN path needs more room if the GUI
@@ -612,7 +611,7 @@ void SegmentedDownload::startLegacy()
     m_mode = Mode::Legacy;
     m_segmentsUsed = 1;
 
-    auto download = Download::makeFile(m_url, m_targetPath);
+    auto download = NetRequest::makeFile(m_url, m_targetPath);
     if (m_decorate)
         m_decorate(*download);
     for (const auto& validator : m_validators)

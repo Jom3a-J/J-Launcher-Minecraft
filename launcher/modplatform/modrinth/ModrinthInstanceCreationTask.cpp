@@ -15,7 +15,7 @@
 
 #include "net/ChecksumValidator.h"
 
-#include "net/ApiDownload.h"
+#include "net/ApiRequest.h"
 #include "net/NetJob.h"
 #include "logs/Privacy.h"
 

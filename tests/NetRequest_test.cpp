@@ -15,7 +15,7 @@
 
 #include "Application.h"
 #include "net/ByteArraySink.h"
-#include "net/Download.h"
+#include "net/NetRequest.h"
 #include "net/RawHeaderProxy.h"
 #include "net/NetUtils.h"
 #include "RangeHttpServer.h"
@@ -142,7 +142,7 @@ class LoopbackHttpServer final
     int m_authorizedRequestCount = 0;
 };
 
-class TestDownload final : public Net::Download
+class TestDownload final : public Net::NetRequest
 {
    public:
     /// With qtFollowsRedirects, redirects are left to Qt's own policy, as in the launcher.

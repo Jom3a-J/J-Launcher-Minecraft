@@ -47,12 +47,19 @@
 #include <QUrl>
 #include <cstdint>
 #include <memory>
+#include <utility>
 
 #if defined(LAUNCHER_APPLICATION)
 #include "Application.h"
+#include "net/ApiHeaderProxy.h"
+#include "net/ChecksumValidator.h"
+#include "net/MetaCacheSink.h"
 #include "settings/SettingsObject.h"
-#endif
+#else
 #include "BuildConfig.h"
+#endif
+#include "net/ByteArraySink.h"
+#include "net/FileSink.h"
 
 #include "MMCTime.h"
 #include "StringUtils.h"
@@ -63,7 +70,7 @@
 
 namespace Net {
 
-NetRequest::NetRequest() : Task()
+NetRequest::NetRequest()
 {
     connect(&m_retryTimer, &QTimer::timeout, this, &NetRequest::executeTask);
     m_stallTimer.setSingleShot(true);
@@ -80,6 +87,29 @@ QString NetRequest::formatRequestForLogging(const QNetworkRequest& request)
     return Privacy::formatNetworkRequest(request);
 }
 
+NetRequest::NetRequest(const QUrl& url, Options options, const QString& name) : NetRequest()
+{
+    m_url = url;
+    m_options = options;
+    if (name.isEmpty()) {
+        setObjectName(QString("BYTES:") + Privacy::sanitizeUrl(m_url));
+    } else {
+        setObjectName(name);
+    }
+    m_logCat = taskDownloadLogC;
+#if defined(LAUNCHER_APPLICATION)
+    if (options.testFlag(Option::AddAPIHeaders)) {
+        addHeaderProxy(std::make_unique<ApiHeaderProxy>());
+    }
+#endif
+}
+
+NetRequest::NetRequest(const QUrl& url, QByteArray postData, Options options) : NetRequest(url, options)
+{
+    m_postData = std::move(postData);
+    m_logCat = taskUploadLogC;
+}
+
 void NetRequest::addValidator(Validator* v)
 {
     m_sink->addValidator(v);
@@ -91,7 +121,7 @@ void NetRequest::executeTask()
     setStatus(tr("Requesting %1").arg(Privacy::sanitizeUrl(m_url, 80)));
 
     if (getState() == Task::State::AbortedByUser) {
-        qCWarning(logCat) << getUid().toString()
+        qCWarning(m_logCat) << getUid().toString()
                            << "Attempt to start an aborted Request:"
                            << Privacy::sanitizeUrl(m_url);
         emit aborted();
@@ -103,7 +133,7 @@ void NetRequest::executeTask()
     m_state = m_sink->init(request);
     switch (m_state) {
         case State::Succeeded:
-            qCDebug(logCat) << getUid().toString() << "Request cache hit"
+            qCDebug(m_logCat) << getUid().toString() << "Request cache hit"
                             << Privacy::sanitizeUrl(m_url);
             emit succeeded();
             emit finished();
@@ -137,14 +167,13 @@ void NetRequest::executeTask()
 #endif
 
 #if defined(LAUNCHER_APPLICATION)
-    const auto user_agent = application ? application->getUserAgent() : BuildConfig.USER_AGENT;
+    const auto userAgent = application ? application->getUserAgent() : BuildConfig.USER_AGENT;
 #else
-    const auto user_agent = BuildConfig.USER_AGENT;
+    const auto userAgent = BuildConfig.USER_AGENT;
 #endif
-
-    request.setHeader(QNetworkRequest::UserAgentHeader, user_agent.toUtf8());
-    for (auto& header_proxy : m_headerProxies) {
-        header_proxy->writeHeaders(request);
+    request.setHeader(QNetworkRequest::UserAgentHeader, userAgent.toUtf8());
+    for (auto& headerProxy : m_headerProxies) {
+        headerProxy->writeHeaders(request);
     }
     // Record this before handing the request to Qt. Redirect policy must not
     // depend on whether a backend preserves sensitive raw headers in
@@ -154,7 +183,7 @@ void NetRequest::executeTask()
     // follow only same-origin ones; any other redirect reaches handleRedirect(), which rejects it.
     if (m_requestHadCredentials)
         request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::SameOriginRedirectPolicy);
-    qCDebug(logCat) << getUid().toString() << "Running"
+    qCDebug(m_logCat) << getUid().toString() << "Running"
                     << formatRequestForLogging(request);
 
 #if defined(LAUNCHER_APPLICATION)
@@ -166,16 +195,17 @@ void NetRequest::executeTask()
     request.setTransferTimeout();
 #endif
 
-    m_last_progress_time = m_clock.now();
-    m_last_progress_bytes = 0;
+    m_lastProgressTime = std::chrono::steady_clock::now();
+    m_lastProgressBytes = 0;
     // A retry or a redirect starts the byte counts over, so the next update must not be held
     // back by the throttle of the attempt that was replaced.
     resetProgressThrottle();
     m_stallAbortPending = false;
 
-    auto rep = getReply(request);
-    if (rep == nullptr)  // it failed
+    auto* rep = getReply(request);
+    if (rep == nullptr) {  // it failed
         return;
+    }
     m_reply.reset(rep);
     if (trackTransportRedirects) {
         connect(rep, &QNetworkReply::redirected, this, [this](const QUrl& redirectedUrl) {
@@ -215,11 +245,11 @@ void NetRequest::scheduleStallRetry()
     const QString retryMessage = QStringLiteral("Download stalled for %1 s, retrying (attempt %2/2)")
                                      .arg(QString::number(m_stallTimeoutMs / 1000.0, 'g', 3))
                                      .arg(m_stallRetryCount);
-    qCWarning(logCat).noquote() << getUid().toString() << retryMessage << Privacy::sanitizeUrl(m_url);
+    qCWarning(m_logCat).noquote() << getUid().toString() << retryMessage << Privacy::sanitizeUrl(m_url);
     m_state = State::Running;
     resetProgressThrottle();
-    m_last_progress_time = m_clock.now();
-    m_last_progress_bytes = 0;
+    m_lastProgressTime = std::chrono::steady_clock::now();
+    m_lastProgressBytes = 0;
     m_retryTimer.setTimerType(Qt::PreciseTimer);
     m_retryTimer.setSingleShot(true);
     m_retryTimer.setInterval(delaySeconds * 1000);
@@ -262,30 +292,31 @@ void NetRequest::publishProgress()
     const qint64 bytesReceived = m_pendingProgressReceived;
     const qint64 bytesTotal = m_pendingProgressTotal;
 
-    auto now = m_clock.now();
-    auto elapsed = now - m_last_progress_time;
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = now - m_lastProgressTime;
 
     // use milliseconds for speed precision
-    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed);
-    auto bytes_received_since = bytesReceived - m_last_progress_bytes;
-    auto dl_speed_bps = (double)bytes_received_since / elapsed_ms.count() * 1000;
-    auto remaining_time_s = (bytesTotal - bytesReceived) / dl_speed_bps;
+    auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed);
+    auto bytesReceivedSince = bytesReceived - m_lastProgressBytes;
+    auto dlSpeedBps = static_cast<double>(bytesReceivedSince) / static_cast<double>(elapsedMs.count()) * 1000;
+    auto remainingTimeS = static_cast<double>(bytesTotal - bytesReceived) / dlSpeedBps;
 
     //: Current amount of bytes downloaded, out of the total amount of bytes in the download
-    QString dl_progress =
-        tr("%1 / %2").arg(StringUtils::humanReadableFileSize(bytesReceived)).arg(StringUtils::humanReadableFileSize(bytesTotal));
+    QString dlProgress = tr("%1 / %2")
+                             .arg(StringUtils::humanReadableFileSize(static_cast<double>(bytesReceived)))
+                             .arg(StringUtils::humanReadableFileSize(static_cast<double>(bytesTotal)));
 
-    QString dl_speed_str;
-    if (elapsed_ms.count() > 0) {
-        auto str_eta = bytesTotal > 0 ? Time::humanReadableDuration(remaining_time_s) : tr("unknown");
+    QString dlSpeedStr;
+    if (elapsedMs.count() > 0) {
+        auto strEta = bytesTotal > 0 ? Time::humanReadableDuration(remainingTimeS) : tr("unknown");
         //: Download speed, in bytes per second (remaining download time in parenthesis)
-        dl_speed_str = tr("%1 /s (%2)").arg(StringUtils::humanReadableFileSize(dl_speed_bps)).arg(str_eta);
+        dlSpeedStr = tr("%1 /s (%2)").arg(StringUtils::humanReadableFileSize(dlSpeedBps)).arg(strEta);
     } else {
         //: Download speed at 0 bytes per second
-        dl_speed_str = tr("0 B/s");
+        dlSpeedStr = tr("0 B/s");
     }
 
-    setDetails(dl_progress + "\n" + dl_speed_str);
+    setDetails(dlProgress + "\n" + dlSpeedStr);
 
     setProgress(bytesReceived, bytesTotal);
 }
@@ -306,16 +337,16 @@ void NetRequest::downloadError(QNetworkReply::NetworkError error)
             return;
         }
         m_stallFailure = true;
-        qCCritical(logCat) << getUid().toString() << "Download stalled after 2 retries"
+        qCCritical(m_logCat) << getUid().toString() << "Download stalled after 2 retries"
                            << Privacy::sanitizeUrl(m_url);
         m_state = State::Failed;
     } else if (error == QNetworkReply::OperationCanceledError) {
-        qCCritical(logCat) << getUid().toString() << "Aborted"
+        qCCritical(m_logCat) << getUid().toString() << "Aborted"
                            << Privacy::sanitizeUrl(m_url);
         m_state = State::Failed;
-    } else if (replyStatusCode() == 429 /* HTTP Too Many Requests*/ && m_options & Option::AutoRetry) {
-        qCDebug(logCat) << getUid().toString() << "Rate Limited!";
-        int64_t delay = 10 * std::pow(2, m_retryCount);
+    } else if (replyStatusCode() == 429 /* HTTP Too Many Requests*/ && m_options.testFlag(Option::AutoRetry)) {
+        qCDebug(m_logCat) << getUid().toString() << "Rate Limited!";
+        auto delay = static_cast<int64_t>(10 * std::pow(2, m_retryCount));
         if (m_reply->hasRawHeader("Retry-After")) {
             const auto parsedDelay = Net::parseRetryAfterDelay(
                 m_reply->rawHeader("Retry-After"), QDateTime::currentDateTimeUtc());
@@ -325,22 +356,22 @@ void NetRequest::downloadError(QNetworkReply::NetworkError error)
         }
         handleAutoRetry(delay);
     } else {
-        if (m_options & Option::AcceptLocalFiles) {
+        if (m_options.testFlag(Option::AcceptLocalFiles)) {
             if (m_sink->hasLocalData()) {
                 m_state = State::Succeeded;
                 return;
             }
         }
         // error happened during download.
-        qCCritical(logCat) << getUid().toString() << "Failed"
+        qCCritical(m_logCat) << getUid().toString() << "Failed"
                            << Privacy::sanitizeUrl(m_url) << "with error"
                            << error;
         if (m_reply)
-            qCCritical(logCat) << getUid().toString() << "HTTP status:"
+            qCCritical(m_logCat) << getUid().toString() << "HTTP status:"
                                << replyStatusCode()
                                << Privacy::sanitizeText(errorString());
         if (m_errorResponse.size() > 0)
-            qCCritical(logCat) << getUid().toString()
+            qCCritical(m_logCat) << getUid().toString()
                                << "Sanitized response excerpt:"
                                << Privacy::sanitizeResponseBody(m_errorResponse);
         m_state = State::Failed;
@@ -351,12 +382,12 @@ void NetRequest::sslErrors(const QList<QSslError>& errors)
 {
     int i = 1;
     for (auto error : errors) {
-        qCCritical(logCat).nospace()
+        qCCritical(m_logCat).nospace()
             << getUid().toString() << " Request "
             << Privacy::sanitizeUrl(m_url) << " SSL Error #" << i << ": "
             << Privacy::sanitizeText(error.errorString());
         auto cert = error.certificate();
-        qCCritical(logCat) << getUid().toString()
+        qCCritical(m_logCat) << getUid().toString()
                            << "Certificate in question:\n"
                            << Privacy::sanitizeText(cert.toText(), 4096);
         i++;
@@ -375,7 +406,7 @@ auto NetRequest::handleRedirect() -> bool
         m_state = State::Failed;
         m_redirectRejected = true;
         m_failReason = decision.rejection;
-        qCWarning(logCat) << getUid().toString() << m_failReason;
+        qCWarning(m_logCat) << getUid().toString() << m_failReason;
         return false;
     }
     const QUrl& redirect = decision.target;
@@ -384,7 +415,7 @@ auto NetRequest::handleRedirect() -> bool
 
     m_redirectCount++;
     m_url = redirect;
-    qCDebug(logCat) << getUid().toString() << "Following redirect to"
+    qCDebug(m_logCat) << getUid().toString() << "Following redirect to"
                     << Privacy::sanitizeUrl(m_url);
     if (crossHost) {
         // The transfer is about to move to a different host; admission control has to follow it
@@ -403,17 +434,16 @@ void NetRequest::handleAutoRetry(int64_t delay)
         /* 1 minute is too long to wait for retry, fail for now */
         m_state = State::Failed;
         auto retryAfter = QDateTime::currentDateTime().addSecs(delay);
-        emitFailed(tr("Request Rate Limited for %n second(s): Retry After %1", "seconds", delay)
+        emitFailed(tr("Request Rate Limited for %n second(s): Retry After %1", "seconds", static_cast<int>(delay))
                        .arg(retryAfter.toLocalTime().toString(QLocale::system().dateTimeFormat(QLocale::ShortFormat))));
         return;
-    } else {
-        qCDebug(logCat) << getUid().toString() << "Retyring Request in" << delay << "seconds";
-        setStatus(tr("Rate Limited: Waiting %n second(s)", "seconds", delay));
-        m_retryTimer.setTimerType(Qt::VeryCoarseTimer);
-        m_retryTimer.setSingleShot(true);
-        m_retryTimer.setInterval(delay * 1000);
-        m_retryTimer.start();
     }
+    qCDebug(m_logCat) << getUid().toString() << "Retyring Request in" << delay << "seconds";
+    setStatus(tr("Rate Limited: Waiting %n second(s)", "seconds", static_cast<int>(delay)));
+    m_retryTimer.setTimerType(Qt::VeryCoarseTimer);
+    m_retryTimer.setSingleShot(true);
+    m_retryTimer.setInterval(static_cast<int>(delay) * 1000);
+    m_retryTimer.start();
 }
 
 void NetRequest::downloadFinished()
@@ -431,7 +461,7 @@ void NetRequest::downloadFinished()
 
     // handle HTTP redirection first
     if (handleRedirect()) {
-        qCDebug(logCat) << getUid().toString() << "Request redirected:"
+        qCDebug(m_logCat) << getUid().toString() << "Request redirected:"
                         << Privacy::sanitizeUrl(m_url);
         return;
     }
@@ -446,7 +476,7 @@ void NetRequest::downloadFinished()
     // if the download failed before this point ...
     if (m_state == State::Succeeded)  // pretend to succeed so we continue processing :)
     {
-        qCDebug(logCat) << getUid().toString()
+        qCDebug(m_logCat) << getUid().toString()
                         << "Request failed but we are allowed to proceed:"
                         << Privacy::sanitizeUrl(m_url);
         m_sink->abort();
@@ -454,7 +484,7 @@ void NetRequest::downloadFinished()
         emit finished();
         return;
     } else if (m_state == State::Failed) {
-        qCDebug(logCat) << getUid().toString()
+        qCDebug(m_logCat) << getUid().toString()
                         << "Request failed in previous step:"
                         << Privacy::sanitizeUrl(m_url);
         m_sink->abort();
@@ -463,7 +493,7 @@ void NetRequest::downloadFinished()
         emit finished();
         return;
     } else if (m_state == State::AbortedByUser) {
-        qCDebug(logCat) << getUid().toString()
+        qCDebug(m_logCat) << getUid().toString()
                         << "Request aborted in previous step:"
                         << Privacy::sanitizeUrl(m_url);
         m_sink->abort();
@@ -474,11 +504,11 @@ void NetRequest::downloadFinished()
 
     // make sure we got all the remaining data, if any
     auto data = m_reply->readAll();
-    if (data.size()) {
-        qCDebug(logCat) << getUid().toString() << "Writing extra" << data.size() << "bytes";
+    if (!data.isEmpty()) {
+        qCDebug(m_logCat) << getUid().toString() << "Writing extra" << data.size() << "bytes";
         m_state = m_sink->write(data);
         if (m_state != State::Succeeded) {
-            qCDebug(logCat) << getUid().toString()
+            qCDebug(m_logCat) << getUid().toString()
                             << "Request failed to write:"
                             << Privacy::sanitizeUrl(m_url);
             m_sink->abort();
@@ -490,9 +520,9 @@ void NetRequest::downloadFinished()
     }
 
     // otherwise, finalize the whole graph
-    m_state = m_sink->finalize(*m_reply.get());
+    m_state = m_sink->finalize(*m_reply);
     if (m_state != State::Succeeded) {
-        qCDebug(logCat) << getUid().toString()
+        qCDebug(m_logCat) << getUid().toString()
                         << "Request failed to finalize:"
                         << Privacy::sanitizeUrl(m_url);
         m_sink->abort();
@@ -502,7 +532,7 @@ void NetRequest::downloadFinished()
         return;
     }
 
-    qCDebug(logCat) << getUid().toString() << "Request succeeded:"
+    qCDebug(m_logCat) << getUid().toString() << "Request succeeded:"
                     << Privacy::sanitizeUrl(m_url);
     emit succeeded();
     emit finished();
@@ -523,13 +553,13 @@ void NetRequest::downloadReadyRead()
             }
         }
         if (m_state == State::Failed) {
-            qCCritical(logCat) << getUid().toString()
+            qCCritical(m_logCat) << getUid().toString()
                                << "Failed to process response chunk:"
                                << Privacy::sanitizeText(m_sink->failReason());
         }
         // qDebug() << "Request" << m_url.toString() << "gained" << data.size() << "bytes";
     } else {
-        qCCritical(logCat) << getUid().toString() << "Cannot write download data! illegal status" << m_status;
+        qCCritical(m_logCat) << getUid().toString() << "Cannot write download data! illegal status" << m_status;
     }
 }
 
@@ -591,8 +621,60 @@ void NetRequest::enableAutoRetry(bool enable)
     if (enable) {
         m_options |= Option::AutoRetry;
     } else {
-        m_options &= ~static_cast<int>(Option::AutoRetry);
+        m_options &= ~static_cast<std::uint8_t>(Option::AutoRetry);
     }
+}
+
+QNetworkReply* NetRequest::getReply(QNetworkRequest& request)
+{
+    if (m_postData.has_value()) {
+        if (!request.hasRawHeader("Content-Type")) {
+            request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+        }
+        return m_network->post(request, *m_postData);
+    }
+    return m_network->get(request);
+}
+
+#if defined(LAUNCHER_APPLICATION)
+auto NetRequest::makeCached(const QUrl& url, MetaEntryPtr entry, Options options) -> Ptr
+{
+    auto dl = makeShared<NetRequest>(url, options, QString("CACHE:") + Privacy::sanitizeUrl(url));
+    auto* md5Node = new ChecksumValidator(QCryptographicHash::Md5);
+    auto* cachedNode = new MetaCacheSink(std::move(entry), md5Node, options.testFlag(Option::MakeEternal));
+    dl->m_sink.reset(cachedNode);
+    return dl;
+}
+#endif
+
+auto NetRequest::makeByteArray(const QUrl& url, QByteArray postData, Options options) -> std::pair<Ptr, QByteArray*>
+{
+    auto dl = makeShared<NetRequest>(url, std::move(postData), options);
+
+    auto sink = std::make_unique<ByteArraySink>();
+    auto* response = sink->output();
+    dl->m_sink = std::move(sink);
+
+    return { dl, response };
+}
+
+auto NetRequest::makeByteArray(const QUrl& url, Options options) -> std::pair<Ptr, QByteArray*>
+{
+    auto dl = makeShared<NetRequest>(url, options);
+
+    auto sink = std::make_unique<ByteArraySink>();
+    auto* response = sink->output();
+    dl->m_sink = std::move(sink);
+
+    return { dl, response };
+}
+
+auto NetRequest::makeFile(const QUrl& url, const QString& path, Options options) -> Ptr
+{
+    auto dl = makeShared<NetRequest>(url, options, QString("FILE:") + Privacy::sanitizeUrl(url));
+    dl->m_sink = std::make_unique<FileSink>(path);
+
+    return dl;
 }
 
 }  // namespace Net

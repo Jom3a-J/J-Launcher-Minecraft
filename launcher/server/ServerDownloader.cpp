@@ -25,7 +25,7 @@
 #include <QUrl>
 #include <QRegularExpression>
 #include "net/ChecksumValidator.h"
-#include "net/Download.h"
+#include "net/NetRequest.h"
 #include "net/PartFile.h"
 #include "net/SegmentedDownload.h"
 
@@ -421,7 +421,7 @@ void ServerDownloader::startFileDownload(const QUrl &url, const QString &outputP
                 new Net::ChecksumValidator(hashAlgorithm, QString::fromLatin1(expectedHash).toLower()));
         job->addTask(segmented);
     } else {
-        auto download = Net::Download::makeFile(url, outputPath);
+        auto download = Net::NetRequest::makeFile(url, outputPath);
         if (!expectedHash.isEmpty())
             download->addValidator(
                 new Net::ChecksumValidator(hashAlgorithm, QString::fromLatin1(expectedHash).toLower()));

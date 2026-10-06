@@ -45,7 +45,7 @@
 #include "modplatform/ServerSupport.h"
 #include "TechnicPackProcessor.h"
 #include "logs/Privacy.h"
-#include "net/ApiDownload.h"
+#include "net/ApiRequest.h"
 #include "net/ChecksumValidator.h"
 
 Technic::SolderPackInstallTask::SolderPackInstallTask(QNetworkAccessManager* network,
@@ -88,7 +88,7 @@ void Technic::SolderPackInstallTask::executeTask()
 
     m_filesNetJob.reset(new NetJob(tr("Resolving modpack files"), m_network));
     auto sourceUrl = QString("%1/modpack/%2/%3").arg(m_solderUrl.toString(), m_pack, m_version);
-    auto [action, response] = Net::ApiDownload::makeByteArray(sourceUrl);
+    auto [action, response] = Net::ApiRequest::makeByteArray(sourceUrl);
     m_filesNetJob->addNetAction(action);
 
     auto job = m_filesNetJob.get();
@@ -130,7 +130,7 @@ void Technic::SolderPackInstallTask::fileListSucceeded(QByteArray* response)
     for (const auto& mod : build.mods) {
         auto path = FS::PathCombine(m_outputDir.path(), QString("%1").arg(i));
 
-        auto dl = Net::ApiDownload::makeFile(mod.url, path);
+        auto dl = Net::ApiRequest::makeFile(mod.url, path);
         if (!mod.md5.isEmpty()) {
             dl->addValidator(new Net::ChecksumValidator(QCryptographicHash::Md5, mod.md5));
         }
@@ -143,7 +143,7 @@ void Technic::SolderPackInstallTask::fileListSucceeded(QByteArray* response)
     const auto serverSupport = ModPlatform::technicServerSupport(m_serverPackUrl);
     if (shouldCreateServerPair() && serverSupport == ModPlatform::ServerSupport::Official) {
         m_serverArchivePath = FS::PathCombine(m_outputDir.path(), "published-server-pack.zip");
-        m_filesNetJob->addNetAction(Net::ApiDownload::makeFile(m_serverPackUrl, m_serverArchivePath));
+        m_filesNetJob->addNetAction(Net::ApiRequest::makeFile(m_serverPackUrl, m_serverArchivePath));
     }
 
     connect(m_filesNetJob.get(), &NetJob::succeeded, this, &Technic::SolderPackInstallTask::downloadSucceeded);

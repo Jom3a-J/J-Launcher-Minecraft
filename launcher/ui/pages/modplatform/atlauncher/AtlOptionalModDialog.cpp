@@ -44,7 +44,7 @@
 #include "modplatform/atlauncher/ATLShareCode.h"
 #include "logs/Privacy.h"
 
-#include "net/ApiDownload.h"
+#include "net/ApiRequest.h"
 
 AtlOptionalModListModel::AtlOptionalModListModel(QWidget* parent,
                                                  const ATLauncher::PackVersion& version,
@@ -160,7 +160,7 @@ void AtlOptionalModListModel::useShareCode(const QString& code)
 {
     m_jobPtr.reset(new NetJob("Atl::Request", APPLICATION->network()));
     auto url = QString(BuildConfig.ATL_API_BASE_URL + "share-codes/" + code);
-    auto [action, response] = Net::ApiDownload::makeByteArray(QUrl(url));
+    auto [action, response] = Net::ApiRequest::makeByteArray(QUrl(url));
     m_jobPtr->addNetAction(action);
 
     connect(m_jobPtr.get(), &NetJob::succeeded, this, [this, response] { shareCodeSuccess(response); });

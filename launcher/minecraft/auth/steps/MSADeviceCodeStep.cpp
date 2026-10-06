@@ -67,7 +67,7 @@ void MSADeviceCodeStep::perform()
         { "Content-Type", "application/x-www-form-urlencoded" },
         { "Accept", "application/json" },
     };
-    auto [request, response] = Net::Upload::makeByteArray(url, payload);
+    auto [request, response] = Net::NetRequest::makeByteArray(url, payload);
     m_request = request;
     m_request->addHeaderProxy(std::make_unique<Net::RawHeaderProxy>(headers));
     m_request->enableAutoRetry(true);
@@ -185,7 +185,7 @@ void MSADeviceCodeStep::authenticateUser()
         { "Content-Type", "application/x-www-form-urlencoded" },
         { "Accept", "application/json" },
     };
-    auto [request, response] = Net::Upload::makeByteArray(url, payload);
+    auto [request, response] = Net::NetRequest::makeByteArray(url, payload);
     m_request = request;
     m_request->addHeaderProxy(std::make_unique<Net::RawHeaderProxy>(headers));
 

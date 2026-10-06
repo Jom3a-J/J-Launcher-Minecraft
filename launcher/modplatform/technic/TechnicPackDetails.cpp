@@ -4,7 +4,7 @@
 
 #include "BuildConfig.h"
 #include "modplatform/ServerSupportRequestQueue.h"
-#include "net/ApiDownload.h"
+#include "net/ApiRequest.h"
 #include "net/NetJob.h"
 
 #include <QJsonDocument>
@@ -30,7 +30,7 @@ void requestPackDetails(QNetworkAccessManager* network, const QString& slug, QOb
         auto job = makeShared<NetJob>(QString("Technic::PackMeta(%1)").arg(slug), network);
         const QUrl url(QString("%1modpack/%2?build=%3")
                            .arg(BuildConfig.TECHNIC_API_BASE_URL, slug, BuildConfig.TECHNIC_API_BUILD));
-        auto [action, response] = Net::ApiDownload::makeByteArray(url);
+        auto [action, response] = Net::ApiRequest::makeByteArray(url);
         job->addNetAction(action);
         auto completion = std::make_shared<Queue::Completion>(std::move(complete));
         QObject::connect(job.get(), &NetJob::succeeded, job.get(), [response, completion] {

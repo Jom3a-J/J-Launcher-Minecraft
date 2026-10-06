@@ -54,7 +54,7 @@ struct ModrinthDownloadMeta;
  *       fallback GET is redirected to a large range-capable CurseForge file host, that probe is
  *       retired and one ranged Discovery is started against the resolved URL.
  *       A 206 with a concrete Content-Range tells us the total size and that ranges work.
- *    2. Fan out - the remainder is split into K segments, each an ordinary Net::Download in an
+ *    2. Fan out - the remainder is split into K segments, each an ordinary Net::NetRequest download in an
  *       inner NetJob. K is bounded by the caller's setting, by MaxSegments, by MinSegmentSize and
  *       by half the host's provider ceiling, so a segmented file can never take the whole pool.
  *    3. Assemble - the caller's validators are replayed over the finished part file off the GUI
@@ -100,7 +100,7 @@ class SegmentedDownload : public Task {
     ~SegmentedDownload() override;
 
     /*! \param maxSegments the user's "SegmentedDownloadSegments" setting; 0 or 1 disables
-     *         segmentation entirely and the task behaves exactly like Net::Download::makeFile.
+     *         segmentation entirely and the task behaves exactly like Net::NetRequest::makeFile.
      *  \param scheduler admission control to use; nullptr means the process wide one.
      */
     static Ptr makeFile(QUrl url,
@@ -109,14 +109,14 @@ class SegmentedDownload : public Task {
                         Net::HostScheduler* scheduler = nullptr,
                         int maxSegments = DefaultSegments);
 
-    /// makeFile() plus the ApiHeaderProxy every Net::ApiDownload request carries.
+    /// makeFile() plus the ApiHeaderProxy every Net::ApiRequest download carries.
     static Ptr makeApiFile(QUrl url,
                            QString path,
                            QNetworkAccessManager* network,
                            Net::HostScheduler* scheduler = nullptr,
                            int maxSegments = DefaultSegments);
 
-    /*! makeApiFile() with Modrinth download metadata, exactly as Net::ApiDownload::makeFile()
+    /*! makeApiFile() with Modrinth download metadata, exactly as Net::ApiRequest::makeFile()
      *  attaches it.
      *
      *  The metadata rides on the same ApiHeaderProxy an ordinary request uses, so it reaches the
@@ -136,7 +136,7 @@ class SegmentedDownload : public Task {
     /*! Applied to every request this task issues.
      *
      *  This is how header proxies reach the individual segments; makeApiFile() uses it to attach
-     *  the same ApiHeaderProxy an ordinary Net::ApiDownload carries.
+     *  the same ApiHeaderProxy an ordinary Net::ApiRequest download carries.
      */
     void setRequestDecorator(Decorator decorator) { m_decorate = std::move(decorator); }
 
@@ -159,7 +159,7 @@ class SegmentedDownload : public Task {
    private:
     enum class Mode {
         Idle,
-        Legacy,     //!< one ordinary Net::Download straight to the target; no part file
+        Legacy,     //!< one ordinary Net::NetRequest download straight to the target; no part file
         Discovery,  //!< bounded ranged GET that doubles as the no-range fallback
         Streaming,  //!< discovery answered 200 and is downloading the whole file
         Segments,   //!< fanned out over several ranged requests

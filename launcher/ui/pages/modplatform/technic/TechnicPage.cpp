@@ -54,7 +54,7 @@
 #include "modplatform/technic/SolderPackManifest.h"
 #include "logs/Privacy.h"
 
-#include "net/ApiDownload.h"
+#include "net/ApiRequest.h"
 
 TechnicPage::TechnicPage(NewInstanceDialog* dialog, QWidget* parent)
     : QWidget(parent), ui(new Ui::TechnicPage), dialog(dialog), m_fetch_progress(this, false)
@@ -265,7 +265,7 @@ void TechnicPage::metadataLoaded()
 
         auto netJob = makeShared<NetJob>(QString("Technic::SolderMeta(%1)").arg(current.name), APPLICATION->network());
         auto url = QString("%1/modpack/%2").arg(current.url, current.slug);
-        auto [action, response] = Net::ApiDownload::makeByteArray(QUrl(url));
+        auto [action, response] = Net::ApiRequest::makeByteArray(QUrl(url));
         netJob->addNetAction(action);
 
         connect(netJob.get(), &NetJob::succeeded, this, [this, response] { onSolderLoaded(response); });

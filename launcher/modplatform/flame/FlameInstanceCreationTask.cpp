@@ -71,7 +71,7 @@
 #include "meta/Index.h"
 #include "minecraft/World.h"
 #include "minecraft/mod/tasks/LocalResourceParse.h"
-#include "net/ApiDownload.h"
+#include "net/ApiRequest.h"
 #include "logs/Privacy.h"
 #include "net/ChecksumValidator.h"
 #include "ui/dialogs/UntrustedModsDialog.h"
@@ -665,7 +665,7 @@ void FlameCreationTask::setupDownloadJob()
         if (!result.version.downloadUrl.isEmpty()) {
             qDebug() << "Will download" << Privacy::sanitizeUrl(result.version.downloadUrl)
                      << "to" << Privacy::sanitizePath(path);
-            auto dl = Net::ApiDownload::makeFile(result.version.downloadUrl, path);
+            auto dl = Net::ApiRequest::makeFile(result.version.downloadUrl, path);
             if (auto* validator = Flame::createCurseForgeChecksumValidator(result.version.hash_type, result.version.hash)) {
                 dl->addValidator(validator);
             }

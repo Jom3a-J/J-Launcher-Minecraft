@@ -20,7 +20,7 @@
 #include <QJsonValue>
 #include <cmath>
 
-#include "net/ApiDownload.h"
+#include "net/ApiRequest.h"
 #include "net/ApiHeaderProxy.h"
 #include "net/ChecksumValidator.h"
 #include "net/SegmentedDownload.h"
@@ -84,7 +84,7 @@ Task::Ptr enqueuePackFileDownload(const NetJob::Ptr& job,
         return segmented;
     }
 
-    auto download = Net::ApiDownload::makeFile(file.url, file.path, Net::Download::Option::NoOptions, meta);
+    auto download = Net::ApiRequest::makeFile(file.url, file.path, Net::NetRequest::Option::NoOptions, meta);
     download->addValidator(new Net::ChecksumValidator(file.hashAlgorithm, file.hash));
     job->addNetAction(download);
     return download;
