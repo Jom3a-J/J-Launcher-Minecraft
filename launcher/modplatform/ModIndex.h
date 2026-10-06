@@ -28,6 +28,7 @@
 #include <memory>
 #include <utility>
 #include "EnumWrapper.h"
+#include "modplatform/ResourceType.h"
 
 class QIODevice;
 
@@ -146,27 +147,27 @@ struct IndexedVersion {
     QVariant serverPackFileId;
     bool isServerPack = false;
     QString version;
-    QString version_number;
-    IndexedVersionType version_type;
+    QString versionNumber;
+    IndexedVersionType versionType;
     QStringList mcVersion;
     QString downloadUrl;
     QString date;
     QString fileName;
     ModLoaderTypes loaders;
-    QString hash_type;
+    QString hashType;
     QString hash;
-    bool is_preferred = true;
+    bool isPreferred = true;
     QString changelog;
     QList<Dependency> dependencies;
     SideType side = SideType::NoSide;  // this is for flame API
 
     // For internal use, not provided by APIs
-    bool is_currently_selected = false;
+    bool isCurrentlySelected = false;
 
     QString getVersionDisplayString() const
     {
-        auto release_type = version_type.isValid() ? QString(" [%1]").arg(version_type.toString()) : "";
-        auto versionStr = !version.contains(version_number) ? version_number : "";
+        auto releaseType = versionType.isValid() ? QString(" [%1]").arg(versionType.toString()) : "";
+        auto versionStr = !version.contains(versionNumber) ? versionNumber : "";
         QString gameVersion = "";
         for (const auto& v : mcVersion) {
             if (version.contains(v)) {
@@ -177,7 +178,7 @@ struct IndexedVersion {
                 gameVersion = QObject::tr(" for %1").arg(v);
             }
         }
-        return QString("%1%2 — %3%4").arg(version, gameVersion, versionStr, release_type);
+        return QString("%1%2 — %3%4").arg(version, gameVersion, versionStr, releaseType);
     }
 };
 
@@ -216,6 +217,8 @@ struct IndexedPack {
     bool extraDataLoaded = true;
     ExtraPackData extraData;
 
+    ResourceType resourceType = ResourceType::Unknown;
+
     // For internal use, not provided by APIs
     bool isVersionSelected(int index) const
     {
@@ -223,7 +226,7 @@ struct IndexedPack {
             return false;
         }
 
-        return versions.at(index).is_currently_selected;
+        return versions.at(index).isCurrentlySelected;
     }
     bool isAnyVersionSelected() const
     {
@@ -231,7 +234,7 @@ struct IndexedPack {
             return false;
         }
 
-        return std::any_of(versions.constBegin(), versions.constEnd(), [](const auto& v) { return v.is_currently_selected; });
+        return std::any_of(versions.constBegin(), versions.constEnd(), [](const auto& v) { return v.isCurrentlySelected; });
     }
 };
 

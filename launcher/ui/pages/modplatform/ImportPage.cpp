@@ -134,10 +134,11 @@ void ImportPage::updateState()
             auto addonId = query.allQueryItemValues("addonId")[0];
             auto fileId = query.allQueryItemValues("fileId")[0];
 
-            auto [job, array] = FlameAPI::get().getFile(addonId, fileId);
+            auto [job, array] = FlameAPI::getFile(addonId, fileId);
 
-            connect(job.get(), &NetJob::failed, this,
-                    [this](QString reason) { CustomMessageBox::selectable(this, tr("Error"), reason, QMessageBox::Critical)->show(); });
+            connect(job.get(), &NetJob::failed, this, [this](const QString& reason) {
+                CustomMessageBox::selectable(this, tr("Error"), reason, QMessageBox::Critical)->show();
+            });
             connect(job.get(), &NetJob::succeeded, this, [this, array, addonId, fileId] {
                 qDebug() << "Returned CurseForge response:"
                          << Privacy::sanitizeResponseBody(*array, 2048);

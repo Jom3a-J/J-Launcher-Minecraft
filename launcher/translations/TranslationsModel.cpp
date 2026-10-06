@@ -326,10 +326,7 @@ void TranslationsModel::reloadLocalFiles()
         auto langIter = languages.find(langCode);
         if (langIter != languages.end()) {
             auto& language = *langIter;
-            // TODO: use std::to_underlying in C++23
-            if (static_cast<int>(fileType) > static_cast<int>(language.localFileType)) {
-                language.localFileType = fileType;
-            }
+            language.localFileType = std::max(fileType, language.localFileType);
             if (fileType == FileType::Po) {
                 // A local PO file intentionally overrides the downloaded catalog.
                 language.updated = true;

@@ -178,7 +178,7 @@ void ModrinthCheckUpdate::checkVersionsResponse(QByteArray* response, std::optio
             pack->slug = resource->metadata()->slug;
             pack->addonId = resource->metadata()->project_id;
             pack->provider = ModPlatform::ResourceProvider::MODRINTH;
-            if ((projectVer.hash != hash && projectVer.is_preferred) || (resource->status() == ResourceStatus::NotInstalled)) {
+            if ((projectVer.hash != hash && projectVer.isPreferred) || (resource->status() == ResourceStatus::NotInstalled)) {
                 auto downloadTask = makeShared<ResourceDownloadTask>(pack, projectVer, m_resourceModel, true, "update");
 
                 QString oldVersion = resource->metadata()->version_number;
@@ -190,8 +190,8 @@ void ModrinthCheckUpdate::checkVersionsResponse(QByteArray* response, std::optio
                     }
                 }
 
-                m_updates.emplace_back(pack->name, hash, oldVersion, projectVer.version_number, projectVer.version_type,
-                                       projectVer.changelog, ModPlatform::ResourceProvider::MODRINTH, downloadTask, resource->enabled());
+                m_updates.emplace_back(pack->name, hash, oldVersion, projectVer.versionNumber, projectVer.versionType, projectVer.changelog,
+                                       ModPlatform::ResourceProvider::MODRINTH, downloadTask, resource->enabled());
             }
             m_deps.append(std::make_shared<GetModDependenciesTask::PackDependency>(pack, projectVer));
 

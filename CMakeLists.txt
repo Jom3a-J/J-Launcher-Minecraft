@@ -31,7 +31,7 @@ set(CMAKE_JAVA_TARGET_OUTPUT_DIR ${PROJECT_BINARY_DIR}/jars)
 ######## Set compiler flags ########
 set(CMAKE_CXX_STANDARD_REQUIRED true)
 set(CMAKE_C_STANDARD_REQUIRED true)
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_C_STANDARD 11)
 include(GenerateExportHeader)
 
@@ -135,7 +135,7 @@ if (DEBUG_ADDRESS_SANITIZER)
                 $<${USE_ASAN_COMPILE_OPTIONS}:-fno-omit-frame-pointer>
                 $<${USE_ASAN_COMPILE_OPTIONS}:-fno-sanitize-recover=null>
         )
-        link_libraries("asan" "ubsan")
+        add_link_options($<${USE_ASAN_COMPILE_OPTIONS}:-fsanitize=address,undefined>)
     else()
         message(STATUS "Address Sanitizer not available on compiler ${CMAKE_CXX_COMPILER_ID}")
     endif()
@@ -328,7 +328,7 @@ if(Launcher_QT_VERSION_MAJOR EQUAL 6)
         HINTS
             C:/Qt/*/*/lib/cmake
             /opt/qt/*/*/lib/cmake
-            $ENV{MINGW_PREFIX}/opt/qt/*/*/li/cmake
+            $ENV{MINGW_PREFIX}/opt/qt/*/*/lib/cmake
     )
     find_package(Qt6 COMPONENTS DBus HINTS /opt/qt/*/*/lib/cmake)
     list(APPEND Launcher_QT_DBUS Qt6::DBus)

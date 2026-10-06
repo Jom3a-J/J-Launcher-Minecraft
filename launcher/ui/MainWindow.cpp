@@ -1015,10 +1015,11 @@ void MainWindow::processURLs(QList<QUrl> urls)
                 extra_info.insert("pack_id", addonId);
                 extra_info.insert("pack_version_id", fileId);
 
-                auto [job, array] = FlameAPI::get().getFile(addonId, fileId);
+                auto [job, array] = FlameAPI::getFile(addonId, fileId);
 
-                connect(job.get(), &Task::failed, this,
-                        [this](QString reason) { CustomMessageBox::selectable(this, tr("Error"), reason, QMessageBox::Critical)->show(); });
+                connect(job.get(), &Task::failed, this, [this](const QString& reason) {
+                    CustomMessageBox::selectable(this, tr("Error"), reason, QMessageBox::Critical)->show();
+                });
                 connect(job.get(), &Task::succeeded, this, [this, array, addonId, fileId, &dl_url, &version] {
                     qDebug() << "Returned CurseForge response:"
                              << Privacy::sanitizeResponseBody(*array, 2048);
@@ -1161,7 +1162,7 @@ void MainWindow::processURLs(QList<QUrl> urls)
 
         auto type = ResourceUtils::identify(localFileInfo);
 
-        if (ModPlatform::ResourceTypeUtils::VALID_RESOURCES.count(type) == 0) {  // probably instance/modpack
+        if (ModPlatform::ResourceTypeUtils::g_VALID_RESOURCES.count(type) == 0) {  // probably instance/modpack
             addInstance(localFileName, extra_info);
             continue;
         }
@@ -1401,8 +1402,6 @@ void MainWindow::on_actionSettings_triggered()
 
 void MainWindow::globalSettingsClosed()
 {
-    // FIXME: quick HACK to make this work. improve, optimize.
-    APPLICATION->instances()->loadList();
     proxymodel->invalidate();
     proxymodel->sort(0);
     updateMainToolBar();

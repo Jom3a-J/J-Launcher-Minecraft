@@ -220,7 +220,7 @@ void FlameCreationTask::executeTask()
             fileIds.append(QString::number(file.fileId));
         }
 
-        auto [job, rawResponse] = FlameAPI::get().getFiles(fileIds);
+        auto [job, rawResponse] = FlameAPI::getFiles(fileIds);
 
         connect(job.get(), &Task::succeeded, this,
                 [this, rawResponse, fileIds, oldInstDir, oldFiles, oldMinecraftDir, createInst, warnUser]() mutable {
@@ -576,7 +576,7 @@ void FlameCreationTask::idResolverSucceeded()
     QList<BlockedMod> blockedMods;
     auto anyBlocked = false;
     for (const auto& result : results.values()) {
-        if (result.resourceType != ModPlatform::ResourceType::Mod) {
+        if (result.pack.resourceType != ModPlatform::ResourceType::Mod) {
             m_otherResources.append(std::make_pair(result.version.fileName, result.targetFolder));
         }
 
@@ -666,7 +666,7 @@ void FlameCreationTask::setupDownloadJob()
             qDebug() << "Will download" << Privacy::sanitizeUrl(result.version.downloadUrl)
                      << "to" << Privacy::sanitizePath(path);
             auto dl = Net::ApiRequest::makeFile(result.version.downloadUrl, path);
-            if (auto* validator = Flame::createCurseForgeChecksumValidator(result.version.hash_type, result.version.hash)) {
+            if (auto* validator = Flame::createCurseForgeChecksumValidator(result.version.hashType, result.version.hash)) {
                 dl->addValidator(validator);
             }
             m_filesJob->addNetAction(dl);

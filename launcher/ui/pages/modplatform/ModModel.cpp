@@ -21,14 +21,14 @@
 
 namespace ResourceDownload {
 
-ModModel::ModModel(BaseInstance& base_inst,
+ModModel::ModModel(BaseInstance& baseInst,
                    const ResourceAPI* api,
                    const QString& debugName,
                    QString metaEntryBase,
                    ModPlatform::ResourceType resourceType,
                    QStringList loaderNames)
     : ResourceModel(api),
-      m_base_instance(base_inst),
+      m_baseInstance(baseInst),
       m_resourceType(resourceType),
       m_loaderNames(std::move(loaderNames)),
       m_debugName(debugName + " (Model)"),
@@ -39,7 +39,7 @@ ModModel::ModModel(BaseInstance& base_inst,
 
 ResourceAPI::SearchArgs ModModel::createSearchArguments()
 {
-    auto* profile = static_cast<const MinecraftInstance&>(m_base_instance).getPackProfile();
+    auto* profile = static_cast<const MinecraftInstance&>(m_baseInstance).getPackProfile();
 
     Q_ASSERT(profile);
     Q_ASSERT(m_filter);
@@ -77,7 +77,7 @@ ResourceAPI::SearchArgs ModModel::createSearchArguments()
 ResourceAPI::VersionSearchArgs ModModel::createVersionsArguments(const QModelIndex& index)
 {
     auto pack = m_packs[index.row()];
-    auto* profile = static_cast<const MinecraftInstance&>(m_base_instance).getPackProfile();
+    auto* profile = static_cast<const MinecraftInstance&>(m_baseInstance).getPackProfile();
 
     Q_ASSERT(profile);
     Q_ASSERT(m_filter);
@@ -104,9 +104,9 @@ ResourceAPI::ProjectInfoArgs ModModel::createInfoArguments(const QModelIndex& in
     return { pack };
 }
 
-void ModModel::searchWithTerm(const QString& term, unsigned int sort, bool filter_changed)
+void ModModel::searchWithTerm(const QString& term, unsigned int sort, bool filterChanged)
 {
-    if (m_search_term == term && m_search_term.isNull() == term.isNull() && m_current_sort_index == sort && !filter_changed) {
+    if (m_search_term == term && m_search_term.isNull() == term.isNull() && m_current_sort_index == sort && !filterChanged) {
         return;
     }
 
@@ -118,7 +118,7 @@ void ModModel::searchWithTerm(const QString& term, unsigned int sort, bool filte
 
 bool ModModel::isPackInstalled(ModPlatform::IndexedPack::Ptr pack) const
 {
-    auto allMods = static_cast<MinecraftInstance&>(m_base_instance).loaderModList()->allMods();
+    auto allMods = static_cast<MinecraftInstance&>(m_baseInstance).loaderModList()->allMods();
     return std::ranges::any_of(allMods, [pack](Mod* mod) {
         if (auto meta = mod->metadata(); meta) {
             return meta->provider == pack->provider && meta->project_id == pack->addonId;
@@ -129,7 +129,7 @@ bool ModModel::isPackInstalled(ModPlatform::IndexedPack::Ptr pack) const
 
 QVariant ModModel::getInstalledPackVersion(ModPlatform::IndexedPack::Ptr pack) const
 {
-    auto allMods = static_cast<MinecraftInstance&>(m_base_instance).loaderModList()->allMods();
+    auto allMods = static_cast<MinecraftInstance&>(m_baseInstance).loaderModList()->allMods();
     for (auto* mod : allMods) {
         if (auto meta = mod->metadata(); meta && meta->provider == pack->provider && meta->project_id == pack->addonId) {
             return meta->version();
@@ -160,7 +160,7 @@ bool ModModel::checkVersionFilters(const ModPlatform::IndexedVersion& v)
     if (!m_filter) {
         return true;
     }
-    auto loaders = static_cast<MinecraftInstance&>(m_base_instance).getPackProfile()->getSupportedModLoaders();
+    auto loaders = static_cast<MinecraftInstance&>(m_baseInstance).getPackProfile()->getSupportedModLoaders();
     if (m_filter->loaders != 0U) {
         loaders = m_filter->loaders;
     }
@@ -168,7 +168,7 @@ bool ModModel::checkVersionFilters(const ModPlatform::IndexedVersion& v)
             (!loaders.has_value() || !v.loaders || ((loaders.value() & v.loaders) != 0U)) &&  // loaders
             checkSide(m_filter->side, v.side) &&                                              // side
             (m_filter->releases.empty() ||                                                    // releases
-             std::find(m_filter->releases.cbegin(), m_filter->releases.cend(), v.version_type) != m_filter->releases.cend()) &&
+             std::find(m_filter->releases.cbegin(), m_filter->releases.cend(), v.versionType) != m_filter->releases.cend()) &&
             m_filter->checkMcVersions(v.mcVersion));  // mcVersions
 }
 

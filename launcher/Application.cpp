@@ -884,8 +884,10 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
         }
         {
             auto resetIfInvalid = [this](const Setting* setting) {
-                if (const QUrl url(setting->get().toString()); !url.isValid() || (url.scheme() != "http" && url.scheme() != "https")) {
-                    m_settings->reset(setting->id());
+                if (const auto value = setting->get().toString(); !value.isEmpty()) {
+                    if (const QUrl url(value); !url.isValid() || (url.scheme() != "http" && url.scheme() != "https")) {
+                        m_settings->reset(setting->id());
+                    }
                 }
             };
 
