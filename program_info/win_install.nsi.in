@@ -427,6 +427,15 @@ Section /o "Desktop Shortcut" DESKTOP_SHORTCUTS
 
 SectionEnd
 
+; Optional and off by default: Windows sends modrinth:// links to one program only, and the
+; Modrinth App may already be that program on this machine.
+Section /o "Open Modrinth website links" MODRINTH_LINKS
+
+  WriteRegStr HKCU Software\Classes\modrinth "URL Protocol" ""
+  WriteRegStr HKCU Software\Classes\modrinth\shell\open\command "" '"$INSTDIR\@Launcher_APP_BINARY_NAME@.exe" "%1"'
+
+SectionEnd
+
 
 !define APPID "@Launcher_CommonName@.App"
 !define APPEXE "@Launcher_APP_BINARY_NAME@.exe"
@@ -462,6 +471,10 @@ Section "Uninstall"
   ReadRegStr $0 HKCU "Software\Classes\curseforge\shell\open\command" ""
   ${If} $0 == '"$INSTDIR\@Launcher_APP_BINARY_NAME@.exe" "%1"'
     DeleteRegKey HKCU "Software\Classes\curseforge"
+  ${EndIf}
+  ReadRegStr $0 HKCU "Software\Classes\modrinth\shell\open\command" ""
+  ${If} $0 == '"$INSTDIR\@Launcher_APP_BINARY_NAME@.exe" "%1"'
+    DeleteRegKey HKCU "Software\Classes\modrinth"
   ${EndIf}
   ReadRegStr $0 HKCU "Software\Classes\@Launcher_APP_BINARY_NAME@\shell\open\command" ""
   ${If} $0 == '"$INSTDIR\@Launcher_APP_BINARY_NAME@.exe" "%1"'

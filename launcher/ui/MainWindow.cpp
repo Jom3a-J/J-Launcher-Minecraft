@@ -982,8 +982,9 @@ void MainWindow::processURLs(QList<QUrl> urls)
                 } else {
                     CustomMessageBox::selectable(
                         this, tr("Error"),
-                        tr("Unsupported Modrinth link.\n\nPrism Launcher currently only supports modpack links such as "
-                           "modrinth://modpack/fabulously-optimized."),
+                        tr("Unsupported Modrinth link.\n\n%1 currently only supports modpack links such as "
+                           "modrinth://modpack/fabulously-optimized.")
+                            .arg(BuildConfig.LAUNCHER_DISPLAYNAME),
                         QMessageBox::Critical)
                         ->show();
                 }
