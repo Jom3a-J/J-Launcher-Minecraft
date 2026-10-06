@@ -181,8 +181,10 @@ void ModrinthPage::onSelectionChanged(QModelIndex curr, [[maybe_unused]] QModelI
             m_current->versions = std::move(versions);
             m_current->versionsLoaded = versionsLoaded;
 
+            // m_current now holds the loaded pack; response is a raw pointer the request owns,
+            // and the model only accepts an IndexedPack::Ptr (anything else would store null).
             QVariant currentUpdated;
-            currentUpdated.setValue(response);
+            currentUpdated.setValue(m_current);
 
             if (!m_model->setData(curr, currentUpdated, Qt::UserRole)) {
                 qWarning() << "Failed to cache extra info for the current pack!";
