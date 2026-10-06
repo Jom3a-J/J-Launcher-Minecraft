@@ -84,7 +84,7 @@ Task::Ptr enqueuePackFileDownload(const NetJob::Ptr& job,
         return segmented;
     }
 
-    auto download = Net::ApiRequest::makeFile(file.url, file.path, Net::NetRequest::Option::NoOptions, meta);
+    auto download = Net::ApiRequest::makeFile(file.url, file.path, Net::Request::Option::NoOptions, meta);
     download->addValidator(new Net::ChecksumValidator(file.hashAlgorithm, file.hash));
     job->addNetAction(download);
     return download;

@@ -25,7 +25,7 @@
 #include "MMCTime.h"
 #include "StringUtils.h"
 #include "logs/Privacy.h"
-#include "net/NetRequest.h"
+#include "net/Request.h"
 #include "net/HeaderProxy.h"
 #include "net/Logging.h"
 #include "net/PartFile.h"
@@ -107,7 +107,7 @@ class AssembledEntityReply final : public QNetworkReply {
 
 /*! Emits the Range family of headers from the segment's live cursor.
  *
- *  NetRequest re-runs the header proxies on every attempt, so a retry automatically asks for what
+ *  Request re-runs the header proxies on every attempt, so a retry automatically asks for what
  *  is still missing rather than for the range the first attempt asked for.
  */
 class RangeHeaderProxy final : public HeaderProxy {
@@ -219,16 +219,16 @@ class SegmentSink final : public Sink {
 
 /*! One request of a segmented download.
  *
- *  An ordinary Net::NetRequest download in every way that matters to NetJob and to HostScheduler - it is a
- *  Net::NetRequest, so it is admitted with a real permit, reports 429/503, migrates its permit
- *  across a cross host redirect and keeps all of NetRequest's redirect and credential checks.
+ *  An ordinary Net::Request download in every way that matters to NetJob and to HostScheduler - it is a
+ *  Net::Request, so it is admitted with a real permit, reports 429/503, migrates its permit
+ *  across a cross host redirect and keeps all of Request's redirect and credential checks.
  */
-class SegmentRequest final : public NetRequest {
+class SegmentRequest final : public Request {
    public:
     using HeaderCallback = std::function<void(QNetworkReply&)>;
 
     SegmentRequest(const QUrl& url, std::shared_ptr<PartFile> file, std::shared_ptr<SegmentState> state)
-        : NetRequest(url, Option::NoOptions, QStringLiteral("SEGMENT:") + Privacy::sanitizeUrl(url))
+        : Request(url, Option::NoOptions, QStringLiteral("SEGMENT:") + Privacy::sanitizeUrl(url))
     {
         m_sink = std::make_unique<SegmentSink>(std::move(file), std::move(state));
     }
@@ -238,7 +238,7 @@ class SegmentRequest final : public NetRequest {
    protected:
     QNetworkReply* getReply(QNetworkRequest& request) override
     {
-        auto* reply = NetRequest::getReply(request);
+        auto* reply = Request::getReply(request);
         if (!reply)
             return nullptr;
         // Bound per-reply buffering; the opted-in HTTP/1 CDN path needs more room if the GUI
@@ -411,7 +411,7 @@ auto SegmentedDownload::makeApiFile(QUrl url, QString path, QNetworkAccessManage
 {
     auto task = makeFile(std::move(url), std::move(path), network, scheduler, maxSegments);
 #if defined(LAUNCHER_APPLICATION)
-    task->m_decorate = [](NetRequest& request) { request.addHeaderProxy(std::make_unique<ApiHeaderProxy>()); };
+    task->m_decorate = [](Request& request) { request.addHeaderProxy(std::make_unique<ApiHeaderProxy>()); };
 #endif
     return task;
 }
@@ -425,7 +425,7 @@ auto SegmentedDownload::makeApiFile(QUrl url,
 {
     auto task = makeFile(std::move(url), std::move(path), network, scheduler, maxSegments);
 #if defined(LAUNCHER_APPLICATION)
-    task->m_decorate = [meta](NetRequest& request) { request.addHeaderProxy(std::make_unique<ApiHeaderProxy>(meta)); };
+    task->m_decorate = [meta](Request& request) { request.addHeaderProxy(std::make_unique<ApiHeaderProxy>(meta)); };
 #else
     Q_UNUSED(meta)
 #endif
@@ -586,7 +586,7 @@ void SegmentedDownload::rewindToStart(const std::shared_ptr<SegmentState>& state
     }
 }
 
-Net::NetRequest::Ptr SegmentedDownload::makeSegmentRequest(const std::shared_ptr<SegmentState>& state, bool ranged)
+Net::Request::Ptr SegmentedDownload::makeSegmentRequest(const std::shared_ptr<SegmentState>& state, bool ranged)
 {
     auto request = makeShared<SegmentRequest>(m_url, m_part, state);
     if (ranged)
@@ -611,7 +611,7 @@ void SegmentedDownload::startLegacy()
     m_mode = Mode::Legacy;
     m_segmentsUsed = 1;
 
-    auto download = NetRequest::makeFile(m_url, m_targetPath);
+    auto download = Request::makeFile(m_url, m_targetPath);
     if (m_decorate)
         m_decorate(*download);
     for (const auto& validator : m_validators)
@@ -669,7 +669,7 @@ void SegmentedDownload::onDiscoveryHeaders(QNetworkReply& reply)
     }
 
     if (status != 206) {
-        // Not something we can place in the file. NetRequest's own error handling reports it.
+        // Not something we can place in the file. Request's own error handling reports it.
         m_discovery->headersSeen = true;
         m_discovery->accepted = false;
         if (status == 416) {

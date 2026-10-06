@@ -52,7 +52,7 @@
 #include "BuildConfig.h"
 #include "logs/Privacy.h"
 #include "net/ApiHeaderProxy.h"
-#include "net/NetRequest.h"
+#include "net/Request.h"
 #include "net/PasteUpload.h"
 #include "settings/CredentialStore.h"
 #include "settings/SettingsObject.h"
@@ -272,7 +272,7 @@ void APIPage::testFlameKey()
         m_flameKeyTestJob->abort();
     }
 
-    auto [request, response] = Net::NetRequest::makeByteArray(
+    auto [request, response] = Net::Request::makeByteArray(
         QUrl(BuildConfig.FLAME_BASE_URL + QStringLiteral("/games/432")));
     request->addHeaderProxy(
         std::make_unique<Net::CurseForgeApiKeyHeaderProxy>(key.toUtf8()));

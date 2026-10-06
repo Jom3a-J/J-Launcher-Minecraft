@@ -2,7 +2,7 @@
 
 #include "java/JavaChecker.h"
 #include "logs/Privacy.h"
-#include "net/NetRequest.h"
+#include "net/Request.h"
 
 #include <QNetworkRequest>
 #include <QProcessEnvironment>
@@ -342,7 +342,7 @@ void PrivacyTest::netRequestFormattingIsSafe()
     request.setRawHeader("cOoKiE", SessionId.toUtf8());
     request.setRawHeader("Accept", "application/json");
 
-    const QString formatted = Net::NetRequest::formatRequestForLogging(request);
+    const QString formatted = Net::Request::formatRequestForLogging(request);
     const QString folded = formatted.toLower();
     QVERIFY(!containsCanary(formatted));
     QVERIFY(formatted.contains(QStringLiteral("example.test")));

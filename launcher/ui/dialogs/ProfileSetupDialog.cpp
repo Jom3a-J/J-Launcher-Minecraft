@@ -48,7 +48,7 @@
 #include <Application.h>
 #include "logs/Privacy.h"
 #include "minecraft/auth/Parsers.h"
-#include "net/NetRequest.h"
+#include "net/Request.h"
 
 ProfileSetupDialog::ProfileSetupDialog(MinecraftAccountPtr accountToSetup, QWidget* parent)
     : QDialog(parent), m_accountToSetup(accountToSetup), ui(new Ui::ProfileSetupDialog)
@@ -162,7 +162,7 @@ void ProfileSetupDialog::checkName(const QString& name)
 
     if (m_check_task)
         disconnect(m_check_task.get(), nullptr, this, nullptr);
-    auto [task, response] = Net::NetRequest::makeByteArray(url);
+    auto [task, response] = Net::Request::makeByteArray(url);
 
     m_check_task = task;
     m_check_task->addHeaderProxy(std::make_unique<Net::RawHeaderProxy>(headers));
@@ -207,7 +207,7 @@ void ProfileSetupDialog::setupProfile(const QString& profileName)
                                            { "Accept", "application/json" },
                                            { "Authorization", QString("Bearer %1").arg(m_accountToSetup->accessToken()).toUtf8() } };
 
-    auto [task, response] = Net::NetRequest::makeByteArray(url, payloadTemplate.arg(profileName).toUtf8());
+    auto [task, response] = Net::Request::makeByteArray(url, payloadTemplate.arg(profileName).toUtf8());
     m_profile_task = task;
     m_profile_task->addHeaderProxy(std::make_unique<Net::RawHeaderProxy>(headers));
 

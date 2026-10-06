@@ -38,7 +38,7 @@ struct ModrinthDownloadMeta;
 
 /*! Downloads one large file over several concurrent HTTP Range requests.
  *
- *  Why this is a plain Task and not a NetRequest: the outer NetJob must count the whole file as
+ *  Why this is a plain Task and not a Request: the outer NetJob must count the whole file as
  *  a single unit of work (so a 187 file job stays a 187 file job), while the requests that
  *  actually move bytes have to be admitted one by one. A plain Task is taken by
  *  NetJob::takeNextSubTask() without a permit, and the segments live in an inner NetJob that
@@ -54,7 +54,7 @@ struct ModrinthDownloadMeta;
  *       fallback GET is redirected to a large range-capable CurseForge file host, that probe is
  *       retired and one ranged Discovery is started against the resolved URL.
  *       A 206 with a concrete Content-Range tells us the total size and that ranges work.
- *    2. Fan out - the remainder is split into K segments, each an ordinary Net::NetRequest download in an
+ *    2. Fan out - the remainder is split into K segments, each an ordinary Net::Request download in an
  *       inner NetJob. K is bounded by the caller's setting, by MaxSegments, by MinSegmentSize and
  *       by half the host's provider ceiling, so a segmented file can never take the whole pool.
  *    3. Assemble - the caller's validators are replayed over the finished part file off the GUI
@@ -76,7 +76,7 @@ class SegmentedDownload : public Task {
    public:
     using Ptr = shared_qobject_ptr<SegmentedDownload>;
     /// Applied to every request this task issues, so caller supplied header proxies survive.
-    using Decorator = std::function<void(Net::NetRequest&)>;
+    using Decorator = std::function<void(Net::Request&)>;
 
     /// Files smaller than this are never split.
     static constexpr qint64 MinSegmentedSize = 32LL * 1024 * 1024;
@@ -100,7 +100,7 @@ class SegmentedDownload : public Task {
     ~SegmentedDownload() override;
 
     /*! \param maxSegments the user's "SegmentedDownloadSegments" setting; 0 or 1 disables
-     *         segmentation entirely and the task behaves exactly like Net::NetRequest::makeFile.
+     *         segmentation entirely and the task behaves exactly like Net::Request::makeFile.
      *  \param scheduler admission control to use; nullptr means the process wide one.
      */
     static Ptr makeFile(QUrl url,
@@ -159,7 +159,7 @@ class SegmentedDownload : public Task {
    private:
     enum class Mode {
         Idle,
-        Legacy,     //!< one ordinary Net::NetRequest download straight to the target; no part file
+        Legacy,     //!< one ordinary Net::Request download straight to the target; no part file
         Discovery,  //!< bounded ranged GET that doubles as the no-range fallback
         Streaming,  //!< discovery answered 200 and is downloading the whole file
         Segments,   //!< fanned out over several ranged requests
@@ -194,7 +194,7 @@ class SegmentedDownload : public Task {
     NetJob::Ptr newJob(int maxConcurrent);
     void connectJob();
     void retireJob();
-    Net::NetRequest::Ptr makeSegmentRequest(const std::shared_ptr<SegmentState>& state, bool ranged);
+    Net::Request::Ptr makeSegmentRequest(const std::shared_ptr<SegmentState>& state, bool ranged);
 
     qint64 writtenBytes() const;
     /*! Proves the segments actually tile [0, total) with no gap and no overlap.

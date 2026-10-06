@@ -107,7 +107,7 @@ void PackInstallTask::executeTask()
 
     auto searchUrl = QString(BuildConfig.FTB_API_BASE_URL + "/modpack/%1/%2").arg(m_pack.id).arg(version.id);
 
-    auto [action, response] = Net::NetRequest::makeByteArray(QUrl(searchUrl));
+    auto [action, response] = Net::Request::makeByteArray(QUrl(searchUrl));
     netJob->addNetAction(action);
 
     QObject::connect(netJob.get(), &NetJob::succeeded, this, [this, response] { onManifestDownloadSucceeded(response); });
@@ -349,7 +349,7 @@ void PackInstallTask::downloadPack()
     }
     if (m_hasDedicatedServerPack) {
         m_serverInstallerPath = ModPlatform::ServerPackStaging::path(m_stagingPath, "ftb-server-installer.exe");
-        jobPtr->addNetAction(Net::NetRequest::makeFile(
+        jobPtr->addNetAction(Net::Request::makeFile(
             QUrl(dedicatedServerInstallerUrl(m_pack.id, m_version.id)),
             m_serverInstallerPath));
     }
@@ -364,7 +364,7 @@ void PackInstallTask::downloadPack()
             auto path = FS::PathCombine(m_stagingPath, ".minecraft", relativePath);
             qDebug() << "Will try to download" << Privacy::sanitizeUrl(file.url)
                      << "to" << Privacy::sanitizePath(path);
-            auto dl = Net::NetRequest::makeFile(file.url, path);
+            auto dl = Net::Request::makeFile(file.url, path);
             if (!file.sha1.isEmpty()) {
                 dl->addValidator(new Net::ChecksumValidator(QCryptographicHash::Sha1, file.sha1));
             }
@@ -375,7 +375,7 @@ void PackInstallTask::downloadPack()
             qDebug() << "Will try to download server-only file"
                      << Privacy::sanitizeUrl(file.url)
                      << "to" << Privacy::sanitizePath(path);
-            auto dl = Net::NetRequest::makeFile(file.url, path);
+            auto dl = Net::Request::makeFile(file.url, path);
             if (!file.sha1.isEmpty()) {
                 dl->addValidator(new Net::ChecksumValidator(QCryptographicHash::Sha1, file.sha1));
             }

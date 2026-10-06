@@ -63,7 +63,7 @@ void PackFetchTask::fetch()
     qDebug() << "Downloading thirdparty version info from"
              << Privacy::sanitizeUrl(thirdPartyUrl);
 
-    auto [thirdPartyAction, thirdPartyResponse] = Net::NetRequest::makeByteArray(thirdPartyUrl);
+    auto [thirdPartyAction, thirdPartyResponse] = Net::Request::makeByteArray(thirdPartyUrl);
     jobPtr->addNetAction(thirdPartyAction);
 
     connect(jobPtr.get(), &NetJob::succeeded, this,

@@ -12,10 +12,10 @@
 namespace Net {
 
 namespace {
-/// These messages are reported by NetRequest, so they keep its translation context.
+/// These messages are reported by Request, so they keep its translation context.
 QString tr(const char* text)
 {
-    return QCoreApplication::translate("Net::NetRequest", text);
+    return QCoreApplication::translate("Net::Request", text);
 }
 
 int effectivePort(const QUrl& url)

@@ -142,8 +142,8 @@ set(NET_SOURCES
     net/RawHeaderProxy.h
     net/ApiHeaderProxy.h
     net/ApiRequest.h
-    net/NetRequest.cpp
-    net/NetRequest.h
+    net/Request.cpp
+    net/Request.h
     net/RequestPolicy.cpp
     net/RequestPolicy.h
 )
@@ -677,8 +677,8 @@ set(PRISMUPDATER_SOURCES
     net/HttpMetaCache.h
     net/Logging.h
     net/Logging.cpp
-    net/NetRequest.cpp
-    net/NetRequest.h
+    net/Request.cpp
+    net/Request.h
     net/RequestPolicy.cpp
     net/RequestPolicy.h
     net/NetJob.cpp

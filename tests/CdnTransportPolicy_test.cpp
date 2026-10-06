@@ -16,7 +16,7 @@
 #include <tuple>
 
 #include "net/HostScheduler.h"
-#include "net/NetRequest.h"
+#include "net/Request.h"
 #include "net/RequestPolicy.h"
 
 using Net::HostClass;

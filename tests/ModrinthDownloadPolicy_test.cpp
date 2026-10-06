@@ -255,7 +255,7 @@ class ModrinthDownloadPolicyTest final : public QObject {
         // A fallback onto a mirror drops back to an ordinary request for the same destination.
         file.url = QUrl(QStringLiteral("https://mirror.example/physics.jar"));
         auto third = Modrinth::enqueuePackFileDownload(job, file, meta, 4);
-        auto* ordinary = qobject_cast<Net::NetRequest*>(third.get());
+        auto* ordinary = qobject_cast<Net::Request*>(third.get());
         QVERIFY2(ordinary, "a mirrored fallback should be an ordinary network request");
         QVERIFY(!qobject_cast<Net::SegmentedDownload*>(third.get()));
 

@@ -45,7 +45,7 @@
 #include <QSet>
 #include <QTimer>
 #include "net/HostScheduler.h"
-#include "net/NetRequest.h"
+#include "net/Request.h"
 #include "tasks/ConcurrentTask.h"
 
 // Those are included so that they are also included by anyone using NetJob
@@ -78,7 +78,7 @@ class NetJob : public ConcurrentTask {
     auto size() const -> int;
 
     auto canAbort() const -> bool override;
-    auto addNetAction(Net::NetRequest::Ptr action) -> bool;
+    auto addNetAction(Net::Request::Ptr action) -> bool;
 
     /*! Queues a sub task that is not a network request.
      *
@@ -89,7 +89,7 @@ class NetJob : public ConcurrentTask {
      */
     void addTask(Task::Ptr task);
 
-    auto getFailedActions() -> QList<Net::NetRequest*>;
+    auto getFailedActions() -> QList<Net::Request*>;
     auto getFailedFiles() -> QList<QString>;
     void setAskRetry(bool askRetry);
 

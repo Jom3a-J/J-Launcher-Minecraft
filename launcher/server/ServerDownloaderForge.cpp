@@ -33,7 +33,7 @@
 #include <QVersionNumber>
 #include <QXmlStreamReader>
 #include "net/ChecksumValidator.h"
-#include "net/NetRequest.h"
+#include "net/Request.h"
 #include "archive/ArchiveReader.h"
 #include <algorithm>
 #include <utility>
@@ -622,7 +622,7 @@ bool ServerDownloader::prefetchModernInstallerLibraries(const QString &installer
         if (fileMatchesSha1(outputPath, library.sha1))
             continue;
         m_prefetchLibraryHashes.insert(outputPath, library.sha1);
-        auto download = Net::NetRequest::makeFile(library.url, outputPath);
+        auto download = Net::Request::makeFile(library.url, outputPath);
         download->addValidator(new Net::ChecksumValidator(
             QCryptographicHash::Sha1, QString::fromLatin1(library.sha1).toLower()));
         job->addNetAction(download);

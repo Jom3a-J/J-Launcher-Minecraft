@@ -25,40 +25,40 @@
 #include <utility>
 
 #include "net/ApiHeaderProxy.h"
-#include "net/NetRequest.h"
+#include "net/Request.h"
 
 namespace Net {
 
 namespace ApiRequest {
-inline NetRequest::Ptr makeCached(const QUrl& url, MetaEntryPtr entry, NetRequest::Options options = NetRequest::Option::NoOptions)
+inline Request::Ptr makeCached(const QUrl& url, MetaEntryPtr entry, Request::Options options = Request::Option::NoOptions)
 {
-    return NetRequest::makeCached(url, std::move(entry), options | NetRequest::Option::AddAPIHeaders);
+    return Request::makeCached(url, std::move(entry), options | Request::Option::AddAPIHeaders);
 }
 
-inline std::pair<NetRequest::Ptr, QByteArray*> makeByteArray(const QUrl& url, NetRequest::Options options = NetRequest::Option::NoOptions)
+inline std::pair<Request::Ptr, QByteArray*> makeByteArray(const QUrl& url, Request::Options options = Request::Option::NoOptions)
 {
-    auto result = NetRequest::makeByteArray(url, options | NetRequest::Option::AddAPIHeaders);
+    auto result = Request::makeByteArray(url, options | Request::Option::AddAPIHeaders);
     // In-memory API responses are metadata the user is waiting on, not bulk content.
     result.first->setLatencyCritical(true);
     return result;
 }
 
-inline std::pair<NetRequest::Ptr, QByteArray*> makeByteArray(const QUrl& url,
+inline std::pair<Request::Ptr, QByteArray*> makeByteArray(const QUrl& url,
                                                              QByteArray postData,
-                                                             NetRequest::Options options = NetRequest::Option::NoOptions)
+                                                             Request::Options options = Request::Option::NoOptions)
 {
-    auto result = NetRequest::makeByteArray(url, std::move(postData), options | NetRequest::Option::AddAPIHeaders);
+    auto result = Request::makeByteArray(url, std::move(postData), options | Request::Option::AddAPIHeaders);
     // API calls are latency critical: they must not queue behind bulk file transfers.
     result.first->setLatencyCritical(true);
     return result;
 }
 
-inline NetRequest::Ptr makeFile(const QUrl& url,
+inline Request::Ptr makeFile(const QUrl& url,
                                 const QString& path,
-                                NetRequest::Options options = NetRequest::Option::NoOptions,
+                                Request::Options options = Request::Option::NoOptions,
                                 ModrinthDownloadMeta meta = ModrinthDownloadMeta())
 {
-    auto req = NetRequest::makeFile(url, path, options);
+    auto req = Request::makeFile(url, path, options);
     req->addHeaderProxy(std::make_unique<ApiHeaderProxy>(std::move(meta)));
     return req;
 }
