@@ -224,7 +224,7 @@ void ModFolderPage::downloadDialogFinished(int result)
         }
 
         ProgressDialog loadDialog(this);
-        loadDialog.setSkipButton(true, tr("Abort"));
+        loadDialog.showSkipButton();
         loadDialog.execWithTask(&tasks);
 
         m_model->update();
@@ -280,13 +280,7 @@ void ModFolderPage::updateMods(bool includeDeps, std::vector<ModPlatform::Indexe
         return;
     }
 
-    if (releaseTypes.empty()) {
-        auto settingVal =
-            m_instance ? m_instance->settings()->get("ModUpdateReleaseTypes") : APPLICATION->settings()->get("ModUpdateReleaseTypes");
-        releaseTypes = ModPlatform::IndexedVersionType::fromStringList(Json::toStringList(settingVal.toString()));
-    }
-
-    ResourceUpdateDialog updateDialog(this, m_instance, m_model, modsList, includeDeps, profile->getModLoadersList(), releaseTypes);
+    ResourceUpdateDialog updateDialog(this, m_instance, m_model, modsList, includeDeps, profile->getModLoadersList(), std::move(releaseTypes));
     updateDialog.checkCandidates();
 
     if (updateDialog.aborted()) {
@@ -328,7 +322,7 @@ void ModFolderPage::updateMods(bool includeDeps, std::vector<ModPlatform::Indexe
         }
 
         ProgressDialog loadDialog(this);
-        loadDialog.setSkipButton(true, tr("Abort"));
+        loadDialog.showSkipButton();
         loadDialog.execWithTask(&tasks);
 
         m_model->update();

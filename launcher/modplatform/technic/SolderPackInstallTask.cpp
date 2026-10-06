@@ -38,7 +38,9 @@
 #include <FileSystem.h>
 #include <Json.h>
 #include <MMCZip.h>
+#include <QDirListing>
 #include <QtConcurrentRun>
+#include <utility>
 
 #include "SolderPackManifest.h"
 #include "modplatform/ServerPackStaging.h"
@@ -91,7 +93,7 @@ void Technic::SolderPackInstallTask::executeTask()
     auto [action, response] = Net::ApiRequest::makeByteArray(sourceUrl);
     m_filesNetJob->addNetAction(action);
 
-    auto job = m_filesNetJob.get();
+    auto* job = m_filesNetJob.get();
     connect(job, &NetJob::succeeded, this, [this, response] { fileListSucceeded(response); });
     connect(job, &NetJob::failed, this, &Technic::SolderPackInstallTask::downloadFailed);
     connect(job, &NetJob::aborted, this, &Technic::SolderPackInstallTask::downloadAborted);
@@ -135,7 +137,7 @@ void Technic::SolderPackInstallTask::fileListSucceeded(QByteArray* response)
         i++;
     }
 
-    m_modCount = build.mods.size();
+    m_modCount = static_cast<int>(build.mods.size());
     const auto serverSupport = ModPlatform::technicServerSupport(m_serverPackUrl);
     if (shouldCreateServerPair() && serverSupport == ModPlatform::ServerSupport::Official) {
         m_serverArchivePath = FS::PathCombine(m_outputDir.path(), "published-server-pack.zip");
@@ -183,7 +185,7 @@ void Technic::SolderPackInstallTask::downloadFailed(QString reason)
 {
     m_abortable = false;
     m_filesNetJob.reset();
-    emitFailed(reason);
+    emitFailed(std::move(reason));
 }
 
 void Technic::SolderPackInstallTask::downloadProgressChanged(qint64 current, qint64 total)
@@ -205,14 +207,10 @@ void Technic::SolderPackInstallTask::extractFinished()
         emitFailed(error);
         return;
     }
-    QDir extractDir(m_stagingPath);
 
     qDebug() << "Fixing permissions for extracted pack files...";
-    QDirIterator it(extractDir, QDirIterator::Subdirectories);
-    while (it.hasNext()) {
-        auto filepath = it.next();
-        QFileInfo file(filepath);
-        auto permissions = QFile::permissions(filepath);
+    for (const auto& file : QDirListing(m_stagingPath, QDirListing::IteratorFlag::ResolveSymlinks | QDirListing::IteratorFlag::Recursive)) {
+        auto permissions = QFile::permissions(file.absoluteFilePath());
         auto origPermissions = permissions;
         if (file.isDir()) {
             // Folder +rwx for current user
@@ -222,11 +220,10 @@ void Technic::SolderPackInstallTask::extractFinished()
             permissions |= QFileDevice::Permission::ReadUser | QFileDevice::Permission::WriteUser;
         }
         if (origPermissions != permissions) {
-            if (!QFile::setPermissions(filepath, permissions)) {
-                logWarning(tr("Could not fix permissions for %1")
-                               .arg(Privacy::sanitizePath(filepath)));
+            if (!QFile::setPermissions(file.absoluteFilePath(), permissions)) {
+                logWarning(tr("Could not fix permissions for %1").arg(Privacy::sanitizePath(file.absoluteFilePath())));
             } else {
-                qDebug() << "Fixed" << Privacy::sanitizePath(filepath);
+                qDebug() << "Fixed" << Privacy::sanitizePath(file.absoluteFilePath());
             }
         }
     }

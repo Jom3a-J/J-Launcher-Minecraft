@@ -15,6 +15,7 @@
 
 #include "SingleZipPackInstallTask.h"
 
+#include <QDirListing>
 #include <QFile>
 #include <QtConcurrent>
 
@@ -74,7 +75,7 @@ void Technic::SingleZipPackInstallTask::executeTask()
         m_filesNetJob->addNetAction(Net::ApiRequest::makeCached(m_serverPackUrl, serverEntry));
         m_serverArchivePath = serverEntry->getFullPath();
     }
-    auto job = m_filesNetJob.get();
+    auto* job = m_filesNetJob.get();
     connect(job, &NetJob::succeeded, this, &Technic::SingleZipPackInstallTask::downloadSucceeded);
     connect(job, &NetJob::progress, this, &Technic::SingleZipPackInstallTask::downloadProgressChanged);
     connect(job, &NetJob::stepProgress, this, &Technic::SingleZipPackInstallTask::propagateStepProgress);
@@ -117,7 +118,7 @@ void Technic::SingleZipPackInstallTask::downloadFailed(QString reason)
 {
     m_abortable = false;
     m_filesNetJob.reset();
-    emitFailed(reason);
+    emitFailed(std::move(reason));
 }
 
 void Technic::SingleZipPackInstallTask::downloadProgressChanged(qint64 current, qint64 total)
@@ -133,14 +134,9 @@ void Technic::SingleZipPackInstallTask::extractFinished()
         emitFailed(error);
         return;
     }
-    QDir extractDir(m_stagingPath);
-
     qDebug() << "Fixing permissions for extracted pack files...";
-    QDirIterator it(extractDir, QDirIterator::Subdirectories);
-    while (it.hasNext()) {
-        auto filepath = it.next();
-        QFileInfo file(filepath);
-        auto permissions = QFile::permissions(filepath);
+    for (const auto& file : QDirListing(m_stagingPath, QDirListing::IteratorFlag::ResolveSymlinks | QDirListing::IteratorFlag::Recursive)) {
+        auto permissions = QFile::permissions(file.absoluteFilePath());
         auto origPermissions = permissions;
         if (file.isDir()) {
             // Folder +rwx for current user
@@ -150,10 +146,10 @@ void Technic::SingleZipPackInstallTask::extractFinished()
             permissions |= QFileDevice::Permission::ReadUser | QFileDevice::Permission::WriteUser;
         }
         if (origPermissions != permissions) {
-            if (!QFile::setPermissions(filepath, permissions)) {
-                logWarning(tr("Could not fix permissions for %1").arg(filepath));
+            if (!QFile::setPermissions(file.absoluteFilePath(), permissions)) {
+                logWarning(tr("Could not fix permissions for %1").arg(Privacy::sanitizePath(file.absoluteFilePath())));
             } else {
-                qDebug() << "Fixed" << Privacy::sanitizePath(filepath);
+                qDebug() << "Fixed" << Privacy::sanitizePath(file.absoluteFilePath());
             }
         }
     }

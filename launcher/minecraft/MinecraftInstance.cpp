@@ -55,6 +55,7 @@
 #include "launch/steps/QuitAfterGameStop.h"
 #include "launch/steps/TextPrint.h"
 
+#include "minecraft/auth/AccountList.h"
 #include "minecraft/launch/AutoInstallJava.h"
 #include "minecraft/launch/ClaimAccount.h"
 #include "minecraft/launch/CreateGameFolders.h"
@@ -246,9 +247,6 @@ void MinecraftInstance::loadSpecificSettings()
         auto envSetting = m_settings->registerSetting("OverrideEnv", false);
         m_settings->registerOverride(global_settings->getSetting("Env"), envSetting);
 
-        auto modUpdateReleaseTypesOverride = m_settings->registerSetting("OverrideModUpdateReleaseTypes", false);
-        m_settings->registerOverride(global_settings->getSetting("ModUpdateReleaseTypes"), modUpdateReleaseTypesOverride);
-
         if (m_settings->get("InstanceType").toString() != "OneSix") {
             m_settings->set("InstanceType", "OneSix");
         }
@@ -326,6 +324,22 @@ void MinecraftInstance::populateLaunchMenu(QMenu* menu)
     connect(normalLaunch, &QAction::triggered, this, [this] { APPLICATION->launch(this); });
     connect(normalLaunchOffline, &QAction::triggered, this, [this] { APPLICATION->launch(this, LaunchMode::Offline); });
     connect(normalLaunchDemo, &QAction::triggered, this, [this] { APPLICATION->launch(this, LaunchMode::Demo); });
+
+    auto accounts = APPLICATION->accounts();
+    if (accounts->count() > 1) {
+        QMenu* launchAsMenu = menu->addMenu(tr("Launch &As"));
+        for (int i = 0; i < accounts->count(); i++) {
+            MinecraftAccountPtr account = accounts->at(i);
+            QAction* action = launchAsMenu->addAction(account->displayName());
+            if (auto face = account->getFace(); !face.isNull()) {
+                action->setIcon(face);
+            } else {
+                action->setIcon(QIcon::fromTheme("noaccount"));
+            }
+            connect(action, &QAction::triggered, this,
+                    [this, account] { APPLICATION->launch(this, LaunchMode::Normal, nullptr, account); });
+        }
+    }
 
     QString profilersTitle = tr("Profilers");
     menu->addSeparator()->setText(profilersTitle);

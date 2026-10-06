@@ -235,7 +235,6 @@ class Application : public QApplication {
     void on_windowClose();
     void messageReceived(const QByteArray& message);
     void controllerFinished();
-    void setupWizardFinished(int status);
 
    private:
     static bool handleDataMigration(const QString& currentData, const QString& oldData, const QString& name, const QString& configFile);
@@ -314,8 +313,6 @@ class Application : public QApplication {
 
     // peer launcher instance connector - used to implement single instance launcher and signalling
     LocalPeer* m_peerInstance = nullptr;
-
-    SetupWizard* m_setupWizard = nullptr;
 
    public:
     QString m_detectedGLFWPath;

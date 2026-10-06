@@ -97,7 +97,7 @@ void ServerListPage::onInstallModpack()
     {
         ProgressDialog progress(this);
         progress.setWindowTitle(tr("Downloading Modpack"));
-        progress.setSkipButton(true, tr("Abort"));
+        progress.showSkipButton();
         progressResult = progress.execWithTask(creationTask.get());
     }
 
