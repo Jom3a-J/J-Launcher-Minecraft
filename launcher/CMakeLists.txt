@@ -146,6 +146,7 @@ set(NET_SOURCES
     net/Request.h
     net/RequestPolicy.cpp
     net/RequestPolicy.h
+    net/RPCSink.h
 )
 
 # Game launch logic
@@ -154,10 +155,8 @@ set(LAUNCH_SOURCES
     launch/steps/CheckJava.h
     launch/steps/LookupServerAddress.cpp
     launch/steps/LookupServerAddress.h
-    launch/steps/PostLaunchCommand.cpp
-    launch/steps/PostLaunchCommand.h
-    launch/steps/PreLaunchCommand.cpp
-    launch/steps/PreLaunchCommand.h
+    launch/steps/LaunchCommand.cpp
+    launch/steps/LaunchCommand.h
     launch/steps/TextPrint.cpp
     launch/steps/TextPrint.h
     launch/steps/QuitAfterGameStop.cpp
@@ -478,8 +477,6 @@ set(TOOLS_SOURCES
     tools/JProfiler.h
     tools/JVisualVM.cpp
     tools/JVisualVM.h
-    tools/MCEditTool.cpp
-    tools/MCEditTool.h
     tools/GenericProfiler.cpp
     tools/GenericProfiler.h
 )

@@ -85,6 +85,7 @@ class ResourceAPI {
         std::optional<QStringList> categoryIds;
         bool openSource{};
         std::optional<QStringList> loaderNames;
+        std::vector<ModPlatform::DisclosureType> excludeDisclosureTypes;
     };
 
     struct VersionSearchArgs {

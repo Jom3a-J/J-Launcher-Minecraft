@@ -85,7 +85,8 @@ ModPage::ModPage(ResourceDownloadDialog* dialog,
                  QStringList loaderNames)
     : ResourcePage(dialog, instance, prepareModDescriptor(resourceType), std::move(p)), m_api(api), m_resourceType(resourceType)
 {
-    auto* model = new ModModel(instance, api, debugName(), metaEntryBase(), resourceType, std::move(loaderNames));
+    auto* model = new ModModel(instance, getDialog()->getBaseModel(), api, debugName(), metaEntryBase(), resourceType,
+                               std::move(loaderNames));
     m_model = model;
     m_ui->packView->setModel(m_model);
 

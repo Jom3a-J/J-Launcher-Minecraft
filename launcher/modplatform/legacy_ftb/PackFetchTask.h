@@ -12,23 +12,23 @@ class PackFetchTask : public QObject {
     Q_OBJECT
 
    public:
-    PackFetchTask(QNetworkAccessManager* network) : QObject(nullptr), m_network(network) {};
-    virtual ~PackFetchTask() = default;
+    explicit PackFetchTask(QNetworkAccessManager* network) : QObject(nullptr), m_network(network) {};
+    ~PackFetchTask() override = default;
 
     void fetch();
     void fetchPrivate(const QStringList& toFetch);
-    bool parseAndAddPacks(QByteArray& data, PackType packType, ModpackList& list);
+    static bool parseAndAddPacks(QByteArray& data, PackType packType, ModpackList& list);
 
    private:
     QNetworkAccessManager* m_network;
-    NetJob::Ptr jobPtr;
+    NetJob::Ptr m_jobPtr;
 
-    ModpackList publicPacks;
-    ModpackList thirdPartyPacks;
+    ModpackList m_publicPacks;
+    ModpackList m_thirdPartyPacks;
 
    protected slots:
     void fileDownloadFinished(QByteArray* publicResponse, QByteArray* thirdPartyResponse);
-    void fileDownloadFailed(QString reason);
+    void fileDownloadFailed(const QString& reason);
     void fileDownloadAborted();
 
    signals:

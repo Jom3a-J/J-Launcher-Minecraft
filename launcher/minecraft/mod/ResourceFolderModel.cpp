@@ -52,7 +52,8 @@ ResourceFolderModel::ResourceFolderModel(const QDir& dir, MinecraftInstance* ins
 
 ResourceFolderModel::~ResourceFolderModel()
 {
-    while (!QThreadPool::globalInstance()->waitForDone(100)) {
+    m_resourceResolverThread.quit();
+    while (!m_resourceResolverThread.wait(100)) {
         QCoreApplication::processEvents();
     }
 }
@@ -324,11 +325,11 @@ bool ResourceFolderModel::setResourceEnabled(const QModelIndexList& indexes, Ena
     return succeeded;
 }
 
-static QMutex s_update_task_mutex;
+static QMutex s_updateTaskMutex;
 bool ResourceFolderModel::update()
 {
     // We hold a lock here to prevent race conditions on the m_current_update_task reset.
-    QMutexLocker lock(&s_update_task_mutex);
+    QMutexLocker lock(&s_updateTaskMutex);
 
     // Already updating, so we schedule a future update and return.
     if (m_currentUpdateTask) {
@@ -386,6 +387,8 @@ void ResourceFolderModel::resolveResource(Resource::Ptr res)
         return;
     }
 
+    task->moveToThread(&m_resourceResolverThread);
+
     int ticket = m_nextResolutionTicket.fetch_add(1);
 
     res->setResolving(true, ticket);
@@ -408,7 +411,8 @@ void ResourceFolderModel::resolveResource(Resource::Ptr res)
     m_resourceResolver.addTask(task);
 
     if (!m_resourceResolverRunning) {
-        QThreadPool::globalInstance()->start(&m_resourceResolver);
+        m_resourceResolverThread.start();
+        m_resourceResolver.start();
         m_resourceResolverRunning = true;
     }
 }
@@ -851,7 +855,7 @@ void ResourceFolderModel::onParseFailed(int ticket, const QString& resourceId)
     // update index
     m_resourcesIndex.clear();
     int idx = 0;
-    for (const auto& mod : qAsConst(m_resources)) {
+    for (const auto& mod : std::as_const(m_resources)) {
         m_resourcesIndex[mod->internalId()] = idx;
         idx++;
     }
@@ -959,7 +963,7 @@ void ResourceFolderModel::applyUpdates(QSet<QString>& currentSet, QSet<QString>&
     {
         m_resourcesIndex.clear();
         int idx = 0;
-        for (const auto& mod : qAsConst(m_resources)) {
+        for (const auto& mod : std::as_const(m_resources)) {
             m_resourcesIndex[mod->internalId()] = idx;
             idx++;
         }

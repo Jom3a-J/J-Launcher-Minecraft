@@ -62,6 +62,7 @@ MinecraftSettingsWidget::MinecraftSettingsWidget(MinecraftInstance* instance, QW
         m_ui->globalDataPacksGroupBox->hide();
         m_ui->loaderGroup->hide();
         m_ui->countGameTime->hide();
+        m_ui->latestMCVersionGroupBox->hide();
     } else {
         m_javaSettings = new JavaSettingsWidget(m_instance, this);
         m_ui->javaScrollArea->setWidget(m_javaSettings);
@@ -84,7 +85,7 @@ MinecraftSettingsWidget::MinecraftSettingsWidget(MinecraftInstance* instance, QW
 
         m_quickPlaySingleplayer = m_instance->traits().contains("feature:is_quick_play_singleplayer");
         if (m_quickPlaySingleplayer) {
-            auto worlds = m_instance->worldList();
+            auto* worlds = m_instance->worldList();
             worlds->update();
             for (const auto& world : worlds->allWorlds()) {
                 m_ui->worldsCb->addItem(world.folderName());
@@ -103,24 +104,30 @@ MinecraftSettingsWidget::MinecraftSettingsWidget(MinecraftInstance* instance, QW
 
         connect(m_ui->globalDataPacksGroupBox, &QGroupBox::toggled, this, [this](bool value) {
             m_instance->settings()->set("GlobalDataPacksEnabled", value);
-            if (!value)
+            if (!value) {
                 m_instance->settings()->reset("GlobalDataPacksPath");
+            }
         });
         connect(m_ui->dataPacksPathEdit, &QLineEdit::editingFinished, this, &MinecraftSettingsWidget::saveDataPacksPath);
         connect(m_ui->dataPacksPathBrowse, &QPushButton::clicked, this, &MinecraftSettingsWidget::selectDataPacksFolder);
 
         connect(m_ui->loaderGroup, &QGroupBox::toggled, this, [this](bool value) {
             m_instance->settings()->set("OverrideModDownloadLoaders", value);
-            if (value)
+            if (value) {
                 saveSelectedLoaders();
-            else
+            } else {
                 m_instance->settings()->reset("ModDownloadLoaders");
+            }
         });
 
-        for (auto c : { m_ui->neoForge, m_ui->forge, m_ui->fabric, m_ui->quilt, m_ui->liteLoader, m_ui->babric, m_ui->btaBabric,
-                        m_ui->legacyFabric, m_ui->ornithe, m_ui->rift }) {
+        for (auto* c : { m_ui->neoForge, m_ui->forge, m_ui->fabric, m_ui->quilt, m_ui->liteLoader, m_ui->babric, m_ui->btaBabric,
+                         m_ui->legacyFabric, m_ui->ornithe, m_ui->rift }) {
             connect(c, &QCheckBox::stateChanged, this, &MinecraftSettingsWidget::saveSelectedLoaders);
         }
+        auto latestVersion = m_instance->settings()->getSetting("UseLatestMinecraftVersion");
+        connect(latestVersion.get(), &Setting::SettingChanged, this, [this](const Setting&, const QVariant&) {
+            m_ui->latestMCVersionGroupBox->setChecked(m_instance->settings()->get("UseLatestMinecraftVersion").toBool());
+        });
     }
 
     m_ui->maximizedWarning->hide();
@@ -191,8 +198,8 @@ void MinecraftSettingsWidget::loadSettings()
 
     // Custom commands
     m_ui->customCommands->initialize(m_instance != nullptr, m_instance == nullptr || settings->get("OverrideCommands").toBool(),
-                                     settings->get("PreLaunchCommand").toString(), settings->get("WrapperCommand").toString(),
-                                     settings->get("PostExitCommand").toString());
+                                     settings->get("PreLoadCommand").toString(), settings->get("PreLaunchCommand").toString(),
+                                     settings->get("WrapperCommand").toString(), settings->get("PostExitCommand").toString());
 
     // Environment variables
     m_ui->environmentVariables->initialize(m_instance != nullptr, m_instance == nullptr || settings->get("OverrideEnv").toBool(),
@@ -303,6 +310,11 @@ void MinecraftSettingsWidget::loadSettings()
         for (auto c : blockSignalsCheckBoxes) {
             c->blockSignals(false);
         }
+
+        m_ui->latestMCVersionGroupBox->setChecked(settings->get("UseLatestMinecraftVersion").toBool());
+        auto autoUpdateType = settings->get("UseLatestMinecraftVersionType").toString() == "release";
+        m_ui->releaseRadioButton->setChecked(autoUpdateType);
+        m_ui->anyRadioButton->setChecked(!autoUpdateType);
     }
 
     m_ui->legacySettingsGroupBox->setChecked(settings->get("OverrideLegacySettings").toBool());
@@ -370,10 +382,12 @@ void MinecraftSettingsWidget::saveSettings()
         settings->set("OverrideCommands", custcmd);
 
     if (custcmd) {
+        settings->set("PreLoadCommand", m_ui->customCommands->preLoadCommand());
         settings->set("PreLaunchCommand", m_ui->customCommands->prelaunchCommand());
         settings->set("WrapperCommand", m_ui->customCommands->wrapperCommand());
         settings->set("PostExitCommand", m_ui->customCommands->postexitCommand());
     } else {
+        settings->reset("PreLoadCommand");
         settings->reset("PreLaunchCommand");
         settings->reset("WrapperCommand");
         settings->reset("PostExitCommand");
@@ -487,6 +501,9 @@ void MinecraftSettingsWidget::saveSettings()
         } else {
             settings->reset("InstanceAccountId");
         }
+
+        settings->set("UseLatestMinecraftVersion", m_ui->latestMCVersionGroupBox->isChecked());
+        settings->set("UseLatestMinecraftVersionType", m_ui->releaseRadioButton->isChecked() ? "release" : "any");
     }
 
     bool overrideLegacySettings = m_instance == nullptr || m_ui->legacySettingsGroupBox->isChecked();

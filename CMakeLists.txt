@@ -36,8 +36,8 @@ set(CMAKE_C_STANDARD 11)
 include(GenerateExportHeader)
 
 add_compile_definitions($<$<NOT:$<CONFIG:Debug>>:QT_NO_DEBUG>)
-add_compile_definitions(QT_WARN_DEPRECATED_UP_TO=0x060400)
-add_compile_definitions(QT_DISABLE_DEPRECATED_UP_TO=0x060400)
+add_compile_definitions(QT_WARN_DEPRECATED_UP_TO=0x060800)
+add_compile_definitions(QT_DISABLE_DEPRECATED_UP_TO=0x060800)
 add_compile_definitions(QT_NO_CONTEXTLESS_CONNECT)
 
 if(CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
@@ -313,7 +313,7 @@ set(Launcher_BUILD_TIMESTAMP "${TODAY}")
 if(Launcher_QT_VERSION_MAJOR EQUAL 6)
     set(QT_VERSION_MAJOR 6)
     find_package(
-        Qt6 6.4
+        Qt6 6.8
         REQUIRED
         COMPONENTS
             Concurrent
@@ -428,8 +428,8 @@ if(UNIX AND APPLE)
     set(MACOSX_SPARKLE_UPDATE_PUBLIC_KEY "" CACHE STRING "Public key for Sparkle update feed" FORCE)
     set(MACOSX_SPARKLE_UPDATE_FEED_URL "" CACHE STRING "URL for Sparkle update feed" FORCE)
 
-    set(MACOSX_SPARKLE_DOWNLOAD_URL "https://github.com/sparkle-project/Sparkle/releases/download/2.8.0/Sparkle-2.8.0.tar.xz" CACHE STRING "URL to Sparkle release archive")
-    set(MACOSX_SPARKLE_SHA256 "fd5681ee92bf238aaac2d08214ceaf0cc8976e452d7f882d80bac1e61581f3b1" CACHE STRING "SHA256 checksum for Sparkle release archive")
+    set(MACOSX_SPARKLE_DOWNLOAD_URL "https://github.com/sparkle-project/Sparkle/releases/download/2.9.6/Sparkle-2.9.6.tar.xz" CACHE STRING "URL to Sparkle release archive")
+    set(MACOSX_SPARKLE_SHA256 "52bf9e88cdd972fc0c81501377a880e90d47031bd8ca5462488f843e2609e192" CACHE STRING "SHA256 checksum for Sparkle release archive")
     set(MACOSX_SPARKLE_DIR "${CMAKE_BINARY_DIR}/frameworks/Sparkle")
 
     if(NOT MACOSX_SPARKLE_UPDATE_PUBLIC_KEY STREQUAL "" AND NOT MACOSX_SPARKLE_UPDATE_FEED_URL STREQUAL "")

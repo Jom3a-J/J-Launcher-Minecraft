@@ -36,7 +36,6 @@
 #include "JavaChecker.h"
 
 #include <QDebug>
-#include <QFile>
 #include <QMap>
 #include <QProcess>
 #include <utility>
