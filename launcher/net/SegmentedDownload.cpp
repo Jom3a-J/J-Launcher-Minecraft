@@ -69,40 +69,13 @@ class BorrowedValidator final : public Validator {
    public:
     explicit BorrowedValidator(std::shared_ptr<Validator> inner) : m_inner(std::move(inner)) {}
 
-    bool init(QNetworkRequest& request) override { return m_inner->init(request); }
-    bool write(QByteArray& data) override { return m_inner->write(data); }
-    bool abort() override { return m_inner->abort(); }
-    bool validate(QNetworkReply& reply) override { return m_inner->validate(reply); }
+    void init() override { m_inner->init(); }
+    void write(const QByteArray& data) override { m_inner->write(data); }
+    void abort() override { m_inner->abort(); }
+    Result validate() override { return m_inner->validate(); }
 
    private:
     std::shared_ptr<Validator> m_inner;
-};
-
-/*! A finished, bodiless reply describing the assembled file.
- *
- *  Validator::validate() takes a QNetworkReply, but a segmented download has no single reply that
- *  covers the whole entity - and holding on to one of the segment replies to pass here would mean
- *  reaching into an object whose owner has already moved on. This is the stable stand-in: it
- *  carries the URL and length of what was actually validated and nothing else.
- */
-class AssembledEntityReply final : public QNetworkReply {
-   public:
-    AssembledEntityReply(const QUrl& url, qint64 length, QObject* parent = nullptr) : QNetworkReply(parent)
-    {
-        setRequest(QNetworkRequest(url));
-        setUrl(url);
-        setOperation(QNetworkAccessManager::GetOperation);
-        setAttribute(QNetworkRequest::HttpStatusCodeAttribute, 200);
-        if (length >= 0)
-            setHeader(QNetworkRequest::ContentLengthHeader, length);
-        setOpenMode(QIODevice::ReadOnly);
-        setFinished(true);
-    }
-
-    void abort() override {}
-
-   protected:
-    qint64 readData(char*, qint64) override { return -1; }
 };
 
 /*! Emits the Range family of headers from the segment's live cursor.
@@ -148,66 +121,56 @@ class SegmentSink final : public Sink {
         : m_file(std::move(file)), m_state(std::move(state))
     {}
 
-    Task::State init(QNetworkRequest&) override
+    InitResult init(QNetworkRequest&) override
     {
         if (!m_state->hardError.isEmpty()) {
             // A protocol violation cannot be retried away; fail before touching the network.
-            m_fail_reason = m_state->hardError;
-            return Task::State::Failed;
+            return std::unexpected(m_state->hardError);
         }
         m_state->headersSeen = false;
         m_state->accepted = false;
-        return Task::State::Running;
+        return InitType::Ok;
     }
 
-    Task::State write(QByteArray& data) override
+    Result write(const QByteArray& data) override
     {
         if (m_state->dropWrites)
-            return Task::State::Running;
+            return {};
         if (data.isEmpty())
-            return Task::State::Running;
+            return {};
 
         if (!m_state->accepted) {
-            m_fail_reason = m_state->hardError.isEmpty()
-                                ? QObject::tr("The server sent a response body the launcher cannot place in the file.")
-                                : m_state->hardError;
-            return Task::State::Failed;
+            return std::unexpected(m_state->hardError.isEmpty()
+                                       ? QObject::tr("The server sent a response body the launcher cannot place in the file.")
+                                       : m_state->hardError);
         }
         if (m_state->end >= 0 && m_state->cursor + data.size() - 1 > m_state->end) {
             m_state->hardError = QObject::tr("The server sent more data than the requested range.");
-            m_fail_reason = m_state->hardError;
-            return Task::State::Failed;
+            return std::unexpected(m_state->hardError);
         }
 
         QString error;
         if (!m_file->writeAt(m_state->cursor, data, &error)) {
-            m_fail_reason = error;
-            return Task::State::Failed;
+            return std::unexpected(error);
         }
         m_state->cursor += data.size();
-        return Task::State::Running;
+        return {};
     }
 
-    Task::State abort() override
-    {
-        failAllValidators();
-        return Task::State::Failed;
-    }
+    void abort() override { failAllValidators(); }
 
-    Task::State finalize(QNetworkReply&) override
+    Result finalize(QNetworkReply&) override
     {
         if (m_state->dropWrites)
-            return Task::State::Succeeded;
+            return {};
         if (!m_state->accepted) {
-            m_fail_reason = m_state->hardError.isEmpty() ? QObject::tr("The server did not answer with the requested range.")
-                                                         : m_state->hardError;
-            return Task::State::Failed;
+            return std::unexpected(m_state->hardError.isEmpty() ? QObject::tr("The server did not answer with the requested range.")
+                                                                : m_state->hardError);
         }
         if (m_state->end >= 0 && !m_state->complete()) {
-            m_fail_reason = QObject::tr("The server closed the connection before the requested range was complete.");
-            return Task::State::Failed;
+            return std::unexpected(QObject::tr("The server closed the connection before the requested range was complete."));
         }
-        return Task::State::Succeeded;
+        return {};
     }
 
     bool hasLocalData() override { return false; }
@@ -330,12 +293,10 @@ QByteArray entityValidatorOf(QNetworkReply& reply)
  *
  *  Returns an empty string on success, or the reason it could not be done.
  */
-QString replayValidators(QString path, QUrl url, std::vector<std::shared_ptr<Validator>> validators)
+QString replayValidators(QString path, std::vector<std::shared_ptr<Validator>> validators)
 {
-    QNetworkRequest request(url);
     for (const auto& validator : validators) {
-        if (!validator->init(request))
-            return QObject::tr("Failed to initialize validators");
+        validator->init();
     }
 
     QFile file(path);
@@ -351,8 +312,7 @@ QString replayValidators(QString path, QUrl url, std::vector<std::shared_ptr<Val
             break;
         }
         for (const auto& validator : validators) {
-            if (!validator->write(chunk))
-                return QObject::tr("Failed to write validators");
+            validator->write(chunk);
         }
     }
     return {};
@@ -1016,7 +976,7 @@ void SegmentedDownload::assemble()
     }
 
     setStatus(tr("Verifying %1").arg(Privacy::sanitizePath(m_targetPath)));
-    m_validation.setFuture(QtConcurrent::run(&replayValidators, m_part->partPath(), m_url, m_validators));
+    m_validation.setFuture(QtConcurrent::run(&replayValidators, m_part->partPath(), m_validators));
 }
 
 void SegmentedDownload::onValidationFinished()
@@ -1032,15 +992,11 @@ void SegmentedDownload::onValidationFinished()
         return;
     }
 
-    // ChecksumValidator only reads the URL off this, but the interface takes a reply, and holding
-    // on to one of the segment replies to pass here would reach into an object whose owner has
-    // already moved on. AssembledEntityReply describes what was actually validated instead.
-    AssembledEntityReply reply(m_url, m_total);
     for (const auto& validator : m_validators) {
-        if (!validator->validate(reply)) {
+        if (const auto result = validator->validate(); !result) {
             for (const auto& other : m_validators)
                 other->abort();
-            failWith(tr("Failed to finalize validators"));
+            failWith(result.error());
             return;
         }
     }

@@ -472,8 +472,8 @@ void ServerDownloader::onFileDownloadFailed(const QString &reason)
 
     if (reason == tr("Download cancelled.")) {
         finishDownload(false, reason);
-    } else if (reason == QStringLiteral("Failed to finalize validators")
-               || reason == QCoreApplication::translate("Net::SegmentedDownload", "Failed to finalize validators")) {
+    } else if (reason.startsWith(QStringLiteral("Checksum mismatch"))) {
+        // Net::ChecksumValidator's reason, passed through unchanged by both download paths.
         finishDownload(false,
                        tr("Download verification failed: the server file hash did not match the provider's value."));
     } else {

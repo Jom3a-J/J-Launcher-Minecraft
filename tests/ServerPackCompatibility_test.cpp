@@ -69,19 +69,6 @@ void writeComponents(const QString &root, const QString &minecraft,
                       QJsonObject{{"formatVersion", 1}, {"components", components}}));
 }
 
-class FixtureReply final : public QNetworkReply {
-   public:
-    FixtureReply()
-    {
-        setUrl(QUrl(QStringLiteral("https://fixture.invalid/file")));
-    }
-
-    void abort() override {}
-
-   protected:
-    qint64 readData(char *, qint64) override { return -1; }
-};
-
 }  // namespace
 
 class ServerPackCompatibilityTest : public QObject
@@ -841,12 +828,10 @@ private slots:
             std::unique_ptr<Net::ChecksumValidator> validator(
                 Flame::createCurseForgeChecksumValidator(pair.first, pair.second));
             QVERIFY(validator);
-            QNetworkRequest request(QUrl(QStringLiteral("https://fixture.invalid/file")));
-            QVERIFY(validator->init(request));
-            QByteArray chunk = actual;
-            QVERIFY(validator->write(chunk));
-            FixtureReply reply;
-            QVERIFY(validator->validate(reply));
+            validator->init();
+            validator->write(actual);
+            const auto result = validator->validate();
+            QVERIFY2(result.has_value(), qPrintable(result.has_value() ? QString() : result.error()));
         }
     }
 
@@ -856,12 +841,11 @@ private slots:
         const QByteArray expected = QCryptographicHash::hash(
             QByteArray("different-bytes"), QCryptographicHash::Sha256);
         Net::ChecksumValidator validator(QCryptographicHash::Sha256, expected);
-        QNetworkRequest request(QUrl(QStringLiteral("https://fixture.invalid/file")));
-        QVERIFY(validator.init(request));
-        QByteArray chunk = actual;
-        QVERIFY(validator.write(chunk));
-        FixtureReply reply;
-        QVERIFY(!validator.validate(reply));
+        validator.init();
+        validator.write(actual);
+        const auto result = validator.validate();
+        QVERIFY(!result.has_value());
+        QVERIFY2(result.error().startsWith(QStringLiteral("Checksum mismatch")), qPrintable(result.error()));
     }
 };
 

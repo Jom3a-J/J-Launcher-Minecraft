@@ -178,3 +178,6 @@ ecm_add_test(FlameServerReadyFilter_test.cpp LINK_LIBRARIES Launcher_logic Qt${Q
 
 ecm_add_test(GameUpdateTaskGraph_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME GameUpdateTaskGraph)
+
+ecm_add_test(Commandline_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME Commandline)

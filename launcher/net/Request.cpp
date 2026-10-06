@@ -53,7 +53,7 @@
 #include <utility>
 #include <variant>
 
-#if defined(LAUNCHER_APPLICATION)
+#ifdef LAUNCHER_APPLICATION
 #include "Application.h"
 #include "net/ApiHeaderProxy.h"
 #include "net/ChecksumValidator.h"
@@ -64,6 +64,8 @@
 #endif
 #include "net/ByteArraySink.h"
 #include "net/FileSink.h"
+#include "net/Logging.h"
+#include "tasks/Task.h"
 
 #include "MMCTime.h"
 #include "StringUtils.h"
@@ -121,7 +123,7 @@ Request::Request(const Spec& spec) : m_options(spec.options), m_url(spec.url), m
         setObjectName(spec.name);
     }
     m_logCat = logCatForMethod(m_httpMethod);
-#if defined(LAUNCHER_APPLICATION)
+#ifdef LAUNCHER_APPLICATION
     if (spec.options.testFlag(Option::AddAPIHeaders)) {
         addHeaderProxy(std::make_unique<ApiHeaderProxy>());
     }
@@ -139,7 +141,7 @@ void Request::executeTask()
     setStatus(tr("Requesting %1").arg(Privacy::sanitizeUrl(m_url, 80)));
 
     if (m_network == nullptr) {
-#if defined(LAUNCHER_APPLICATION)
+#ifdef LAUNCHER_APPLICATION
         m_network = APPLICATION->network();
 #else
         qCCritical(m_logCat) << getUid().toString() << "No network manager set for request:" << Privacy::sanitizeUrl(m_url);
@@ -158,24 +160,21 @@ void Request::executeTask()
     }
 
     QNetworkRequest request(m_url);
-    m_state = m_sink->init(request);
-    switch (m_state) {
-        case State::Succeeded:
-            qCDebug(m_logCat) << getUid().toString() << "Request cache hit"
-                            << Privacy::sanitizeUrl(m_url);
-            emit succeeded();
-            emit finished();
-            return;
-        case State::Running:
+    auto result = m_sink->init(request);
+    if (!result) {
+        m_state = Task::State::Failed;
+        m_failReason = result.error();
+        emit failed(m_failReason);
+        emit finished();
+        return;
+    }
+    switch (*result) {
+        case Sink::InitType::Ok:
             break;
-        case State::Inactive:
-        case State::Failed:
-            m_failReason = m_sink->failReason();
-            emit failed(m_failReason);
-            emit finished();
-            return;
-        case State::AbortedByUser:
-            emit aborted();
+        case Sink::InitType::CacheHit:
+            m_state = Task::State::Succeeded;
+            qCDebug(m_logCat) << getUid().toString() << "Request cache hit" << Privacy::sanitizeUrl(m_url);
+            emit succeeded();
             emit finished();
             return;
     }
@@ -534,13 +533,12 @@ void Request::downloadFinished()
     auto data = m_reply->readAll();
     if (!data.isEmpty()) {
         qCDebug(m_logCat) << getUid().toString() << "Writing extra" << data.size() << "bytes";
-        m_state = m_sink->write(data);
-        if (m_state != State::Succeeded) {
-            qCDebug(m_logCat) << getUid().toString()
-                            << "Request failed to write:"
-                            << Privacy::sanitizeUrl(m_url);
+        auto result = m_sink->write(data);
+        if (!result) {
+            m_state = Task::State::Failed;
+            qCDebug(m_logCat) << getUid().toString() << "Request failed to write:" << Privacy::sanitizeUrl(m_url);
             m_sink->abort();
-            m_failReason = m_sink->failReason();
+            m_failReason = result.error();
             emit failed(m_failReason);
             emit finished();
             return;
@@ -548,13 +546,12 @@ void Request::downloadFinished()
     }
 
     // otherwise, finalize the whole graph
-    m_state = m_sink->finalize(*m_reply);
-    if (m_state != State::Succeeded) {
-        qCDebug(m_logCat) << getUid().toString()
-                        << "Request failed to finalize:"
-                        << Privacy::sanitizeUrl(m_url);
+    auto result = m_sink->finalize(*m_reply);
+    if (!result) {
+        m_state = Task::State::Failed;
+        qCDebug(m_logCat) << getUid().toString() << "Request failed to finalize:" << Privacy::sanitizeUrl(m_url);
         m_sink->abort();
-        m_failReason = m_sink->failReason();
+        m_failReason = result.error();
         emit failed(m_failReason);
         emit finished();
         return;
@@ -572,7 +569,7 @@ void Request::downloadReadyRead()
         auto data = m_reply->readAll();
         if (!data.isEmpty() && m_stallTimer.isActive())
             m_stallTimer.start(m_stallTimeoutMs);
-        m_state = m_sink->write(data);
+        auto result = m_sink->write(data);
         if (replyStatusCode() >= 400) {
             constexpr qsizetype MaxErrorResponseBytes = 64 * 1024;
             const qsizetype remaining = MaxErrorResponseBytes - m_errorResponse.size();
@@ -580,10 +577,11 @@ void Request::downloadReadyRead()
                 m_errorResponse.append(data.left(remaining));
             }
         }
-        if (m_state == State::Failed) {
-            qCCritical(m_logCat) << getUid().toString()
-                               << "Failed to process response chunk:"
-                               << Privacy::sanitizeText(m_sink->failReason());
+        if (!result) {
+            m_state = Task::State::Failed;
+            m_failReason = result.error();
+            qCCritical(m_logCat) << getUid().toString() << "Failed to process response chunk:"
+                                 << Privacy::sanitizeText(m_failReason);
         }
         // qDebug() << "Request" << m_url.toString() << "gained" << data.size() << "bytes";
     } else {
@@ -673,28 +671,47 @@ QNetworkReply* Request::getReply(QNetworkRequest& request)
                     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
                 }
                 return m_network->sendCustomRequest(request, verb, data);
+            } else if constexpr (std::is_same_v<T, ByteArrayFactory>) {
+                if (m_httpMethod == HttpMethod::Post && !request.hasRawHeader("Content-Type")) {
+                    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+                }
+                auto body = data();
+                if (!body) {
+                    emitFailed(body.error());
+                    return nullptr;
+                }
+                return m_network->sendCustomRequest(request, verb, body.value());
+
             } else if constexpr (std::is_same_v<T, std::monostate>) {
                 return m_network->sendCustomRequest(request, verb);
             } else if constexpr (std::is_same_v<T, DeviceFactory>) {
-                if (QIODevice* device = data(); device != nullptr) {
+                auto payload = data();
+                if (!payload) {
+                    emitFailed(payload.error());
+                    return nullptr;
+                }
+                auto device = payload.value();
+                if (device != nullptr) {
                     device->setParent(this);
-                    return m_network->sendCustomRequest(request, verb, device);
                 }
-                return m_network->sendCustomRequest(request, verb);
+                return m_network->sendCustomRequest(request, verb, device);
             } else if constexpr (std::is_same_v<T, MultiPartFactory>) {
-                if (QHttpMultiPart* multiPart = data(); multiPart != nullptr) {
-                    if (multiPart->parent() == nullptr) {
-                        multiPart->setParent(this);
-                    }
-                    return m_network->sendCustomRequest(request, verb, multiPart);
+                auto payload = data();
+                if (!payload) {
+                    emitFailed(payload.error());
+                    return nullptr;
                 }
-                return m_network->sendCustomRequest(request, verb);
+                auto multiPart = payload.value();
+                if (multiPart != nullptr) {
+                    multiPart->setParent(this);
+                }
+                return m_network->sendCustomRequest(request, verb, multiPart);
             }
         },
         m_postData);
 }
 
-#if defined(LAUNCHER_APPLICATION)
+#ifdef LAUNCHER_APPLICATION
 auto Request::makeCached(const QUrl& url, MetaEntryPtr entry, Options options) -> Ptr
 {
     auto dl = Ptr(new Request(url, options, QString("CACHE:") + Privacy::sanitizeUrl(url)));
