@@ -156,10 +156,12 @@ class GZipTest : public QObject {
 
         MMCZip::ArchiveReader reader(archivePath);
         int entriesSeen = 0;
-        const bool parsed = reader.parse([&entriesSeen](MMCZip::ArchiveReader::File* entry) {
-            ++entriesSeen;
-            return entry->skip();
-        });
+        const bool parsed = reader
+                                .parse([&entriesSeen](MMCZip::ArchiveReader::File* entry) -> Result<> {
+                                    ++entriesSeen;
+                                    return entry->skip();
+                                })
+                                .has_value();
         QVERIFY(!parsed);
         QCOMPARE(entriesSeen, 1);
     }

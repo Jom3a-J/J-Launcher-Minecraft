@@ -158,7 +158,7 @@ void Technic::SolderPackInstallTask::downloadSucceeded()
 
     setStatus(tr("Extracting modpack"));
     m_filesNetJob.reset();
-    m_extractFuture = QtConcurrent::run([this]() -> QString {
+    m_extractFuture = QtConcurrent::run([this]() -> Result<> {
         int i = 0;
         QString extractDir = FS::PathCombine(m_stagingPath, "minecraft");
         FS::ensureFolderPathExists(extractDir);
@@ -166,18 +166,21 @@ void Technic::SolderPackInstallTask::downloadSucceeded()
         while (m_modCount > i) {
             auto path = FS::PathCombine(m_outputDir.path(), QString("%1").arg(i));
             if (!MMCZip::extractDir(path, extractDir)) {
-                return tr("A downloaded Technic Solder module is corrupt or could not be extracted.");
+                return std::unexpected(tr("A downloaded Technic Solder module is corrupt or could not be extracted."));
             }
             i++;
         }
         if (!m_serverArchivePath.isEmpty()) {
-            return ModPlatform::ServerPackStaging::extractPublishedServerPack(m_serverArchivePath, m_stagingPath, "technic",
-                                                                              "Technic");
+            if (const QString error = ModPlatform::ServerPackStaging::extractPublishedServerPack(m_serverArchivePath, m_stagingPath,
+                                                                                               "technic", "Technic");
+                !error.isEmpty()) {
+                return std::unexpected(error);
+            }
         }
         return {};
     });
-    connect(&m_extractFutureWatcher, &QFutureWatcher<QString>::finished, this, &Technic::SolderPackInstallTask::extractFinished);
-    connect(&m_extractFutureWatcher, &QFutureWatcher<QString>::canceled, this, &Technic::SolderPackInstallTask::extractAborted);
+    connect(&m_extractFutureWatcher, &QFutureWatcher<Result<>>::finished, this, &Technic::SolderPackInstallTask::extractFinished);
+    connect(&m_extractFutureWatcher, &QFutureWatcher<Result<>>::canceled, this, &Technic::SolderPackInstallTask::extractAborted);
     m_extractFutureWatcher.setFuture(m_extractFuture);
 }
 
@@ -202,9 +205,8 @@ void Technic::SolderPackInstallTask::downloadAborted()
 
 void Technic::SolderPackInstallTask::extractFinished()
 {
-    const QString error = m_extractFuture.result();
-    if (!error.isEmpty()) {
-        emitFailed(error);
+    if (const auto result = m_extractFuture.result(); !result) {
+        emitFailed(result.error());
         return;
     }
 

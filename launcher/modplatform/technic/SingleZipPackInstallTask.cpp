@@ -94,22 +94,26 @@ void Technic::SingleZipPackInstallTask::downloadSucceeded()
     const QString archivePath = m_archivePath;
     const QString serverArchivePath = m_serverArchivePath;
     const QString stagingPath = m_stagingPath;
-    m_extractFuture = QtConcurrent::run(QThreadPool::globalInstance(), [archivePath, serverArchivePath, stagingPath]() -> QString {
+    m_extractFuture = QtConcurrent::run(QThreadPool::globalInstance(), [archivePath, serverArchivePath, stagingPath]() -> Result<> {
         QString failedEntry;
         if (!MMCZip::validateArchive(archivePath, &failedEntry)) {
-            return QObject::tr("The Technic provider archive is corrupt (failed integrity check at %1).")
-                .arg(failedEntry.isEmpty() ? QObject::tr("an unknown file") : failedEntry);
+            return std::unexpected(QObject::tr("The Technic provider archive is corrupt (failed integrity check at %1).")
+                                       .arg(failedEntry.isEmpty() ? QObject::tr("an unknown file") : failedEntry));
         }
-        if (!MMCZip::extractDir(archivePath, FS::PathCombine(stagingPath, "minecraft"))) {
-            return QObject::tr("Failed to extract the Technic modpack archive.");
+        if (const auto extracted = MMCZip::extractDir(archivePath, FS::PathCombine(stagingPath, "minecraft")); !extracted) {
+            return std::unexpected(QObject::tr("Failed to extract the Technic modpack archive: %1").arg(extracted.error()));
         }
         if (!serverArchivePath.isEmpty()) {
-            return ModPlatform::ServerPackStaging::extractPublishedServerPack(serverArchivePath, stagingPath, "technic", "Technic");
+            if (const QString error =
+                    ModPlatform::ServerPackStaging::extractPublishedServerPack(serverArchivePath, stagingPath, "technic", "Technic");
+                !error.isEmpty()) {
+                return std::unexpected(error);
+            }
         }
         return {};
     });
-    connect(&m_extractFutureWatcher, &QFutureWatcher<QString>::finished, this, &Technic::SingleZipPackInstallTask::extractFinished);
-    connect(&m_extractFutureWatcher, &QFutureWatcher<QString>::canceled, this, &Technic::SingleZipPackInstallTask::extractAborted);
+    connect(&m_extractFutureWatcher, &QFutureWatcher<Result<>>::finished, this, &Technic::SingleZipPackInstallTask::extractFinished);
+    connect(&m_extractFutureWatcher, &QFutureWatcher<Result<>>::canceled, this, &Technic::SingleZipPackInstallTask::extractAborted);
     m_extractFutureWatcher.setFuture(m_extractFuture);
     m_filesNetJob.reset();
 }
@@ -129,9 +133,8 @@ void Technic::SingleZipPackInstallTask::downloadProgressChanged(qint64 current, 
 
 void Technic::SingleZipPackInstallTask::extractFinished()
 {
-    const QString error = m_extractFuture.result();
-    if (!error.isEmpty()) {
-        emitFailed(error);
+    if (const auto result = m_extractFuture.result(); !result) {
+        emitFailed(result.error());
         return;
     }
     qDebug() << "Fixing permissions for extracted pack files...";

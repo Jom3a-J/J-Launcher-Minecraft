@@ -274,7 +274,7 @@ QStringList ServerDiagnostics::modIdsFromJar(const QString& path)
     if (const auto metadata = fabricArchive.goToFile(QStringLiteral("fabric.mod.json"))) {
         QJsonParseError parseError;
         const QJsonDocument document = QJsonDocument::fromJson(
-            metadata->readAll(), &parseError);
+            (*metadata)->readAll().value_or(QByteArray()), &parseError);
         if (parseError.error == QJsonParseError::NoError && document.isObject()) {
             const QJsonObject object = document.object();
             identifiers << object.value(QStringLiteral("id")).toString().toLower();
@@ -289,7 +289,7 @@ QStringList ServerDiagnostics::modIdsFromJar(const QString& path)
     if (const auto metadata = quiltArchive.goToFile(QStringLiteral("quilt.mod.json"))) {
         QJsonParseError parseError;
         const QJsonDocument document = QJsonDocument::fromJson(
-            metadata->readAll(), &parseError);
+            (*metadata)->readAll().value_or(QByteArray()), &parseError);
         if (parseError.error == QJsonParseError::NoError && document.isObject()) {
             identifiers << document.object()
                                .value(QStringLiteral("quilt_loader"))
@@ -305,7 +305,7 @@ QStringList ServerDiagnostics::modIdsFromJar(const QString& path)
              QStringLiteral("META-INF/neoforge.mods.toml") }) {
         MMCZip::ArchiveReader forgeArchive(path);
         if (const auto metadata = forgeArchive.goToFile(metadataPath)) {
-            const QString contents = QString::fromUtf8(metadata->readAll());
+            const QString contents = QString::fromUtf8((*metadata)->readAll().value_or(QByteArray()));
             static const QRegularExpression modIdExpression(
                 QStringLiteral(R"((?im)^\s*modId\s*=\s*[\"']([a-z0-9_.-]+)[\"'])"));
             auto matches = modIdExpression.globalMatch(contents);

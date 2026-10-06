@@ -1018,8 +1018,8 @@ bool PackInstallTask::extractMods(const QMap<QString, VersionMod>& toExtract,
         }
 
         qDebug() << "Extracting " + mod.file + " to " + extractToDir;
-        if (!MMCZip::extractDir(modPath, folderToExtract, extractToPath)) {
-            // assume error
+        if (const auto result = MMCZip::extractDir(modPath, folderToExtract, extractToPath); !result) {
+            qWarning() << "Failed to extract:" << result.error();
             return false;
         }
     }
@@ -1042,8 +1042,8 @@ bool PackInstallTask::extractMods(const QMap<QString, VersionMod>& toExtract,
         const auto extractToPath = FS::PathCombine(extractToDirectory, mod.decompFile);
 
         qDebug() << "Extracting " + mod.decompFile + " to " + extractToDir;
-        if (!MMCZip::extractFile(modPath, mod.decompFile, extractToPath)) {
-            qWarning() << "Failed to extract" << mod.decompFile;
+        if (const auto result = MMCZip::extractFile(modPath, mod.decompFile, extractToPath); !result) {
+            qWarning() << "Failed to extract" << mod.decompFile << "-" << result.error();
             return false;
         }
     }

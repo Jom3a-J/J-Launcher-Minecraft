@@ -52,7 +52,7 @@ int ServerInstance::requiredJavaVersion() const
 
     QString mainClass = "net.minecraft.bundler.Main";
     if (const auto manifestFile = archive.goToFile("META-INF/MANIFEST.MF")) {
-        const QString manifest = QString::fromLatin1(manifestFile->readAll());
+        const QString manifest = QString::fromLatin1((*manifestFile)->readAll().value_or(QByteArray()));
         const QRegularExpressionMatch match =
             QRegularExpression("(?m)^Main-Class:\\s*([^\\r\\n]+)").match(manifest);
         if (match.hasMatch()) {
@@ -66,7 +66,7 @@ int ServerInstance::requiredJavaVersion() const
     if (!classFile) {
         return 0;
     }
-    const QByteArray header = classFile->readAll().left(8);
+    const QByteArray header = (*classFile)->readAll().value_or(QByteArray()).left(8);
     if (header.size() != 8 || static_cast<unsigned char>(header.at(0)) != 0xCA ||
         static_cast<unsigned char>(header.at(1)) != 0xFE ||
         static_cast<unsigned char>(header.at(2)) != 0xBA ||

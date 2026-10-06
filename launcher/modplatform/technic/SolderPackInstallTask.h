@@ -82,7 +82,7 @@ class SolderPackInstallTask : public InstanceTask {
     QString m_serverArchivePath;
     QTemporaryDir m_outputDir;
     int m_modCount = 0;
-    QFuture<QString> m_extractFuture;
-    QFutureWatcher<QString> m_extractFutureWatcher;
+    QFuture<Result<>> m_extractFuture;
+    QFutureWatcher<Result<>> m_extractFutureWatcher;
 };
 }  // namespace Technic

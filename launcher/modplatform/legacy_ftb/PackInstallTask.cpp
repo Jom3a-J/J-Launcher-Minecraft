@@ -183,7 +183,7 @@ void PackInstallTask::onUnzipFinished()
     const auto result = m_extractFuture.result();
     if (!m_serverArchivePath.isEmpty()) FS::deletePath(m_serverArchivePath);
     if (!result.clientFiles) {
-        emitFailed(tr("Failed to extract the legacy FTB modpack archive."));
+        emitFailed(tr("Failed to extract the legacy FTB modpack archive: %1").arg(result.clientFiles.error()));
         return;
     }
     m_serverPackExtracted = result.publishedServerPackExtracted;

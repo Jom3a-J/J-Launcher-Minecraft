@@ -535,7 +535,7 @@ bool ServerDownloader::prefetchModernInstallerLibraries(const QString &installer
     auto profileFile = archive.goToFile(QStringLiteral("install_profile.json"));
     if (!profileFile)
         return false;
-    const QJsonDocument profileDocument = QJsonDocument::fromJson(profileFile->readAll());
+    const QJsonDocument profileDocument = QJsonDocument::fromJson((*profileFile)->readAll().value_or(QByteArray()));
     if (!profileDocument.isObject())
         return false;
     const QJsonObject profile = profileDocument.object();
@@ -549,7 +549,7 @@ bool ServerDownloader::prefetchModernInstallerLibraries(const QString &installer
     auto versionFile = archive.goToFile(QStringLiteral("version.json"));
     QString versionId = profile.value(QStringLiteral("minecraft")).toString();
     if (versionFile) {
-        const QJsonDocument versionDocument = QJsonDocument::fromJson(versionFile->readAll());
+        const QJsonDocument versionDocument = QJsonDocument::fromJson((*versionFile)->readAll().value_or(QByteArray()));
         if (versionDocument.isObject()) {
             const QJsonObject version = versionDocument.object();
             if (!version.value(QStringLiteral("id")).toString().isEmpty())
