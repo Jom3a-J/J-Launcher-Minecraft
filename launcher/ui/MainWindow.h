@@ -254,8 +254,6 @@ class MainWindow : public QMainWindow {
     QToolButton* helpMenuButton = nullptr;
     KonamiCode* secretEventFilter = nullptr;
 
-    std::shared_ptr<Setting> instanceToolbarSetting = nullptr;
-
     unique_qobject_ptr<NewsChecker> m_newsChecker;
 
     MinecraftInstance* m_selectedInstance = nullptr;

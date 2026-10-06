@@ -70,9 +70,9 @@ ContentMetadataIndex ServerModpackInstaller::loadContentMetadata(const QString &
                 metadata.provider == ModPlatform::ResourceProvider::MODRINTH
                 ? QStringLiteral("modrinth") : QStringLiteral("curseforge");
             index[metadata.filename.toCaseFolded()].append({
-                metadata.filename, metadata.hash, metadata.hash_format,
-                QStringLiteral("%1:%2:%3").arg(provider, metadata.project_id.toString(),
-                                               metadata.file_id.toString()) });
+                metadata.filename, metadata.hash, metadata.hashFormat,
+                QStringLiteral("%1:%2:%3").arg(provider, metadata.projectId.toString(),
+                                               metadata.fileId.toString()) });
         }
     }
     return index;

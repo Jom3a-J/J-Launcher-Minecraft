@@ -68,14 +68,14 @@ class ModFolderPage : public ExternalResourcesPage {
 
     void downloadMods();
     void downloadDialogFinished(int result);
-    void updateMods();
+    /// Checks the selected mods, or every mod when forceAll is set or nothing is selected.
+    void updateMods(bool includeDeps = false, std::vector<ModPlatform::IndexedVersionType> releaseTypes = {}, bool forceAll = false);
     void updateAllMods();
     void deleteModMetadata();
     void exportModMetadata();
     void changeModVersion();
 
    protected:
-    void updateModsInternal(bool includeDeps, bool forceAll);
     ModFolderModel* m_model;
     QPointer<ResourceDownload::ResourceDownloadDialog> m_downloadDialog;
 };

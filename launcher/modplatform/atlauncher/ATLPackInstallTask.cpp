@@ -321,7 +321,7 @@ QString PackInstallTask::getDirForModType(ModType type, const QString& raw)
         case ModType::TexturePackExtract:
         case ModType::ResourcePackExtract:
         case ModType::MCPC:
-            return Q_NULLPTR;
+            return nullptr;
         case ModType::Forge:
             // Forge detection happens later on, if it cannot be detected it will
             // install a jarmod component.
@@ -349,13 +349,13 @@ QString PackInstallTask::getDirForModType(ModType type, const QString& raw)
             return "shaderpacks";
         case ModType::Millenaire:
             qWarning() << "Unsupported mod type: " + raw;
-            return Q_NULLPTR;
+            return nullptr;
         case ModType::Unknown:
             emitFailed(tr("Unknown mod type: %1").arg(raw));
-            return Q_NULLPTR;
+            return nullptr;
     }
 
-    return Q_NULLPTR;
+    return nullptr;
 }
 
 QString PackInstallTask::getVersionForLoader(const QString& uid)
@@ -364,7 +364,7 @@ QString PackInstallTask::getVersionForLoader(const QString& uid)
         auto vlist = APPLICATION->metadataIndex()->get(uid);
         if (!vlist) {
             emitFailed(tr("Failed to get local metadata index for %1").arg(uid));
-            return Q_NULLPTR;
+            return nullptr;
         }
 
         vlist->waitToLoad();
@@ -398,21 +398,21 @@ QString PackInstallTask::getVersionForLoader(const QString& uid)
             }
 
             emitFailed(tr("Failed to find version for %1 loader").arg(ModPlatform::getModLoaderAsString(m_version.loader.type)));
-            return Q_NULLPTR;
+            return nullptr;
         }
         if (m_version.loader.choose) {
             // Fabric Loader doesn't depend on a given Minecraft version.
             if (m_version.loader.type == ModPlatform::ModLoaderType::Fabric) {
-                return m_support->chooseVersion(vlist, Q_NULLPTR);
+                return m_support->chooseVersion(vlist, nullptr);
             }
 
             return m_support->chooseVersion(vlist, m_version.minecraft);
         }
     }
 
-    if (m_version.loader.version == Q_NULLPTR || m_version.loader.version.isEmpty()) {
+    if (m_version.loader.version == nullptr || m_version.loader.version.isEmpty()) {
         emitFailed(tr("No loader version set for modpack!"));
-        return Q_NULLPTR;
+        return nullptr;
     }
 
     return m_version.loader.version;
@@ -821,7 +821,7 @@ void PackInstallTask::downloadMods()
             m_jobPtr->addNetAction(dl);
         } else {
             auto relpath = getDirForModType(mod.type, mod.type_raw);
-            if (relpath == Q_NULLPTR) {
+            if (relpath == nullptr) {
                 continue;
             }
 
@@ -907,7 +907,7 @@ void PackInstallTask::downloadMods()
                     m_modsToDecomp.insert(blocked.localPath, mod);
                 } else {
                     auto relpath = getDirForModType(mod.type, mod.type_raw);
-                    if (relpath == Q_NULLPTR) {
+                    if (relpath == nullptr) {
                         continue;
                     }
 
@@ -1100,7 +1100,7 @@ void PackInstallTask::install()
         switch (m_version.loader.type) {
             case ModPlatform::ModLoaderType::NeoForge: {
                 auto version = getVersionForLoader("net.neoforged");
-                if (version == Q_NULLPTR) {
+                if (version == nullptr) {
                     return;
                 }
 
@@ -1109,7 +1109,7 @@ void PackInstallTask::install()
             }
             case ModPlatform::ModLoaderType::Forge: {
                 auto version = getVersionForLoader("net.minecraftforge");
-                if (version == Q_NULLPTR) {
+                if (version == nullptr) {
                     return;
                 }
 
@@ -1118,7 +1118,7 @@ void PackInstallTask::install()
             }
             case ModPlatform::ModLoaderType::Fabric: {
                 auto version = getVersionForLoader("net.fabricmc.fabric-loader");
-                if (version == Q_NULLPTR) {
+                if (version == nullptr) {
                     return;
                 }
 
