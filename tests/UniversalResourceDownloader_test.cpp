@@ -115,8 +115,9 @@ class UniversalResourceDownloaderTest : public QObject {
         };
 
         const auto version = FlameMod::loadIndexedPackVersion(file);
-        QCOMPARE(version.fileId.toInt(), 456);
-        QCOMPARE(version.serverPackFileId.toInt(), 789);
+        QVERIFY2(version.has_value(), qPrintable(version.has_value() ? QString() : version.error()));
+        QCOMPARE(version->fileId.toInt(), 456);
+        QCOMPARE(version->serverPackFileId.toInt(), 789);
     }
 
     void scopesCurseForgeApiKeyToOfficialHttpsOrigin()

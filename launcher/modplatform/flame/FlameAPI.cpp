@@ -45,19 +45,17 @@ QString FlameAPI::getModFileChangelog(int modId, int fileId)
     netJob->addNetAction(action);
 
     QObject::connect(netJob.get(), &NetJob::succeeded, netJob.get(), [&netJob, response, &changelog] {
-        QJsonParseError parseError{};
-        QJsonDocument doc = QJsonDocument::fromJson(*response, &parseError);
-        if (parseError.error != QJsonParseError::NoError) {
-            qWarning() << "Error while parsing JSON response from Flame::FileChangelog at" << parseError.offset
-                       << "reason:" << parseError.errorString();
+        auto doc = Json::requireDocument(*response, "Flame::FileChangelog");
+        if (!doc) {
+            qWarning() << "Error while parsing JSON response from Flame::FileChangelog:" << doc.error();
             qWarning() << "Response body excerpt:"
                        << Privacy::sanitizeResponseBody(*response, 2048);
 
-            netJob->failed(parseError.errorString());
+            netJob->failed(doc.error());
             return;
         }
 
-        changelog = doc.object()["data"].toString();
+        changelog = doc->object()["data"].toString();
     });
 
     QObject::connect(netJob.get(), &NetJob::finished, &lock, &QEventLoop::quit);
@@ -79,19 +77,17 @@ QString FlameAPI::getModDescription(int modId)
     netJob->addNetAction(action);
 
     QObject::connect(netJob.get(), &NetJob::succeeded, netJob.get(), [&netJob, response, &description] {
-        QJsonParseError parseError{};
-        QJsonDocument doc = QJsonDocument::fromJson(*response, &parseError);
-        if (parseError.error != QJsonParseError::NoError) {
-            qWarning() << "Error while parsing JSON response from Flame::ModDescription at" << parseError.offset
-                       << "reason:" << parseError.errorString();
+        auto doc = Json::requireDocument(*response, "Flame::ModDescription");
+        if (!doc) {
+            qWarning() << "Error while parsing JSON response from Flame::ModDescription:" << doc.error();
             qWarning() << "Response body excerpt:"
                        << Privacy::sanitizeResponseBody(*response, 2048);
 
-            netJob->failed(parseError.errorString());
+            netJob->failed(doc.error());
             return;
         }
 
-        description = doc.object()["data"].toString();
+        description = doc->object()["data"].toString();
     });
 
     QObject::connect(netJob.get(), &NetJob::finished, &lock, &QEventLoop::quit);
@@ -257,31 +253,21 @@ std::pair<Task::Ptr, QByteArray*> FlameAPI::getModCategories() const
 QList<ModPlatform::Category> FlameAPI::loadModCategories(const QByteArray& response) const
 {
     QList<ModPlatform::Category> categories;
-    QJsonParseError parseError{};
-    QJsonDocument doc = QJsonDocument::fromJson(response, &parseError);
-    if (parseError.error != QJsonParseError::NoError) {
-        qWarning() << "Error while parsing JSON response from categories at" << parseError.offset << "reason:" << parseError.errorString();
-        qWarning() << "Response body excerpt:"
-                   << Privacy::sanitizeResponseBody(response, 2048);
-        return categories;
-    }
+    auto parse = [&response, &categories] -> Result<> {
+        TRY_INTO(const auto& doc, Json::requireObject(response).and_then([](const auto& v) { return Json::requireArray(v, "data"); }))
 
-    try {
-        auto obj = Json::requireObject(doc);
-        auto arr = Json::requireArray(obj, "data");
-
-        for (auto val : arr) {
-            auto cat = Json::requireObject(val);
-            auto id = Json::requireInteger(cat, "id");
-            auto name = Json::requireString(cat, "name");
-            categories.push_back({ name, QString::number(id) });
+        for (auto val : doc) {
+            TRY_INTO(const auto& cat, Json::requireObject(val))
+            TRY_INTO(const auto& id, Json::requireInteger(cat, "id"))
+            TRY_INTO(const auto& name, Json::requireString(cat, "name"))
+            categories.push_back({ .name = name, .id = QString::number(id) });
         }
-
-    } catch (Json::JsonException& e) {
-        qCritical() << "Failed to parse response from a version request.";
-        qCritical() << e.what();
+        return {};
+    };
+    if (auto res = parse(); !res) {
+        qCritical() << "Failed to parse response from categories:" << res.error();
         qDebug() << "CurseForge response excerpt:"
-                 << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
+                 << Privacy::sanitizeResponseBody(response, 2048);
     }
     return categories;
 };

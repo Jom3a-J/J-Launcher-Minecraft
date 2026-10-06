@@ -72,7 +72,7 @@ class BorrowedValidator final : public Validator {
     void init() override { m_inner->init(); }
     void write(const QByteArray& data) override { m_inner->write(data); }
     void abort() override { m_inner->abort(); }
-    Result validate() override { return m_inner->validate(); }
+    Result<> validate() override { return m_inner->validate(); }
 
    private:
     std::shared_ptr<Validator> m_inner;
@@ -132,7 +132,7 @@ class SegmentSink final : public Sink {
         return InitType::Ok;
     }
 
-    Result write(const QByteArray& data) override
+    Result<> write(const QByteArray& data) override
     {
         if (m_state->dropWrites)
             return {};
@@ -159,7 +159,7 @@ class SegmentSink final : public Sink {
 
     void abort() override { failAllValidators(); }
 
-    Result finalize(QNetworkReply&) override
+    Result<> finalize(QNetworkReply&) override
     {
         if (m_state->dropWrites)
             return {};

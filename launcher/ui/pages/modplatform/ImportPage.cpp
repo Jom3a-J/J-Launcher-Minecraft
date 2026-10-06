@@ -143,7 +143,11 @@ void ImportPage::updateState()
                 qDebug() << "Returned CurseForge response:"
                          << Privacy::sanitizeResponseBody(*array, 2048);
                 auto doc = Json::requireDocument(*array);
-                auto data = doc.object()["data"].toObject();
+                if (!doc) {
+                    CustomMessageBox::selectable(this, tr("Error"), doc.error(), QMessageBox::Critical)->show();
+                    return;
+                }
+                auto data = doc->object()["data"].toObject();
                 // No way to find out if it's a mod or a modpack before here
                 // And also we need to check if it ends with .zip, instead of any better way
                 auto fileName = data["fileName"].toString();

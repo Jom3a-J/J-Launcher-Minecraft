@@ -322,22 +322,15 @@ void TechnicPage::onSolderLoaded(QByteArray* responsePtr)
 
     current.versions.clear();
 
-    QJsonParseError parseError{};
-    auto doc = QJsonDocument::fromJson(response, &parseError);
-    if (parseError.error != QJsonParseError::NoError) {
-        qWarning() << "Error while parsing JSON response from Solder at" << parseError.offset << "reason:" << parseError.errorString();
+    TechnicSolder::Pack pack;
+    auto doc = Json::requireDocument(response).and_then([&pack](const auto& v) {
+        auto obj = v.object();
+        return TechnicSolder::loadPack(pack, obj);
+    });
+    if (!doc) {
+        qWarning() << "Error while parsing JSON response from Solder:" << doc.error();
         qWarning() << "Response body excerpt:"
                    << Privacy::sanitizeResponseBody(response, 2048);
-        fallback();
-        return;
-    }
-    auto obj = doc.object();
-
-    TechnicSolder::Pack pack;
-    try {
-        TechnicSolder::loadPack(pack, obj);
-    } catch (const JSONValidationError& err) {
-        qCritical() << "Couldn't parse Solder pack metadata:" << err.cause();
         fallback();
         return;
     }

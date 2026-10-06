@@ -145,16 +145,15 @@ void ListModel::requestFinished(QByteArray* responsePtr)
     m_jobPtr.reset();
     m_remainingPacks.clear();
 
-    QJsonParseError parse_error{};
-    QJsonDocument doc = QJsonDocument::fromJson(response, &parse_error);
-    if (parse_error.error != QJsonParseError::NoError) {
-        qWarning() << "Error while parsing JSON response from FTB at " << parse_error.offset << " reason: " << parse_error.errorString();
+    auto doc = Json::requireDocument(response);
+    if (!doc) {
+        qWarning() << "Error while parsing JSON response from FTB: " << doc.error();
         qWarning() << "Response body excerpt:"
                    << Privacy::sanitizeResponseBody(response, 2048);
         return;
     }
 
-    auto packs = doc.object().value("packs").toArray();
+    auto packs = doc->object().value("packs").toArray();
     for (auto pack : packs) {
         auto packId = pack.toInt();
         m_remainingPacks.append(packId);
@@ -187,8 +186,9 @@ void ListModel::requestPack()
 
 void ListModel::packRequestFinished(QByteArray* responsePtr)
 {
-    if (!m_jobPtr || m_aborted)
+    if (!m_jobPtr || m_aborted) {
         return;
+    }
 
     // NOTE(TheKodeToad): moving the response out to avoid it from being destroyed by jobPtr.reset()
     QByteArray response = std::move(*responsePtr);
@@ -196,25 +196,16 @@ void ListModel::packRequestFinished(QByteArray* responsePtr)
     m_jobPtr.reset();
     m_remainingPacks.removeOne(m_currentPack);
 
-    QJsonParseError parse_error;
-    QJsonDocument doc = QJsonDocument::fromJson(response, &parse_error);
+    FTB::Modpack pack;
+    auto doc = Json::requireDocument(response).and_then([&pack](const auto& v) {
+        auto obj = v.object();
+        return FTB::loadModpack(pack, obj);
+    });
 
-    if (parse_error.error != QJsonParseError::NoError) {
-        qWarning() << "Error while parsing JSON response from FTB at " << parse_error.offset << " reason: " << parse_error.errorString();
+    if (!doc) {
+        qWarning() << "Error while parsing JSON response from FTB: " << doc.error();
         qWarning() << "Response body excerpt:"
                    << Privacy::sanitizeResponseBody(response, 2048);
-        return;
-    }
-
-    auto obj = doc.object();
-
-    FTB::Modpack pack;
-    try {
-        FTB::loadModpack(pack, obj);
-    } catch (const JSONValidationError& e) {
-        qDebug() << "FTB response excerpt:"
-                 << Privacy::sanitizeJson(doc.toJson(QJsonDocument::Compact), 2048);
-        qWarning() << "Error while reading pack manifest from FTB: " << e.cause();
         return;
     }
 

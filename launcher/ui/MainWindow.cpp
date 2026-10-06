@@ -1024,10 +1024,19 @@ void MainWindow::processURLs(QList<QUrl> urls)
                     qDebug() << "Returned CurseForge response:"
                              << Privacy::sanitizeResponseBody(*array, 2048);
                     auto doc = Json::requireDocument(*array);
-                    auto data = doc.object()["data"].toObject();
+                    if (!doc) {
+                        CustomMessageBox::selectable(this, tr("Error"), doc.error(), QMessageBox::Critical)->show();
+                        return;
+                    }
+                    auto data = doc->object()["data"].toObject();
                     // No way to find out if it's a mod or a modpack before here
                     // And also we need to check if it ends with .zip, instead of any better way
-                    version = FlameMod::loadIndexedPackVersion(data);
+                    auto versionRes = FlameMod::loadIndexedPackVersion(data);
+                    if (!versionRes) {
+                        CustomMessageBox::selectable(this, tr("Error"), versionRes.error(), QMessageBox::Critical)->show();
+                        return;
+                    }
+                    version = versionRes.value();
                     auto fileName = version.fileName;
 
                     // Have to use ensureString then use QUrl to get proper url encoding
@@ -1040,8 +1049,6 @@ void MainWindow::processURLs(QList<QUrl> urls)
                             ->show();
                         return;
                     }
-
-                    QFileInfo dl_file(dl_url.fileName());
                 });
 
                 {  // drop stack

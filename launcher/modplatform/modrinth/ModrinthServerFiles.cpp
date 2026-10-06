@@ -31,12 +31,11 @@ QString tr(const char* text)
 
 QString addServerOnlyDownloads(const QString& indexPath, const QString& cacheRoot, NetJob* downloads)
 {
-    QJsonDocument document;
-    try {
-        document = Json::requireDocument(indexPath, "modrinth.index.json");
-    } catch (const JSONValidationError& e) {
-        return tr("Could not read the Modrinth server file manifest:\n%1").arg(e.cause());
+    const auto documentResult = Json::requireDocument(indexPath, "modrinth.index.json");
+    if (!documentResult) {
+        return tr("Could not read the Modrinth server file manifest:\n%1").arg(documentResult.error());
     }
+    const QJsonDocument& document = *documentResult;
 
     if (!downloads || !document.isObject()) {
         return tr("The Modrinth server file manifest is malformed.");
