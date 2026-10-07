@@ -92,6 +92,8 @@ void FileSink::abort()
 {
     if (m_outputFile) {
         m_outputFile->cancelWriting();
+        // close and delete the temporary file now, not whenever this sink is destroyed
+        m_outputFile.reset();
     }
     failAllValidators();
 }
