@@ -291,13 +291,13 @@ class ServerPackImportTransaction::Private final
         const QString wrapperFolder =
             archive.collectFiles(true) ? findWrapperFolder(archive.getFiles()) : QString();
 
-        const bool parsed = archive.parse([&](MMCZip::ArchiveReader::File* input) {
-            auto skipEntry = [&]() {
+        const bool parsed = archive.parse([&](MMCZip::ArchiveReader::File* input) -> Result<> {
+            auto skipEntry = [&]() -> Result<> {
                 if (!input->skip()) {
                     stageError = QObject::tr("Could not read the server-pack archive.");
-                    return false;
+                    return std::unexpected(stageError);
                 }
-                return true;
+                return {};
             };
 
             QString relativePath;
@@ -308,7 +308,7 @@ class ServerPackImportTransaction::Private final
                     stageError = QObject::tr(
                         "The server-pack contains an unsafe Windows path '%1'.")
                         .arg(input->filename());
-                    return false;
+                    return std::unexpected(stageError);
                 }
                 return skipEntry();
             }
@@ -326,7 +326,7 @@ class ServerPackImportTransaction::Private final
                 stageError = QObject::tr(
                     "The server-pack contains more than one file for '%1'.")
                     .arg(targetRelativePath);
-                return false;
+                return std::unexpected(stageError);
             }
             seenTargets.insert(targetKey);
 
@@ -336,30 +336,29 @@ class ServerPackImportTransaction::Private final
                 stageError = QObject::tr(
                     "Could not create staging folders for '%1'.")
                     .arg(relativePath);
-                return false;
+                return std::unexpected(stageError);
             }
 
-            int readStatus = ARCHIVE_OK;
-            const QByteArray data = input->readAll(&readStatus);
-            if (readStatus != ARCHIVE_OK && readStatus != ARCHIVE_EOF) {
+            const auto data = input->readAll();
+            if (!data) {
                 stageError = QObject::tr(
                     "Could not read '%1' from the server-pack archive.")
                     .arg(relativePath);
-                return false;
+                return std::unexpected(stageError);
             }
 
             QSaveFile stagedFile(stagedPath);
             if (!stagedFile.open(QIODevice::WriteOnly)
-                || stagedFile.write(data) != data.size()
+                || stagedFile.write(*data) != data->size()
                 || !stagedFile.commit()) {
                 stageError = QObject::tr("Could not stage '%1'.").arg(relativePath);
-                return false;
+                return std::unexpected(stageError);
             }
 
             m_files.append({ targetRelativePath, stagedPath });
             ++extractedCount;
-            return true;
-        });
+            return {};
+        }).has_value();
 
         if (!parsed) {
             if (error) {

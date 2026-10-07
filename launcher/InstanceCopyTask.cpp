@@ -87,31 +87,13 @@ void InstanceCopyTask::executeTask()
 
                     qDebug() << "attempting to run with privelage";
 
-                    QEventLoop loop;
-                    bool got_priv_results = false;
-
-                    connect(&folderLink, &FS::create_link::finishedPrivileged, this, [&got_priv_results, &loop](bool gotResults) {
-                        if (!gotResults) {
-                            qDebug() << "Privileged run exited without results!";
-                        }
-                        got_priv_results = gotResults;
-                        loop.quit();
-                    });
-                    folderLink.runPrivileged();
-
-                    loop.exec();  // wait for the finished signal
-
-                    for (auto result : folderLink.getResults()) {
-                        if (result.err_value != 0) {
-                            there_were_errors = true;
-                        }
-                    }
+                    bool linked = folderLink.runPrivilegedAndWait();
 
                     if (savesCopy) {
-                        there_were_errors |= !(*savesCopy)();
+                        linked &= (*savesCopy)();
                     }
 
-                    return got_priv_results && !there_were_errors;
+                    return linked;
                 }
 #else
                 qDebug() << "Link Failed!" << folderLink.getOSError().value() << folderLink.getOSError().message().c_str();
@@ -158,25 +140,31 @@ void InstanceCopyTask::copyFinished()
     }
     if (m_useLinks) {
         inst->addLinkedInstanceId(m_origInstance->id());
-        auto allowed_symlinks_file = QFileInfo(FS::PathCombine(inst->gameRoot(), "allowed_symlinks.txt"));
+        auto allowedSymlinksFile = QFileInfo(FS::PathCombine(inst->gameRoot(), "allowed_symlinks.txt"));
 
-        QByteArray allowed_symlinks;
-        if (allowed_symlinks_file.exists()) {
-            allowed_symlinks.append(FS::read(allowed_symlinks_file.filePath()));
-            if (allowed_symlinks.right(1) != "\n")
-                allowed_symlinks.append("\n");  // we want to be on a new line
+        QByteArray allowedSymlinks;
+        if (allowedSymlinksFile.exists()) {
+            auto res = FS::read(allowedSymlinksFile.filePath());
+            if (!res) {
+                qCritical() << "Failed to read symlink" << res.error();
+            } else {
+                allowedSymlinks.append(res.value());
+                if (allowedSymlinks.right(1) != "\n") {
+                    allowedSymlinks.append("\n");  // we want to be on a new line
+                }
+            }
         }
-        allowed_symlinks.append(m_origInstance->gameRoot().toUtf8());
-        allowed_symlinks.append("\n");
-        if (allowed_symlinks_file.isSymLink())
+        allowedSymlinks.append(m_origInstance->gameRoot().toUtf8());
+        allowedSymlinks.append("\n");
+        if (allowedSymlinksFile.isSymLink()) {
             FS::deletePath(
-                allowed_symlinks_file
+                allowedSymlinksFile
                     .filePath());  // we dont want to modify the original. also make sure the resulting file is not itself a link.
+        }
 
-        try {
-            FS::write(allowed_symlinks_file.filePath(), allowed_symlinks);
-        } catch (const FS::FileSystemException& e) {
-            qCritical() << "Failed to write symlink :" << e.cause();
+        auto res = FS::write(allowedSymlinksFile.filePath(), allowedSymlinks);
+        if (!res) {
+            qCritical() << "Failed to write symlink :" << res.error();
         }
     }
 
@@ -186,7 +174,6 @@ void InstanceCopyTask::copyFinished()
 void InstanceCopyTask::copyAborted()
 {
     emitFailed(tr("Instance folder copy has been aborted."));
-    return;
 }
 
 bool InstanceCopyTask::abort()

@@ -85,7 +85,8 @@ ModPage::ModPage(ResourceDownloadDialog* dialog,
                  QStringList loaderNames)
     : ResourcePage(dialog, instance, prepareModDescriptor(resourceType), std::move(p)), m_api(api), m_resourceType(resourceType)
 {
-    auto* model = new ModModel(instance, api, debugName(), metaEntryBase(), resourceType, std::move(loaderNames));
+    auto* model = new ModModel(instance, getDialog()->getBaseModel(), api, debugName(), metaEntryBase(), resourceType,
+                               std::move(loaderNames));
     m_model = model;
     m_ui->packView->setModel(m_model);
 
@@ -140,6 +141,11 @@ void ModPage::filterMods()
 
 void ModPage::triggerSearch()
 {
+    if (inProjectMode() && getCurrentPack()) {
+        reloadCurrentVersions();
+        return;
+    }
+
     auto changed = m_filterWidget->changed();
     m_filter = m_filterWidget->getFilter();
     m_ui->packView->selectionModel()->setCurrentIndex({}, QItemSelectionModel::SelectionFlag::ClearAndSelect);
@@ -150,6 +156,14 @@ void ModPage::triggerSearch()
 
     static_cast<ModModel*>(m_model)->searchWithTerm(getSearchTerm(), m_ui->sortByBox->currentData().toUInt(), changed);
     m_fetchProgress.watch(m_model->activeSearchJob().get());
+}
+
+void ModPage::openProject(const QVariant& projectID)
+{
+    ResourcePage::openProject(projectID);
+
+    m_filterWidget->setLoaderVersionOnly(true);
+    m_ui->resourceFilterButton->setVisible(true);
 }
 
 void ModPage::prepareProviderCategories()

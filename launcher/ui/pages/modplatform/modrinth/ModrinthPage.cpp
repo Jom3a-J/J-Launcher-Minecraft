@@ -35,7 +35,6 @@
  */
 
 #include "ModrinthPage.h"
-#include "Version.h"
 #include "modplatform/ModIndex.h"
 #include "modplatform/modrinth/ModrinthAPI.h"
 #include "ui/dialogs/CustomMessageBox.h"
@@ -58,12 +57,10 @@ ModrinthPage::ModrinthPage(NewInstanceDialog* dialog, QWidget* parent)
     , m_ui(new Ui::ModrinthPage)
     , m_dialog(dialog)
     , m_model(new Modrinth::ModpackListModel(this))
-    , m_fetch_progress(this, false)
+    , m_fetchProgress(this, false)
 {
     m_ui->setupUi(this);
     createFilterWidget();
-
-    m_ui->searchEdit->installEventFilter(this);
 
     m_ui->packView->setModel(m_model);
 
@@ -76,16 +73,23 @@ ModrinthPage::ModrinthPage(NewInstanceDialog* dialog, QWidget* parent)
     m_ui->versionSelectionBox->view()->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     m_ui->versionSelectionBox->view()->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
 
-    m_search_timer.setTimerType(Qt::TimerType::CoarseTimer);
-    m_search_timer.setSingleShot(true);
+    m_searchTimer.setTimerType(Qt::TimerType::CoarseTimer);
+    m_searchTimer.setSingleShot(true);
 
-    connect(&m_search_timer, &QTimer::timeout, this, &ModrinthPage::triggerSearch);
+    connect(&m_searchTimer, &QTimer::timeout, this, &ModrinthPage::triggerSearch);
 
-    m_fetch_progress.hideIfInactive(true);
-    m_fetch_progress.setFixedHeight(24);
-    m_fetch_progress.progressFormat("");
+    connect(m_ui->searchEdit, &QLineEdit::textEdited, this, [this] {
+        if (m_searchTimer.isActive()) {
+            m_searchTimer.stop();
+        }
+        m_searchTimer.start(350);
+    });
 
-    m_ui->verticalLayout->insertWidget(1, &m_fetch_progress);
+    m_fetchProgress.hideIfInactive(true);
+    m_fetchProgress.setFixedHeight(24);
+    m_fetchProgress.progressFormat("");
+
+    m_ui->verticalLayout->insertWidget(1, &m_fetchProgress);
 
     m_ui->sortByBox->addItem(tr("Sort by Relevance"));
     m_ui->sortByBox->addItem(tr("Sort by Total Downloads"));
@@ -123,24 +127,6 @@ void ModrinthPage::openedImpl()
     triggerSearch();
 }
 
-bool ModrinthPage::eventFilter(QObject* watched, QEvent* event)
-{
-    if (watched == m_ui->searchEdit && event->type() == QEvent::KeyPress) {
-        auto* keyEvent = static_cast<QKeyEvent*>(event);
-        if (keyEvent->key() == Qt::Key_Return) {
-            this->triggerSearch();
-            keyEvent->accept();
-            return true;
-        }
-        if (m_search_timer.isActive()) {
-            m_search_timer.stop();
-        }
-
-        m_search_timer.start(350);
-    }
-    return QObject::eventFilter(watched, event);
-}
-
 void ModrinthPage::onSelectionChanged(QModelIndex curr, [[maybe_unused]] QModelIndex prev)
 {
     m_ui->versionSelectionBox->clear();
@@ -154,6 +140,10 @@ void ModrinthPage::onSelectionChanged(QModelIndex curr, [[maybe_unused]] QModelI
     }
 
     m_current = m_model->data(curr, Qt::UserRole).value<ModPlatform::IndexedPack::Ptr>();
+    if (!m_current) {
+        return;
+    }
+
     auto name = m_current->name;
 
     if (m_dialog->isServerModpackMode()) {
@@ -175,31 +165,40 @@ void ModrinthPage::onSelectionChanged(QModelIndex curr, [[maybe_unused]] QModelI
 
     if (!m_current->extraDataLoaded) {
         qDebug() << "Loading modrinth modpack information";
-        ResourceAPI::Callback<ModPlatform::IndexedPack::Ptr> callbacks;
 
         auto id = m_current->addonId;
-        callbacks.on_fail = [this](const QString& reason, int) {
-            CustomMessageBox::selectable(this, tr("Error"), reason, QMessageBox::Critical)->exec();
-        };
-        callbacks.on_succeed = [this, id, curr](auto& pack) {
+        auto [job, response] = ModrinthAPI::get().getProjectTask(m_current->addonId.toString(), true);
+
+        QObject::connect(job.get(), &NetJob::succeeded, job.get(), [this, id, curr, response] {
             if (id != m_current->addonId) {
                 return;  // wrong request?
             }
 
-            QVariant current_updated;
-            current_updated.setValue(pack);
+            // Preserve any version data already loaded into the pack, since the project request only carries the pack info
+            auto versions = std::move(m_current->versions);
+            auto versionsLoaded = m_current->versionsLoaded;
+            *m_current = *response;
+            m_current->versions = std::move(versions);
+            m_current->versionsLoaded = versionsLoaded;
 
-            if (!m_model->setData(curr, current_updated, Qt::UserRole)) {
+            // m_current now holds the loaded pack; response is a raw pointer the request owns,
+            // and the model only accepts an IndexedPack::Ptr (anything else would store null).
+            QVariant currentUpdated;
+            currentUpdated.setValue(m_current);
+
+            if (!m_model->setData(curr, currentUpdated, Qt::UserRole)) {
                 qWarning() << "Failed to cache extra info for the current pack!";
             }
 
             suggestCurrent();
             updateUI();
-        };
-        if (auto netJob = ModrinthAPI::get().getProjectInfo({ m_current }, std::move(callbacks)); netJob) {
-            m_job = netJob;
-            m_job->start();
-        }
+        });
+        QObject::connect(job.get(), &NetJob::failed, job.get(), [this](const QString& reason) {
+            CustomMessageBox::selectable(this, tr("Error"), reason, QMessageBox::Critical)->exec();
+        });
+
+        m_job = job;
+        m_job->start();
 
     } else {
         updateUI();
@@ -212,7 +211,7 @@ void ModrinthPage::onSelectionChanged(QModelIndex curr, [[maybe_unused]] QModelI
 
         auto addonId = m_current->addonId;
         // Use default if no callbacks are set
-        callbacks.on_succeed = [this, curr, addonId](auto& doc) {
+        callbacks.onSucceed = [this, curr, addonId](auto& doc) {
             if (addonId != m_current->addonId) {
                 return;  // wrong request
             }
@@ -225,33 +224,26 @@ void ModrinthPage::onSelectionChanged(QModelIndex curr, [[maybe_unused]] QModelI
                 }
                 return false;
             };
-#if QT_VERSION >= QT_VERSION_CHECK(6, 1, 0)
             m_current->versions.removeIf(pred);
-#else
-            for (auto it = m_current->versions.begin(); it != m_current->versions.end();)
-                if (pred(*it))
-                    it = m_current->versions.erase(it);
-                else
-                    ++it;
-#endif
             for (const auto& version : m_current->versions) {
                 m_ui->versionSelectionBox->addItem(version.getVersionDisplayString(), QVariant(version.fileId));
             }
 
-            QVariant current_updated;
-            current_updated.setValue(m_current);
+            QVariant currentUpdated;
+            currentUpdated.setValue(m_current);
 
-            if (!m_model->setData(curr, current_updated, Qt::UserRole)) {
+            if (!m_model->setData(curr, currentUpdated, Qt::UserRole)) {
                 qWarning() << "Failed to cache versions for the current pack!";
             }
 
             suggestCurrent();
         };
-        callbacks.on_fail = [this](const QString& reason, int) {
+        callbacks.onFail = [this](const QString& reason, int) {
             CustomMessageBox::selectable(this, tr("Error"), reason, QMessageBox::Critical)->exec();
         };
 
-        auto netJob = ModrinthAPI::get().getProjectVersions({ m_current, {}, {}, ModPlatform::ResourceType::Modpack }, std::move(callbacks));
+        auto netJob = ModrinthAPI::get().getProjectVersions(
+            { .pack = m_current, .mcVersions = {}, .loaders = {}, .resourceType = ModPlatform::ResourceType::Modpack }, callbacks);
 
         m_job2 = netJob;
         m_job2->start();
@@ -259,7 +251,7 @@ void ModrinthPage::onSelectionChanged(QModelIndex curr, [[maybe_unused]] QModelI
     } else {
         for (const auto& version : m_current->versions) {
             if (!version.version.contains(version.version)) {
-                m_ui->versionSelectionBox->addItem(QString("%1 - %2").arg(version.version, version.version_number),
+                m_ui->versionSelectionBox->addItem(QString("%1 - %2").arg(version.version, version.versionNumber),
                                                    QVariant(version.fileId));
             } else {
                 m_ui->versionSelectionBox->addItem(version.version, QVariant(version.fileId));
@@ -274,10 +266,11 @@ void ModrinthPage::updateUI()
 {
     QString text = "";
 
-    if (m_current->websiteUrl.isEmpty())
+    if (m_current->websiteUrl.isEmpty()) {
         text = m_current->name;
-    else
+    } else {
         text = "<a href=\"" + m_current->websiteUrl + "\">" + m_current->name + "</a>";
+    }
 
     if (!m_current->authors.empty()) {
         auto authorToStr = [](ModPlatform::ModpackAuthor& author) {
@@ -356,12 +349,12 @@ void ModrinthPage::suggestCurrent()
 
     for (auto& ver : m_current->versions) {
         if (ver.fileId == m_selectedVersion) {
-            QMap<QString, QString> extra_info;
-            extra_info.insert("pack_id", m_current->addonId.toString());
-            extra_info.insert("pack_version_id", ver.fileId.toString());
+            QMap<QString, QString> extraInfo;
+            extraInfo.insert("pack_id", m_current->addonId.toString());
+            extraInfo.insert("pack_version_id", ver.fileId.toString());
 
             m_dialog->setSuggestedPack(m_current->name, ver.version,
-                                       new InstanceImportTask(ver.downloadUrl, true, this, std::move(extra_info)));
+                                       new InstanceImportTask(ver.downloadUrl, true, this, std::move(extraInfo)));
             QString editedLogoName = "modrinth_" + m_current->logoName;
             m_model->getLogo(m_current->logoName, m_current->logoUrl,
                              [this, editedLogoName](const QString& logo) { m_dialog->setSuggestedIconFromFile(logo, editedLogoName); });
@@ -378,8 +371,27 @@ void ModrinthPage::triggerSearch()
     m_ui->packDescription->clear();
     m_ui->versionSelectionBox->clear();
     bool filterChanged = m_filterWidget->changed();
-    m_model->searchWithTerm(m_ui->searchEdit->text(), m_ui->sortByBox->currentIndex(), m_filterWidget->getFilter(), filterChanged);
-    m_fetch_progress.watch(m_model->activeSearchJob().get());
+    const auto searchTerm = m_ui->searchEdit->text();
+    m_model->searchWithTerm(searchTerm, m_ui->sortByBox->currentIndex(), m_filterWidget->getFilter(), filterChanged);
+    m_fetchProgress.watch(m_model->activeSearchJob().get());
+
+    if (searchTerm.startsWith('#') && !searchTerm.mid(1).trimmed().isEmpty()) {
+        const auto selectProject = [this, searchTerm] {
+            if (m_ui->searchEdit->text() != searchTerm || m_model->rowCount({}) != 1) {
+                return;
+            }
+
+            const auto index = m_model->index(0, 0);
+            m_ui->packView->setCurrentIndex(index);
+            m_ui->packView->scrollTo(index);
+        };
+
+        if (m_model->hasActiveSearchJob()) {
+            connect(m_model->activeSearchJob().get(), &Task::finished, this, selectProject);
+        } else {
+            selectProject();
+        }
+    }
 }
 
 void ModrinthPage::onVersionSelectionChanged(int index)

@@ -15,7 +15,7 @@
 
 #include "net/ChecksumValidator.h"
 
-#include "net/ApiDownload.h"
+#include "net/ApiRequest.h"
 #include "net/NetJob.h"
 #include "logs/Privacy.h"
 
@@ -101,13 +101,11 @@ void ModrinthCreationTask::executeTask()
         parseManifest(oldIndexPath, oldFiles, false, false);
 
         // Let's remove all duplicated, identical resources!
-        auto filesIterator = m_files.begin();
-    begin:
-        while (filesIterator != m_files.end()) {
+        for (auto filesIterator = m_files.begin(); filesIterator != m_files.end();) {
             const auto& file = *filesIterator;
+            bool erased = false;
 
-            auto oldFilesIterator = oldFiles.begin();
-            while (oldFilesIterator != oldFiles.end()) {
+            for (auto oldFilesIterator = oldFiles.begin(); oldFilesIterator != oldFiles.end();) {
                 const auto& oldFile = *oldFilesIterator;
 
                 if (oldFile.hash == file.hash) {
@@ -115,13 +113,16 @@ void ModrinthCreationTask::executeTask()
                              << "from list of downloads";
                     filesIterator = m_files.erase(filesIterator);
                     oldFilesIterator = oldFiles.erase(oldFilesIterator);
-                    goto begin;  // Sorry :c
+                    erased = true;
+                    break;
                 }
 
-                oldFilesIterator++;
+                ++oldFilesIterator;
             }
 
-            filesIterator++;
+            if (!erased) {
+                ++filesIterator;
+            }
         }
 
         QDir oldMinecraftDir(inst->gameRoot());
@@ -342,152 +343,149 @@ void ModrinthCreationTask::createInstance()
     connect(downloadMods.get(), &NetJob::stepProgress, this, &ModrinthCreationTask::propagateStepProgress);
 
     setStatus(tr("Downloading mods..."));
-    downloadMods->start();
     m_task = downloadMods;
+    setAbortable(true);
+    downloadMods->start();
 }
 
 bool ModrinthCreationTask::parseManifest(const QString& indexPath, std::vector<File>& files, bool setInternalData, bool showOptionalDialog)
 {
-    try {
-        auto doc = Json::requireDocument(indexPath);
-        auto obj = Json::requireObject(doc, "modrinth.index.json");
-        int formatVersion = Json::requireInteger(obj, "formatVersion", "modrinth.index.json");
-        if (formatVersion == 1) {
-            auto game = Json::requireString(obj, "game", "modrinth.index.json");
-            if (game != "minecraft") {
-                throw JSONValidationError("Unknown game: " + game);
-            }
-
-            if (setInternalData) {
-                if (m_managedVersionId.isEmpty()) {
-                    m_managedVersionId = obj.value("versionId").toString();
-                }
-                m_managedName = obj.value("name").toString();
-            }
-
-            auto jsonFiles = Json::requireIsArrayOf<QJsonObject>(obj, "files", "modrinth.index.json");
-            std::vector<File> optionalFiles;
-            for (const auto& modInfo : jsonFiles) {
-                File file;
-                file.path = Json::requireString(modInfo, "path").replace("\\", "/");
-
-                auto envValue = modInfo["env"];
-                // 'env' field is optional. Explicit values must be valid so malformed
-                // provider metadata cannot silently change the projection.
-                if (!envValue.isUndefined() && !envValue.isObject()) {
-                    throw JSONValidationError("'env' must be an object");
-                }
-                auto env = envValue.toObject();
-                if (!env.isEmpty()) {
-                    const auto readSupport = [&env](const QString& key, const QString& fallback) {
-                        if (!env.contains(key)) {
-                            return fallback;
-                        }
-                        const auto value = env.value(key);
-                        if (!value.isString()) {
-                            throw JSONValidationError("'env." + key + "' must be a string");
-                        }
-                        const auto support = value.toString();
-                        if (support != "required" && support != "optional" && support != "unsupported") {
-                            throw JSONValidationError("Unsupported Modrinth environment value: " + support);
-                        }
-                        return support;
-                    };
-                    QString support = readSupport("client", "required");
-                    if (support == "unsupported") {
-                        continue;
-                    }
-                    if (support == "optional") {
-                        file.required = false;
-                    }
-                }
-
-                QJsonObject hashes = Json::requireObject(modInfo, "hashes");
-                file.hash = QByteArray::fromHex(Json::requireString(hashes, "sha512").toLatin1());
-                file.hashAlgorithm = QCryptographicHash::Sha512;
-
-                // Optional, and only ever a hint about how to fetch the file. A pack that omits it
-                // or gets it wrong still installs, one ordinary request at a time.
-                file.fileSize = Modrinth::parseFileSize(modInfo.value(QStringLiteral("fileSize")));
-
-                // Do not use requireUrl, which uses StrictMode, instead use QUrl's default TolerantMode
-                // (as Modrinth seems to incorrectly handle spaces)
-
-                auto downloadArr = modInfo["downloads"].toArray();
-                for (auto download : downloadArr) {
-                    qWarning() << Privacy::sanitizeUrl(download.toString());
-                    bool isLast = download.toString() == downloadArr.last().toString();
-
-                    auto downloadUrl = QUrl(download.toString());
-
-                    if (!downloadUrl.isValid()) {
-                        qDebug()
-                            << QString("Download URL (%1) for %2 is not a correctly formatted URL").arg(downloadUrl.toString(), file.path);
-                        if (isLast && file.downloads.isEmpty()) {
-                            throw JSONValidationError(tr("Download URL for %1 is not a correctly formatted URL").arg(file.path));
-                        }
-                    } else {
-                        file.downloads.push_back(downloadUrl);
-                    }
-                }
-
-                (file.required ? files : optionalFiles).push_back(file);
-            }
-
-            if (!optionalFiles.empty()) {
-                if (showOptionalDialog) {
-                    QStringList oFiles;
-                    for (const auto& file : optionalFiles) {
-                        oFiles.push_back(file.path);
-                    }
-                    OptionalModDialog optionalModDialog(m_parent, oFiles);
-                    if (optionalModDialog.exec() == QDialog::Rejected) {
-                        emitAborted();
-                        return false;
-                    }
-
-                    auto selectedMods = optionalModDialog.getResult();
-                    for (auto file : optionalFiles) {
-                        if (selectedMods.contains(file.path)) {
-                            file.required = true;
-                        } else {
-                            file.path += ".disabled";
-                        }
-                        files.push_back(file);
-                    }
-                } else {
-                    for (auto file : optionalFiles) {
-                        file.path += ".disabled";
-                        files.push_back(file);
-                    }
-                }
-            }
-            if (setInternalData) {
-                auto dependencies = Json::requireObject(obj, "dependencies", "modrinth.index.json");
-                for (auto it = dependencies.begin(), end = dependencies.end(); it != end; ++it) {
-                    QString name = it.key();
-                    if (name == "minecraft") {
-                        m_minecraftVersion = Json::requireString(*it, "Minecraft version");
-                    } else if (name == "fabric-loader") {
-                        m_fabricVersion = Json::requireString(*it, "Fabric Loader version");
-                    } else if (name == "quilt-loader") {
-                        m_quiltVersion = Json::requireString(*it, "Quilt Loader version");
-                    } else if (name == "forge") {
-                        m_forgeVersion = Json::requireString(*it, "Forge version");
-                    } else if (name == "neoforge") {
-                        m_neoForgeVersion = Json::requireString(*it, "NeoForge version");
-                    } else {
-                        throw JSONValidationError("Unknown dependency type: " + name);
-                    }
-                }
-            }
-        } else {
-            throw JSONValidationError(QStringLiteral("Unknown format version: %s").arg(formatVersion));
+    std::vector<File> optionalFiles;
+    auto parse = [this, &indexPath, &setInternalData, &files, &optionalFiles] -> Result<> {
+        TRY_INTO(const auto& obj, Json::requireObject(indexPath, "modrinth.index.json"))
+        TRY_INTO(const auto& formatVersion, Json::requireInteger(obj, "formatVersion", "modrinth.index.json"))
+        if (formatVersion != 1) {
+            return std::unexpected(QString("Unknown format version: %1").arg(formatVersion));
+        }
+        TRY_INTO(const auto& game, Json::requireString(obj, "game", "modrinth.index.json"))
+        if (game != "minecraft") {
+            return std::unexpected("Unknown game: " + game);
         }
 
-    } catch (const JSONValidationError& e) {
-        emitFailed(tr("Could not understand pack index:\n") + e.cause());
+        if (setInternalData) {
+            if (m_managedVersionId.isEmpty()) {
+                m_managedVersionId = obj.value("versionId").toString();
+            }
+            m_managedName = obj.value("name").toString();
+        }
+
+        TRY_INTO(const auto& jsonFiles, Json::requireIsArrayOf<QJsonObject>(obj, "files", "modrinth.index.json"))
+        for (const auto& modInfo : jsonFiles) {
+            File file;
+            TRY_INTO(auto path, Json::requireString(modInfo, "path"))
+            file.path = path.replace("\\", "/");
+
+            auto envValue = modInfo["env"];
+            // 'env' field is optional. Explicit values must be valid so malformed
+            // provider metadata cannot silently change the projection.
+            if (!envValue.isUndefined() && !envValue.isObject()) {
+                return std::unexpected(QStringLiteral("'env' must be an object"));
+            }
+            auto env = envValue.toObject();
+            if (!env.isEmpty()) {
+                QString support = QStringLiteral("required");
+                if (env.contains("client")) {
+                    const auto value = env.value("client");
+                    if (!value.isString()) {
+                        return std::unexpected(QStringLiteral("'env.client' must be a string"));
+                    }
+                    support = value.toString();
+                    if (support != "required" && support != "optional" && support != "unsupported") {
+                        return std::unexpected("Unsupported Modrinth environment value: " + support);
+                    }
+                }
+                if (support == "unsupported") {
+                    continue;
+                }
+                if (support == "optional") {
+                    file.required = false;
+                }
+            }
+
+            TRY_INTO(file.hash, Json::requireObject(modInfo, "hashes")
+                                    .and_then([](const auto& v) { return Json::requireString(v, "sha512"); })
+                                    .and_then([](const auto& v) -> Result<QByteArray> { return QByteArray::fromHex(v.toLatin1()); }))
+            file.hashAlgorithm = QCryptographicHash::Sha512;
+
+            // Optional, and only ever a hint about how to fetch the file. A pack that omits it
+            // or gets it wrong still installs, one ordinary request at a time.
+            file.fileSize = Modrinth::parseFileSize(modInfo.value(QStringLiteral("fileSize")));
+
+            // Do not use requireUrl, which uses StrictMode, instead use QUrl's default TolerantMode
+            // (as Modrinth seems to incorrectly handle spaces)
+
+            auto downloadArr = modInfo["downloads"].toArray();
+            for (auto download : downloadArr) {
+                qWarning() << Privacy::sanitizeUrl(download.toString());
+                bool isLast = download.toString() == downloadArr.last().toString();
+
+                auto downloadUrl = QUrl(download.toString());
+
+                if (!downloadUrl.isValid()) {
+                    qDebug() << QString("Download URL (%1) for %2 is not a correctly formatted URL").arg(downloadUrl.toString(), file.path);
+                    if (isLast && file.downloads.isEmpty()) {
+                        return std::unexpected(tr("Download URL for %1 is not a correctly formatted URL").arg(file.path));
+                    }
+                } else {
+                    file.downloads.push_back(downloadUrl);
+                }
+            }
+
+            (file.required ? files : optionalFiles).push_back(file);
+        }
+
+        if (setInternalData) {
+            TRY_INTO(const auto& dependencies, Json::requireObject(obj, "dependencies", "modrinth.index.json"))
+            for (auto it = dependencies.begin(), end = dependencies.end(); it != end; ++it) {
+                QString name = it.key();
+                if (name == "minecraft") {
+                    TRY_INTO(m_minecraftVersion, Json::requireString(*it, "Minecraft version"))
+                } else if (name == "fabric-loader") {
+                    TRY_INTO(m_fabricVersion, Json::requireString(*it, "Fabric Loader version"))
+                } else if (name == "quilt-loader") {
+                    TRY_INTO(m_quiltVersion, Json::requireString(*it, "Quilt Loader version"))
+                } else if (name == "forge") {
+                    TRY_INTO(m_forgeVersion, Json::requireString(*it, "Forge version"))
+                } else if (name == "neoforge") {
+                    TRY_INTO(m_neoForgeVersion, Json::requireString(*it, "NeoForge version"))
+                } else {
+                    return std::unexpected("Unknown dependency type: " + name);
+                }
+            }
+        }
+        return {};
+    };
+    if (auto res = parse(); !res) {
+        emitFailed(tr("Could not understand pack index:\n") + res.error());
         return false;
+    }
+    if (!optionalFiles.empty()) {
+        if (showOptionalDialog) {
+            QStringList oFiles;
+            for (const auto& file : optionalFiles) {
+                oFiles.push_back(file.path);
+            }
+            OptionalModDialog optionalModDialog(m_parent, oFiles);
+            if (optionalModDialog.exec() == QDialog::Rejected) {
+                emitAborted();
+                return false;
+            }
+
+            auto selectedMods = optionalModDialog.getResult();
+            for (auto file : optionalFiles) {
+                if (selectedMods.contains(file.path)) {
+                    file.required = true;
+                } else {
+                    file.path += ".disabled";
+                }
+                files.push_back(file);
+            }
+        } else {
+            for (auto file : optionalFiles) {
+                file.path += ".disabled";
+                files.push_back(file);
+            }
+        }
     }
 
     return true;
@@ -495,10 +493,9 @@ bool ModrinthCreationTask::parseManifest(const QString& indexPath, std::vector<F
 
 void ModrinthCreationTask::ensureMetaLoop()
 {
-    // Mod metadata lives in the mods index folder, next to the mods it describes (the same place
-    // ModFolderModel and the CurseForge installer use).
-    const QDir folder = FS::PathCombine(m_stagingPath, m_rootPath, "mods", ".index");
+    const QDir folder = FS::PathCombine(m_newInstance->modsRoot(), ".index");
     auto ensureMetadataTask = makeShared<EnsureMetadataTask>(m_resources, folder, ModPlatform::ResourceProvider::MODRINTH);
+    ensureMetadataTask->setUpdateLock(true);
     connect(ensureMetadataTask.get(), &Task::succeeded, this, &ModrinthCreationTask::finishInstall);
     connect(ensureMetadataTask.get(), &Task::failed, this, &ModrinthCreationTask::emitFailed);
     connect(ensureMetadataTask.get(), &Task::aborted, this, &ModrinthCreationTask::emitAborted);
@@ -532,9 +529,10 @@ bool ModrinthCreationTask::promptForUntrustedMods()
     const QDir mcDir{ FS::PathCombine(m_stagingPath, m_rootPath) };
     const QString modsPath{ FS::PathCombine(m_stagingPath, m_rootPath, "mods") };
     if (QDir(modsPath).exists()) {
-        QDirIterator iter{ modsPath, QDir::Files, QDirIterator::Subdirectories | QDirIterator::FollowSymlinks };
-        while (iter.hasNext()) {
-            untrustedMods.append(mcDir.relativeFilePath(iter.next()));
+        for (const auto& entry :
+             QDirListing(modsPath, QDirListing::IteratorFlag::FilesOnly | QDirListing::IteratorFlag::ResolveSymlinks |
+                                       QDirListing::IteratorFlag::FollowDirSymlinks | QDirListing::IteratorFlag::Recursive)) {
+            untrustedMods.append(mcDir.relativeFilePath(entry.absoluteFilePath()));
         }
     }
 
@@ -544,6 +542,21 @@ bool ModrinthCreationTask::promptForUntrustedMods()
 
     UntrustedModsDialog dialog{ untrustedMods, m_parent };
     return dialog.exec() == QDialog::Accepted;
+}
+
+ModrinthCreationTask::ModrinthCreationTask(const QString& stagingPath,
+                                           bool trustedSource,
+                                           SettingsObject* globalSettings,
+                                           QWidget* parent,
+                                           QString id,
+                                           QString versionId,
+                                           QString originalInstanceId)
+    : m_parent(parent), m_trustedSource(trustedSource), m_managedId(std::move(id)), m_managedVersionId(std::move(versionId))
+{
+    setStagingPath(stagingPath);
+    setParentSettings(globalSettings);
+
+    m_originalInstanceId = std::move(originalInstanceId);
 }
 
 ModrinthCreationTask::~ModrinthCreationTask()

@@ -1153,7 +1153,7 @@ class SegmentedDownloadTest final : public QObject {
         Harness harness;
         QVERIFY(harness.valid());
         auto task = harness.create(server.url("/pack.zip"));
-        task->setRequestDecorator([](Net::NetRequest& request) {
+        task->setRequestDecorator([](Net::Request& request) {
             auto headers = std::make_unique<Net::RawHeaderProxy>();
             headers->addHeader("Authorization", "Bearer segmented-test");
             request.addHeaderProxy(std::move(headers));
@@ -1184,7 +1184,7 @@ class SegmentedDownloadTest final : public QObject {
         Harness harness;
         QVERIFY(harness.valid());
         auto task = harness.create(server.url("/physics.jar"), 4, QStringLiteral("physics.jar"));
-        task->setRequestDecorator([metadata](Net::NetRequest& request) {
+        task->setRequestDecorator([metadata](Net::Request& request) {
             auto headers = std::make_unique<Net::RawHeaderProxy>();
             headers->addHeader("modrinth-download-meta", metadata);
             request.addHeaderProxy(std::move(headers));

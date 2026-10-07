@@ -1,21 +1,16 @@
 #pragma once
 
-#include <QAbstractListModel>
-#include <QAction>
 #include <QDir>
 #include <QFileSystemWatcher>
 #include <QHeaderView>
-#include <QMutex>
-#include <QSet>
 #include <QSortFilterProxyModel>
+#include <QThread>
 #include <QTreeView>
 
 #include "Resource.h"
-
-#include "BaseInstance.h"
-
 #include "tasks/ConcurrentTask.h"
 #include "tasks/Task.h"
+#include "ui/MultiDecorationItemDelegate.h"
 
 class MinecraftInstance;
 class QSortFilterProxyModel;
@@ -114,7 +109,7 @@ class ResourceFolderModel : public QAbstractListModel {
     virtual bool update();
 
     /** Creates a new parse task, if needed, for 'res' and start it.*/
-    virtual void resolveResource(Resource::Ptr res);
+    virtual void resolveResource(const Resource::Ptr& res);
 
     qsizetype size() const { return m_resources.size(); }
     [[nodiscard]] bool empty() const { return size() == 0; }
@@ -138,7 +133,17 @@ class ResourceFolderModel : public QAbstractListModel {
     /* Qt behavior */
 
     /* Basic columns */
-    enum Columns : std::uint8_t { ActiveColumn = 0, NameColumn, DateColumn, ProviderColumn, SizeColumn, FileNameColumn, NumColumns };
+    enum Columns : std::uint8_t {
+        ActiveColumn = 0,
+        NameColumn,
+        VersionColumn,
+        DateColumn,
+        ProviderColumn,
+        SizeColumn,
+        FileNameColumn,
+        LockUpdateColumn,
+        NumColumns
+    };
 
     QStringList columnNames(bool translated = true) const { return translated ? m_columnNamesTranslated : m_columnNames; }
 
@@ -158,18 +163,22 @@ class ResourceFolderModel : public QAbstractListModel {
     QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
     bool setData(const QModelIndex& index, const QVariant& value, int role = Qt::EditRole) override;
 
+    virtual QList<MultiDecorationItemDelegate::Icon> icons(int row) const;
+
     QVariant headerData(int section, Qt::Orientation orientation, int role = Qt::DisplayRole) const override;
 
-    void setupHeaderAction(QAction* act, int column);
+    void setupHeaderAction(QAction* act, int column) const;
     void saveColumns(QTreeView* tree);
     void loadColumns(QTreeView* tree);
     QMenu* createHeaderContextMenu(QTreeView* tree);
+
+    virtual bool supportsImage() const { return false; }
 
     /** This creates a proxy model to filter / sort the model for a UI.
      *
      *  The actual comparisons and filtering are done directly by the Resource, so to modify behavior go there instead!
      */
-    QSortFilterProxyModel* createFilterProxyModel(QObject* parent = nullptr);
+    static QSortFilterProxyModel* createFilterProxyModel(QObject* parent = nullptr);
 
     SortType columnToSortKey(size_t column) const;
     QList<QHeaderView::ResizeMode> columnResizeModes() const { return m_columnResizeModes; }
@@ -186,9 +195,12 @@ class ResourceFolderModel : public QAbstractListModel {
     QString instDirPath() const;
     MinecraftInstance* instance() const { return m_instance; }
 
+    bool setUpdateLock(const QModelIndexList& indexes, EnableAction action);
+
    signals:
     void updateFinished();
     void parseFinished();
+    void sizeHintChanged();
 
    protected:
     [[nodiscard]] virtual Task* createPreUpdateTask() { return nullptr; }
@@ -239,15 +251,19 @@ class ResourceFolderModel : public QAbstractListModel {
     virtual void onParseFailed(int ticket, const QString& resourceId);
 
    protected:
+    bool m_showImages = true;
     // Represents the relationship between a column's index (represented by the list index), and it's sorting key.
     // As such, the order in with they appear is very important!
-    QList<SortType> m_columnSortKeys = { SortType::Enabled,  SortType::Name, SortType::Date,
-                                         SortType::Provider, SortType::Size, SortType::Filename };
-    QStringList m_columnNames = { "Enable", "Name", "Last Modified", "Provider", "Size", "File Name" };
-    QStringList m_columnNamesTranslated = { tr("Enable"), tr("Name"), tr("Last Modified"), tr("Provider"), tr("Size"), tr("File Name") };
-    QList<QHeaderView::ResizeMode> m_columnResizeModes = { QHeaderView::Interactive, QHeaderView::Stretch,     QHeaderView::Interactive,
-                                                           QHeaderView::Interactive, QHeaderView::Interactive, QHeaderView::Interactive };
-    QList<bool> m_columnsHideable = { false, false, true, true, true, true };
+    QList<SortType> m_columnSortKeys = { SortType::Enabled,  SortType::Name, SortType::Version,  SortType::Date,
+                                         SortType::Provider, SortType::Size, SortType::Filename, SortType::LockUpdate };
+    QStringList m_columnNames = { "Enable", "Name", "Version", "Last Modified", "Provider", "Size", "File Name", "Update" };
+    QStringList m_columnNamesTranslated = { "",         tr("Name"),      tr("Version"), tr("Last Modified"), tr("Provider"),
+                                            tr("Size"), tr("File Name"), tr("Update") };
+    QList<QHeaderView::ResizeMode> m_columnResizeModes = { QHeaderView::Fixed,       QHeaderView::Stretch,
+                                                           QHeaderView::Interactive, QHeaderView::ResizeToContents,
+                                                           QHeaderView::Interactive, QHeaderView::Interactive,
+                                                           QHeaderView::Interactive, QHeaderView::Interactive };
+    QList<bool> m_columnsHideable = { false, false, true, true, true, true, true, true };
 
     QDir m_dir;
     MinecraftInstance* m_instance;
@@ -268,6 +284,7 @@ class ResourceFolderModel : public QAbstractListModel {
     // Runs off-thread
     ConcurrentTask m_resourceResolver;
     bool m_resourceResolverRunning = false;
+    QThread m_resourceResolverThread{ this };
 
     QMap<int, Task::Ptr> m_activeParseTasks;
     std::atomic<int> m_nextResolutionTicket = 0;

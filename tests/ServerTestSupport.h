@@ -111,7 +111,7 @@ bool writeArchive(const QString& path, const QList<QPair<QString, QByteArray>>& 
             return false;
         }
     }
-    return archive.close();
+    return archive.close().has_value();
 }
 
 QByteArray fabricServerJarFixture(const QString& path)
@@ -366,7 +366,7 @@ bool writeFabricModJar(const QString& path, const QString& id,
         && !archive.addFile("META-INF/jars/nested.jar", nestedJar)) {
         return false;
     }
-    return archive.close();
+    return archive.close().has_value();
 }
 
 bool writeForgeModJar(const QString& path, const QString& metadataPath,
@@ -387,7 +387,7 @@ bool writeForgeModJar(const QString& path, const QString& metadataPath,
                 + manifestVersion + '\n')) {
         return false;
     }
-    return archive.close();
+    return archive.close().has_value();
 }
 
 bool trashIsUnavailable(const QString& temporaryRoot)

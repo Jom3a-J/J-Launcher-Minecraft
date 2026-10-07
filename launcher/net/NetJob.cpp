@@ -37,10 +37,11 @@
 
 #include "NetJob.h"
 #include <QNetworkReply>
-#include "net/NetRequest.h"
+#include "net/Request.h"
 #include "logs/Privacy.h"
 #include "tasks/ConcurrentTask.h"
 #if defined(LAUNCHER_APPLICATION)
+#include <QApplication>
 #include "Application.h"
 #include "settings/SettingsObject.h"
 #include "ui/dialogs/NetworkJobFailedDialog.h"
@@ -71,7 +72,7 @@ NetJob::~NetJob()
     releaseAllPermits(Net::HostOutcome::Aborted);
 }
 
-auto NetJob::addNetAction(Net::NetRequest::Ptr action) -> bool
+auto NetJob::addNetAction(Net::Request::Ptr action) -> bool
 {
     action->setNetwork(m_network);
 
@@ -102,7 +103,7 @@ void NetJob::executeNextSubTask()
     if (isRunning() && m_queue.isEmpty() && m_doing.isEmpty() && !m_failed.isEmpty() && m_try < 3) {
         m_try += 1;
         m_failed.removeIf([this](QHash<Task*, Task::Ptr>::iterator task) {
-            auto* request = dynamic_cast<Net::NetRequest*>(task->get());
+            auto* request = dynamic_cast<Net::Request*>(task->get());
             // Only requests are retried here. A sub task that is not one has no status code to
             // judge and no promise that starting it a second time is even meaningful, so leave it
             // failed rather than restarting something arbitrary; such a task is expected to do its
@@ -146,7 +147,7 @@ Task::Ptr NetJob::takeNextSubTask()
 
     QSet<QString> refusedHosts;
     for (int i = 0; i < m_queue.size(); i++) {
-        auto* request = dynamic_cast<Net::NetRequest*>(m_queue.at(i).get());
+        auto* request = dynamic_cast<Net::Request*>(m_queue.at(i).get());
         if (!request) {
             // Not a network request, so there is nothing to admit: run it like ConcurrentTask would.
             m_admission_blocked = false;
@@ -173,11 +174,11 @@ Task::Ptr NetJob::takeNextSubTask()
         // Both connections are torn down again by ConcurrentTask::subTaskFinished(), which
         // disconnects everything from the request to this job.
         auto* admitted = task.get();
-        connect(request, &Net::NetRequest::rateLimited, this, [this](const QUrl& url, qint64 retryAfterSeconds) {
+        connect(request, &Net::Request::rateLimited, this, [this](const QUrl& url, qint64 retryAfterSeconds) {
             if (m_scheduler)
                 m_scheduler->reportRateLimited(url, retryAfterSeconds);
         });
-        connect(request, &Net::NetRequest::redirectedToNewHost, this, [this, admitted](const QUrl& url) {
+        connect(request, &Net::Request::redirectedToNewHost, this, [this, admitted](const QUrl& url) {
             const auto held = m_permits.value(admitted, Net::HostScheduler::InvalidPermit);
             if (held != Net::HostScheduler::InvalidPermit && m_scheduler)
                 m_scheduler->migratePermit(held, url);
@@ -209,13 +210,13 @@ Net::HostOutcome NetJob::outcomeFor(Task* task, TaskStepState state)
     if (state == TaskStepState::Succeeded)
         return Net::HostOutcome::Success;
 
-    auto* request = dynamic_cast<Net::NetRequest*>(task);
+    auto* request = dynamic_cast<Net::Request*>(task);
     if (!request)
         return Net::HostOutcome::Failure;
     if (request->isStallFailure())
         return Net::HostOutcome::Failure;
 
-    // 429/503 is reported through NetRequest::rateLimited() the moment it is seen, so it is
+    // 429/503 is reported through Request::rateLimited() the moment it is seen, so it is
     // deliberately not classified again here: doing both would penalise the host twice.
     switch (request->error()) {
         case QNetworkReply::RemoteHostClosedError:
@@ -310,12 +311,12 @@ auto NetJob::abort() -> bool
     return fullyAborted;
 }
 
-auto NetJob::getFailedActions() -> QList<Net::NetRequest*>
+auto NetJob::getFailedActions() -> QList<Net::Request*>
 {
-    QList<Net::NetRequest*> failed;
+    QList<Net::Request*> failed;
     for (auto index : m_failed) {
         // A job may hold sub tasks that are not requests; they have no reply to report on.
-        if (auto* request = dynamic_cast<Net::NetRequest*>(index.get())) {
+        if (auto* request = dynamic_cast<Net::Request*>(index.get())) {
             failed.push_back(request);
         }
     }
@@ -326,7 +327,7 @@ auto NetJob::getFailedFiles() -> QList<QString>
 {
     QList<QString> failed;
     for (auto index : m_failed) {
-        if (auto* request = dynamic_cast<Net::NetRequest*>(index.get())) {
+        if (auto* request = dynamic_cast<Net::Request*>(index.get())) {
             failed.append(Privacy::sanitizeUrl(request->url()));
         } else {
             failed.append(index->objectName());
@@ -405,7 +406,8 @@ void NetJob::emitFailed(QString reason)
     if (APPLICATION_DYN && m_ask_retry && m_manual_try < APPLICATION->settings()->get("NumberOfManualRetries").toInt() && isOnline()) {
         m_manual_try++;
         auto failed = getFailedActions();
-        auto dialog = new NetworkJobFailedDialog(objectName(), m_try, m_done.size(), failed.size(), nullptr);
+        QWidget* activeWindow = QApplication::activeWindow();
+        auto dialog = new NetworkJobFailedDialog(objectName(), m_try, m_done.size(), failed.size(), activeWindow);
         dialog->setAttribute(Qt::WA_DeleteOnClose);
 
         for (const auto& request : failed) {

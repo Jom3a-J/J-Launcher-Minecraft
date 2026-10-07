@@ -25,7 +25,7 @@
 #include <QUrl>
 #include <QRegularExpression>
 #include "net/ChecksumValidator.h"
-#include "net/Download.h"
+#include "net/Request.h"
 #include "net/PartFile.h"
 #include "net/SegmentedDownload.h"
 
@@ -421,7 +421,7 @@ void ServerDownloader::startFileDownload(const QUrl &url, const QString &outputP
                 new Net::ChecksumValidator(hashAlgorithm, QString::fromLatin1(expectedHash).toLower()));
         job->addTask(segmented);
     } else {
-        auto download = Net::Download::makeFile(url, outputPath);
+        auto download = Net::Request::makeFile(url, outputPath);
         if (!expectedHash.isEmpty())
             download->addValidator(
                 new Net::ChecksumValidator(hashAlgorithm, QString::fromLatin1(expectedHash).toLower()));
@@ -472,8 +472,8 @@ void ServerDownloader::onFileDownloadFailed(const QString &reason)
 
     if (reason == tr("Download cancelled.")) {
         finishDownload(false, reason);
-    } else if (reason == QStringLiteral("Failed to finalize validators")
-               || reason == QCoreApplication::translate("Net::SegmentedDownload", "Failed to finalize validators")) {
+    } else if (reason.startsWith(QStringLiteral("Checksum mismatch"))) {
+        // Net::ChecksumValidator's reason, passed through unchanged by both download paths.
         finishDownload(false,
                        tr("Download verification failed: the server file hash did not match the provider's value."));
     } else {

@@ -26,7 +26,7 @@ class PackInstallTask : public InstanceTask {
 
   private:
     struct ExtractionResult {
-        std::optional<QStringList> clientFiles;
+        Result<QStringList> clientFiles;
         bool publishedServerPackExtracted = false;
     };
 

@@ -541,7 +541,7 @@ bool jarDeclaresClientOnly(const QString &path)
     if (const auto fabricMetadata = archive.goToFile(QStringLiteral("fabric.mod.json"))) {
         QJsonParseError parseError;
         const QJsonDocument document = QJsonDocument::fromJson(
-            fabricMetadata->readAll(), &parseError);
+            (*fabricMetadata)->readAll().value_or(QByteArray()), &parseError);
         if (parseError.error == QJsonParseError::NoError && document.isObject()) {
             const QString environment = document.object()
                                             .value(QStringLiteral("environment"))
@@ -561,7 +561,7 @@ bool jarDeclaresClientOnly(const QString &path)
              QStringLiteral("META-INF/neoforge.mods.toml") }) {
         MMCZip::ArchiveReader forgeArchive(path);
         if (const auto forgeMetadata = forgeArchive.goToFile(metadataPath)) {
-            const QString contents = QString::fromUtf8(forgeMetadata->readAll());
+            const QString contents = QString::fromUtf8((*forgeMetadata)->readAll().value_or(QByteArray()));
             static const QRegularExpression clientOnlyExpression(
                 QStringLiteral(R"((?im)^\s*clientSideOnly\s*=\s*true\s*(?:#.*)?$)"));
             if (clientOnlyExpression.match(contents).hasMatch()) {

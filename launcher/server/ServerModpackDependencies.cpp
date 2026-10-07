@@ -74,7 +74,7 @@ bool collectFabricMetadata(const QString &jarPath, const QString &temporaryRoot,
 
     QJsonParseError parseError;
     const QJsonDocument document = QJsonDocument::fromJson(
-        metadataFile->readAll(), &parseError);
+        (*metadataFile)->readAll().value_or(QByteArray()), &parseError);
     if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
         return true;
     }
@@ -136,7 +136,7 @@ bool collectFabricMetadata(const QString &jarPath, const QString &temporaryRoot,
         const QString extractedPath = QDir(temporaryRoot).filePath(
             QStringLiteral("nested-%1.jar").arg((*nestedJarIndex)++));
         QFile extracted(extractedPath);
-        const QByteArray contents = nestedFile->readAll();
+        const QByteArray contents = (*nestedFile)->readAll().value_or(QByteArray());
         if (!extracted.open(QIODevice::WriteOnly)
             || extracted.write(contents) != contents.size()) {
             if (error) {
@@ -414,7 +414,7 @@ QString manifestImplementationVersion(const QString &jarPath)
     if (!manifest) {
         return {};
     }
-    const QStringList lines = QString::fromUtf8(manifest->readAll()).split(
+    const QStringList lines = QString::fromUtf8((*manifest)->readAll().value_or(QByteArray())).split(
         QRegularExpression(QStringLiteral("\\r\\n|\\n|\\r")));
     for (const QString &line : lines) {
         static const QString prefix = QStringLiteral("Implementation-Version:");
@@ -480,7 +480,7 @@ bool collectForgeMetadata(const QString &jarPath, const QString &loaderType,
     for (const QString &candidate : metadataPaths) {
         MMCZip::ArchiveReader archive(jarPath);
         if (const auto metadata = archive.goToFile(candidate)) {
-            contents = metadata->readAll();
+            contents = (*metadata)->readAll().value_or(QByteArray());
             metadataPath = candidate;
             break;
         }
@@ -699,14 +699,14 @@ bool collectForgeBundledMetadata(const QString &jarPath, const QString &loaderTy
         }
         MMCZip::ArchiveReader nestedArchive(jarPath);
         const auto entry = nestedArchive.goToFile(path);
-        if (!entry || !entry->isFile()) {
+        if (!entry || !(*entry)->isFile()) {
             if (failure) *failure = DependencyValidationFailure::Definite;
             if (error) *error = QObject::tr("Bundled dependency %1 is missing from %2.").arg(path, QFileInfo(jarPath).fileName());
             return false;
         }
         // Use a generated destination, never a path supplied by the archive.
         const QString extracted = QDir(temporaryRoot).filePath(QString::number(*count) + ".jar");
-        const QByteArray bytes = entry->readAll();
+        const QByteArray bytes = (*entry)->readAll().value_or(QByteArray());
         QFile file(extracted);
         if (bytes.isEmpty() || !file.open(QIODevice::WriteOnly)
             || file.write(bytes) != bytes.size()) {
@@ -741,7 +741,7 @@ bool collectForgeBundledMetadata(const QString &jarPath, const QString &loaderTy
         return true;
     }
     QJsonParseError parseError;
-    const auto document = QJsonDocument::fromJson(metadata->readAll(), &parseError);
+    const auto document = QJsonDocument::fromJson((*metadata)->readAll().value_or(QByteArray()), &parseError);
     if (parseError.error != QJsonParseError::NoError || !document.isObject()
         || !document.object().value("jars").isArray()) {
         if (error) *error = QObject::tr("Invalid bundled dependency metadata in %1.").arg(QFileInfo(jarPath).fileName());

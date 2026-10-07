@@ -8,7 +8,7 @@
 #include "modplatform/flame/FlameAPI.h"
 #include "ui/widgets/ProjectItem.h"
 
-#include "net/ApiDownload.h"
+#include "net/ApiRequest.h"
 
 #include <Version.h>
 
@@ -178,7 +178,7 @@ void ListModel::requestLogo(QString logo, QString url)
     MetaEntryPtr entry = APPLICATION->metacache()->resolveEntry("FlamePacks", QString("logos/%1").arg(logo));
     auto job = new NetJob(QString("Flame Icon Download %1").arg(logo), APPLICATION->network());
     job->setAskRetry(false);
-    job->addNetAction(Net::ApiDownload::makeCached(QUrl(url), entry));
+    job->addNetAction(Net::ApiRequest::makeCached(QUrl(url), entry));
 
     auto fullPath = entry->getFullPath();
     connect(job, &NetJob::succeeded, this, [this, logo, fullPath, job] {
@@ -237,22 +237,32 @@ void ListModel::performPaginatedSearch()
     if (m_searchState != ResetRequested && s_projectIdExpr.match(m_currentSearchTerm).hasMatch()) {
         auto projectId = m_currentSearchTerm.mid(1);
         if (!projectId.isEmpty()) {
-            ResourceAPI::Callback<ModPlatform::IndexedPack::Ptr> callbacks;
+            auto [job, response] = FlameAPI::get().getProjectTask(projectId, true, false);
 
-            callbacks.on_fail = [this](QString reason, int network_error_code) {
-                if (network_error_code == 404) {
+            QObject::connect(job.get(), &NetJob::succeeded, job.get(), [response, this] {
+                auto pack = std::make_shared<ModPlatform::IndexedPack>();
+                *pack = *response;
+                searchRequestForOneSucceeded(pack);
+            });
+            auto weak = job.toWeakRef();
+            QObject::connect(job.get(), &NetJob::failed, job.get(), [weak, this](const QString& reason) {
+                int networkErrorCode = -1;
+                if (auto job = weak.lock()) {
+                    if (auto* failedAction = job->getFailedActions().at(0); failedAction) {
+                        networkErrorCode = failedAction->replyStatusCode();
+                    }
+                }
+                if (networkErrorCode == 404) {
                     m_searchState = ResetRequested;
                 }
                 searchRequestFailed(reason);
-            };
-            callbacks.on_succeed = [this](auto& pack) { searchRequestForOneSucceeded(pack); };
-            callbacks.on_abort = [this] {
+            });
+            QObject::connect(job.get(), &NetJob::aborted, job.get(), [this] {
                 qCritical() << "Search task aborted by an unknown reason!";
                 searchRequestFailed("Aborted");
-            };
-            auto project = std::make_shared<ModPlatform::IndexedPack>();
-            project->addonId = projectId;
-            if (auto job = FlameAPI::get().getProjectInfo({ project }, std::move(callbacks), false); job) {
+            });
+
+            if (job) {
                 m_jobPtr = job;
                 m_jobPtr->start();
             }
@@ -264,9 +274,9 @@ void ListModel::performPaginatedSearch()
 
     ResourceAPI::Callback<QList<ModPlatform::IndexedPack::Ptr>> callbacks{};
 
-    callbacks.on_succeed = [this](auto& doc) { searchRequestFinished(doc); };
-    callbacks.on_fail = [this](QString reason, int) { searchRequestFailed(reason); };
-    callbacks.on_abort = [this] {
+    callbacks.onSucceed = [this](auto& doc) { searchRequestFinished(doc); };
+    callbacks.onFail = [this](QString reason, int) { searchRequestFailed(reason); };
+    callbacks.onAbort = [this] {
         qCritical() << "Search task aborted by an unknown reason!";
         searchRequestFailed("Aborted");
     };
@@ -334,7 +344,7 @@ void Flame::ListModel::searchRequestForOneSucceeded(ModPlatform::IndexedPack::Pt
     endInsertRows();
 }
 
-void Flame::ListModel::searchRequestFailed(QString reason)
+void Flame::ListModel::searchRequestFailed(const QString& reason)
 {
     m_jobPtr.reset();
 

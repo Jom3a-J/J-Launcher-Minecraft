@@ -381,7 +381,7 @@ void ServerContentTab::browseContent(const QString &initialSearch)
 
     ProgressDialog progress(this);
     progress.setWindowTitle(pluginServer ? tr("Downloading Server Plugins") : tr("Downloading Server Mods"));
-    progress.setSkipButton(true, tr("Abort"));
+    progress.showSkipButton();
     progress.execWithTask(downloads.get());
 
     if (downloads->getState() == Task::State::Failed) {

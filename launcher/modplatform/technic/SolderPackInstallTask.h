@@ -57,7 +57,7 @@ class SolderPackInstallTask : public InstanceTask {
 
    protected:
     //! Entry point for tasks.
-    virtual void executeTask() override;
+    void executeTask() override;
 
    private slots:
     void fileListSucceeded(QByteArray* response);
@@ -81,8 +81,8 @@ class SolderPackInstallTask : public InstanceTask {
     QUrl m_serverPackUrl;
     QString m_serverArchivePath;
     QTemporaryDir m_outputDir;
-    int m_modCount;
-    QFuture<QString> m_extractFuture;
-    QFutureWatcher<QString> m_extractFutureWatcher;
+    int m_modCount = 0;
+    QFuture<Result<>> m_extractFuture;
+    QFutureWatcher<Result<>> m_extractFutureWatcher;
 };
 }  // namespace Technic

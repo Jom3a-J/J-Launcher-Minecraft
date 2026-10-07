@@ -60,51 +60,53 @@ QString readServerPackFile(const QByteArray& response, const ServerPackRequest& 
     if (parseError.error != QJsonParseError::NoError || !document.object().value("data").isObject()) {
         return tr("Could not understand the CurseForge server-pack response.");
     }
-    try {
-        const QJsonObject fileObject = document.object().value("data").toObject();
-        const qint64 addonId = Json::requireInteger(fileObject, "modId");
-        const qint64 fileId = Json::requireInteger(fileObject, "id");
-        bool validAddonId = false;
-        bool validFileId = false;
-        const qint64 requestedAddonId = request.modpackId.toLongLong(&validAddonId);
-        const qint64 requestedFileId = request.serverPackFileId.toLongLong(&validFileId);
-        if (!validAddonId || !validFileId || addonId != requestedAddonId || fileId != requestedFileId) {
-            return tr("CurseForge returned metadata for a different server pack.");
-        }
+    const QJsonObject fileObject = document.object().value("data").toObject();
+    const auto addonIdResult = Json::requireInteger(fileObject, "modId");
+    const auto fileIdResult = Json::requireInteger(fileObject, "id");
+    if (!addonIdResult || !fileIdResult) {
+        return tr("Could not understand the CurseForge server-pack metadata:\n")
+            + (addonIdResult ? fileIdResult.error() : addonIdResult.error());
+    }
+    const qint64 addonId = *addonIdResult;
+    const qint64 fileId = *fileIdResult;
+    bool validAddonId = false;
+    bool validFileId = false;
+    const qint64 requestedAddonId = request.modpackId.toLongLong(&validAddonId);
+    const qint64 requestedFileId = request.serverPackFileId.toLongLong(&validFileId);
+    if (!validAddonId || !validFileId || addonId != requestedAddonId || fileId != requestedFileId) {
+        return tr("CurseForge returned metadata for a different server pack.");
+    }
 
-        const QJsonValue isServerPack = fileObject.value(QStringLiteral("isServerPack"));
-        if (isServerPack.isBool() && !isServerPack.toBool()) {
-            return tr("The file referenced by CurseForge is not marked as a server pack.");
-        }
+    const QJsonValue isServerPack = fileObject.value(QStringLiteral("isServerPack"));
+    if (isServerPack.isBool() && !isServerPack.toBool()) {
+        return tr("The file referenced by CurseForge is not marked as a server pack.");
+    }
 
-        const QJsonValue parentFileId = fileObject.value(QStringLiteral("parentProjectFileId"));
-        bool validParentId = false;
-        const qint64 requestedParentId = request.modpackFileId.toLongLong(&validParentId);
-        if (validParentId && parentFileId.isDouble() && parentFileId.toInteger() > 0
-            && parentFileId.toInteger() != requestedParentId) {
-            return tr("The CurseForge server pack belongs to a different modpack version.");
-        }
+    const QJsonValue parentFileId = fileObject.value(QStringLiteral("parentProjectFileId"));
+    bool validParentId = false;
+    const qint64 requestedParentId = request.modpackFileId.toLongLong(&validParentId);
+    if (validParentId && parentFileId.isDouble() && parentFileId.toInteger() > 0
+        && parentFileId.toInteger() != requestedParentId) {
+        return tr("The CurseForge server pack belongs to a different modpack version.");
+    }
 
-        const QJsonValue hashesValue = fileObject.value(QStringLiteral("hashes"));
-        if (!hashesValue.isUndefined() && !hashesValue.isArray()) {
-            return tr("CurseForge returned malformed server-pack hash metadata.");
-        }
-        if (hashesValue.isUndefined() || hashesValue.toArray().isEmpty()) {
-            *warning = tr("CurseForge did not publish a supported hash for the dedicated server pack. "
-                          "The archive will be structurally validated but remains unverified.");
+    const QJsonValue hashesValue = fileObject.value(QStringLiteral("hashes"));
+    if (!hashesValue.isUndefined() && !hashesValue.isArray()) {
+        return tr("CurseForge returned malformed server-pack hash metadata.");
+    }
+    if (hashesValue.isUndefined() || hashesValue.toArray().isEmpty()) {
+        *warning = tr("CurseForge did not publish a supported hash for the dedicated server pack. "
+                      "The archive will be structurally validated but remains unverified.");
+        return {};
+    }
+    for (const QJsonValue& hashValue : hashesValue.toArray()) {
+        if (const auto parsedHash = Flame::parseCurseForgeHash(hashValue.toObject())) {
+            source->hashType = parsedHash->algorithmName;
+            source->hash = parsedHash->value;
             return {};
         }
-        for (const QJsonValue& hashValue : hashesValue.toArray()) {
-            if (const auto parsedHash = Flame::parseCurseForgeHash(hashValue.toObject())) {
-                source->hashType = parsedHash->algorithmName;
-                source->hash = parsedHash->value;
-                return {};
-            }
-        }
-        return tr("CurseForge returned no valid supported SHA-1 or MD5 hash for the dedicated server pack.");
-    } catch (const JSONValidationError& e) {
-        return tr("Could not understand the CurseForge server-pack metadata:\n") + e.cause();
     }
+    return tr("CurseForge returned no valid supported SHA-1 or MD5 hash for the dedicated server pack.");
 }
 
 QString resolveServerPack(QObject* context, QEventLoop& loop, const ServerPackRequest& request, ServerPackSource* source,

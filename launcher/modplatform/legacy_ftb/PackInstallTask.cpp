@@ -40,6 +40,7 @@
 
 #include "BaseInstance.h"
 #include "FileSystem.h"
+#include "Json.h"
 #include "MMCZip.h"
 #include "minecraft/GradleSpecifier.h"
 #include "minecraft/MinecraftInstance.h"
@@ -52,7 +53,7 @@
 #include "modplatform/ServerPackStaging.h"
 #include "modplatform/ServerSupport.h"
 
-#include "net/ApiDownload.h"
+#include "net/ApiRequest.h"
 
 namespace LegacyFTB {
 
@@ -80,7 +81,7 @@ void PackInstallTask::downloadPack()
     const bool privatePack = m_pack.type == PackType::Private;
     const QUrl clientUrl = ModPlatform::legacyFtbPackUrl(BuildConfig.LEGACY_FTB_CDN_BASE_URL, privatePack,
                                                          m_pack.dir, m_version, m_pack.file);
-    m_netJobContainer->addNetAction(Net::ApiDownload::makeCached(clientUrl, entry));
+    m_netJobContainer->addNetAction(Net::ApiRequest::makeCached(clientUrl, entry));
 
     connect(m_netJobContainer.get(), &NetJob::succeeded, this, &PackInstallTask::onClientDownloadSucceeded);
     connect(m_netJobContainer.get(), &NetJob::failed, this, &PackInstallTask::emitFailed);
@@ -110,7 +111,7 @@ void PackInstallTask::onClientDownloadSucceeded()
     setStatus(tr("Downloading the official legacy FTB server pack"));
     auto job = makeShared<NetJob>(tr("Legacy FTB server pack download"), m_network);
     job->setAskRetry(false);
-    job->addNetAction(Net::ApiDownload::makeFile(m_serverPackUrl, m_serverArchivePath));
+    job->addNetAction(Net::ApiRequest::makeFile(m_serverPackUrl, m_serverArchivePath));
     connect(job.get(), &NetJob::succeeded, this, &PackInstallTask::onServerPackDownloadSucceeded);
     connect(job.get(), &NetJob::failed, this, &PackInstallTask::onServerPackDownloadFailed);
     connect(job.get(), &NetJob::aborted, this, &PackInstallTask::onServerPackDownloadAborted);
@@ -182,7 +183,7 @@ void PackInstallTask::onUnzipFinished()
     const auto result = m_extractFuture.result();
     if (!m_serverArchivePath.isEmpty()) FS::deletePath(m_serverArchivePath);
     if (!result.clientFiles) {
-        emitFailed(tr("Failed to extract the legacy FTB modpack archive."));
+        emitFailed(tr("Failed to extract the legacy FTB modpack archive: %1").arg(result.clientFiles.error()));
         return;
     }
     m_serverPackExtracted = result.publishedServerPackExtracted;
@@ -211,7 +212,7 @@ void PackInstallTask::install()
     m_instance =
         std::make_unique<MinecraftInstance>(m_globalSettings, std::make_unique<INISettingsObject>(instanceConfigPath), m_stagingPath);
     {
-        SettingsObject::Lock const lock(m_instance->settings());
+        const SettingsObject::Lock lock(m_instance->settings());
 
         auto* components = m_instance->getPackProfile();
         components->buildingFromScratch();
@@ -220,15 +221,15 @@ void PackInstallTask::install()
         bool fallback = true;
 
         // handle different versions
-        QFile packJson(m_stagingPath + "/minecraft/pack.json");
+        QFileInfo packJson(m_stagingPath + "/minecraft/pack.json");
         QDir jarmodDir = QDir(m_stagingPath + "/unzip/instMods");
-        if (packJson.exists()) {
-            if (packJson.open(QIODevice::ReadOnly | QIODevice::Text)) {
-                QJsonDocument doc = QJsonDocument::fromJson(packJson.readAll());
-                packJson.close();
-
+        if (!packJson.exists()) {
+            qWarning() << "File doesn't exists:" << packJson.fileName();
+        } else {
+            auto doc = Json::requireDocument(packJson.absoluteFilePath());
+            if (doc) {
                 // we only care about the libs
-                QJsonArray libs = doc.object().value("libraries").toArray();
+                auto libs = doc->object().value("libraries").toArray();
 
                 for (const auto& value : libs) {
                     QString nameValue = value.toObject().value("name").toString();
@@ -240,12 +241,12 @@ void PackInstallTask::install()
 
                     components->setComponentVersion("net.minecraftforge",
                                                     forgeVersion.version().replace(m_pack.mcVersion, "").replace("-", ""));
-                    packJson.remove();
+                    QFile::remove(packJson.absoluteFilePath());
                     fallback = false;
                     break;
                 }
             } else {
-                qWarning() << "Failed to open file" << packJson.fileName() << "for reading:" << packJson.errorString();
+                qWarning() << "Failed to read file as JSON:" << packJson.fileName();
             }
         }
 

@@ -107,7 +107,7 @@ void PackInstallTask::executeTask()
 
     auto searchUrl = QString(BuildConfig.FTB_API_BASE_URL + "/modpack/%1/%2").arg(m_pack.id).arg(version.id);
 
-    auto [action, response] = Net::Download::makeByteArray(QUrl(searchUrl));
+    auto [action, response] = Net::Request::makeByteArray(QUrl(searchUrl));
     netJob->addNetAction(action);
 
     QObject::connect(netJob.get(), &NetJob::succeeded, this, [this, response] { onManifestDownloadSucceeded(response); });
@@ -127,21 +127,14 @@ void PackInstallTask::onManifestDownloadSucceeded(QByteArray* responsePtr)
     QByteArray response = std::move(*responsePtr);
     m_net_job.reset();
 
-    QJsonParseError parseError{};
-    const QJsonDocument doc = QJsonDocument::fromJson(response, &parseError);
-    if (parseError.error != QJsonParseError::NoError) {
-        qWarning() << "Error while parsing JSON response from FTB at " << parseError.offset << " reason: " << parseError.errorString();
+    FTB::Version version;
+    auto doc =
+        Json::requireObject(response, "FTB pack manifest").and_then([&version](const auto& v) { return FTB::loadVersion(version, v); });
+    if (!doc) {
+        qWarning() << "Error while parsing JSON response from FTB:" << doc.error();
         qWarning() << "Response body excerpt:"
                    << Privacy::sanitizeResponseBody(response, 2048);
-        return;
-    }
-
-    FTB::Version version;
-    try {
-        auto obj = Json::requireObject(doc);
-        FTB::loadVersion(version, obj);
-    } catch (const JSONValidationError& e) {
-        emitFailed(tr("Could not understand pack manifest:\n") + e.cause());
+        emitFailed(tr("Could not understand pack manifest:\n") + doc.error());
         return;
     }
 
@@ -349,7 +342,7 @@ void PackInstallTask::downloadPack()
     }
     if (m_hasDedicatedServerPack) {
         m_serverInstallerPath = ModPlatform::ServerPackStaging::path(m_stagingPath, "ftb-server-installer.exe");
-        jobPtr->addNetAction(Net::Download::makeFile(
+        jobPtr->addNetAction(Net::Request::makeFile(
             QUrl(dedicatedServerInstallerUrl(m_pack.id, m_version.id)),
             m_serverInstallerPath));
     }
@@ -364,7 +357,7 @@ void PackInstallTask::downloadPack()
             auto path = FS::PathCombine(m_stagingPath, ".minecraft", relativePath);
             qDebug() << "Will try to download" << Privacy::sanitizeUrl(file.url)
                      << "to" << Privacy::sanitizePath(path);
-            auto dl = Net::Download::makeFile(file.url, path);
+            auto dl = Net::Request::makeFile(file.url, path);
             if (!file.sha1.isEmpty()) {
                 dl->addValidator(new Net::ChecksumValidator(QCryptographicHash::Sha1, file.sha1));
             }
@@ -375,7 +368,7 @@ void PackInstallTask::downloadPack()
             qDebug() << "Will try to download server-only file"
                      << Privacy::sanitizeUrl(file.url)
                      << "to" << Privacy::sanitizePath(path);
-            auto dl = Net::Download::makeFile(file.url, path);
+            auto dl = Net::Request::makeFile(file.url, path);
             if (!file.sha1.isEmpty()) {
                 dl->addValidator(new Net::ChecksumValidator(QCryptographicHash::Sha1, file.sha1));
             }

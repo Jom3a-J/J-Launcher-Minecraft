@@ -23,7 +23,7 @@
 #include "BuildConfig.h"
 #include "net/HostScheduler.h"
 #include "net/NetJob.h"
-#include "net/NetRequest.h"
+#include "net/Request.h"
 
 using Net::HostOutcome;
 using Net::HostScheduler;
@@ -45,13 +45,13 @@ QUrl hostUrl(const QString& host)
     return QUrl(QStringLiteral("https://") + host + QStringLiteral("/a.jar"));
 }
 
-/*! A NetRequest that never touches the network.
+/*! A Request that never touches the network.
  *
  *  From NetJob's point of view it is a real request - same type, same URL, same signals - but it
  *  only finishes when the test says so, which makes admission and permit accounting observable
  *  without any I/O.
  */
-class StubRequest : public Net::NetRequest {
+class StubRequest : public Net::Request {
     Q_OBJECT
 
    public:
@@ -81,10 +81,10 @@ class StubRequest : public Net::NetRequest {
     /*! Reports byte progress the way a real transfer would. */
     void report(qint64 received, qint64 total) { onProgress(received, total); }
 
-    /*! Mimics NetRequest seeing a 429/503 while it keeps running to retry internally. */
+    /*! Mimics Request seeing a 429/503 while it keeps running to retry internally. */
     void reportRateLimit(qint64 retryAfterSeconds) { emit rateLimited(m_url, retryAfterSeconds); }
 
-    /*! Mimics NetRequest following a redirect onto a different host. */
+    /*! Mimics Request following a redirect onto a different host. */
     void redirectTo(const QUrl& url)
     {
         m_url = url;
@@ -107,7 +107,7 @@ class StubRequest : public Net::NetRequest {
 
 /*! A plain Task in a NetJob, the way Net::SegmentedDownload sits in one.
  *
- *  It is deliberately not a Net::NetRequest: NetJob has to admit it without a permit, count it as
+ *  It is deliberately not a Net::Request: NetJob has to admit it without a permit, count it as
  *  one unit of work, and - because nothing promises a bare Task can be started twice - never
  *  restart it on its own.
  */
@@ -591,7 +591,7 @@ class NetJobSchedulingTest : public QObject {
         QVERIFY(waitFor([&] { return plain->startCount() == 1; }));
 
         // getFailedFiles()/getFailedActions() used to reinterpret whatever was in m_failed as a
-        // Net::NetRequest; this is the regression guard for that.
+        // Net::Request; this is the regression guard for that.
         QVERIFY(waitFor([&] {
             plain->fail();
             return job.isFinished();

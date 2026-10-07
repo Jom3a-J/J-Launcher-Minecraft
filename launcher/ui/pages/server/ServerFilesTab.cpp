@@ -2,6 +2,7 @@
 
 #include "ServerFilesTab.h"
 
+#include <QApplication>
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
@@ -52,7 +53,8 @@ QIcon serverFileIcon(const QFileInfo &file)
                                 ? "server" : "loadermods", QStyle::SP_FileIcon);
     }
     if (suffix == "zip" || suffix == "rar" || suffix == "7z" || suffix == "gz") {
-        return launcherIcon("jarmods", QStyle::SP_FileIcon);
+        // The launcher's icon packs have no archive icon; use the platform's file icon.
+        return QApplication::style()->standardIcon(QStyle::SP_FileIcon);
     }
     if (suffix == "properties" || suffix == "json" || suffix == "toml" || suffix == "yml" || suffix == "yaml") {
         return launcherIcon("settings", QStyle::SP_FileIcon);

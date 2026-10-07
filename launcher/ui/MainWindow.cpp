@@ -86,7 +86,7 @@
 #include <launch/LaunchTask.h>
 #include <minecraft/MinecraftInstance.h>
 #include <minecraft/auth/AccountList.h>
-#include <net/ApiDownload.h>
+#include <net/ApiRequest.h>
 #include <net/NetJob.h>
 #include <news/NewsChecker.h>
 #include <tools/BaseProfiler.h>
@@ -129,6 +129,7 @@
 #include "modplatform/ModIndex.h"
 #include "modplatform/flame/FlameAPI.h"
 #include "modplatform/flame/FlameModIndex.h"
+#include "modplatform/modrinth/ModrinthAPI.h"
 
 #include "KonamiCode.h"
 
@@ -184,17 +185,6 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui(new Ui::MainWi
         ui->instanceToolBar->insertWidgetBefore(ui->actionLaunchInstance, renameButton);
 
         ui->instanceToolBar->insertSeparator(ui->actionLaunchInstance);
-
-        // restore the instance toolbar settings
-        const auto setting_name = QString("WideBarVisibility_%1").arg(ui->instanceToolBar->objectName());
-        instanceToolbarSetting = APPLICATION->settings()->getOrRegisterSetting(setting_name);
-
-        ui->instanceToolBar->setVisibilityState(QByteArray::fromBase64(instanceToolbarSetting->get().toString().toUtf8()));
-
-        ui->instanceToolBar->addContextMenuAction(ui->newsToolBar->toggleViewAction());
-        ui->instanceToolBar->addContextMenuAction(ui->instanceToolBar->toggleViewAction());
-        ui->instanceToolBar->addContextMenuAction(ui->actionToggleStatusBar);
-        ui->instanceToolBar->addContextMenuAction(ui->actionLockToolbars);
     }
 
     // set the menu for the folders help, accounts, and export tool buttons
@@ -897,7 +887,7 @@ void MainWindow::runModalTask(Task* task)
         }
     });
     ProgressDialog loadDialog(this);
-    loadDialog.setSkipButton(true, tr("Abort"));
+    loadDialog.showSkipButton();
     loadDialog.execWithTask(task);
 }
 
@@ -984,6 +974,22 @@ void MainWindow::processURLs(QList<QUrl> urls)
         QMap<QString, QString> extra_info;
         QUrl local_url;
         if (!url.isLocalFile()) {  // download the remote resource and identify
+            if (url.scheme().compare("modrinth", Qt::CaseInsensitive) == 0) {
+                const auto packId = ModrinthAPI::getModpackIdFromUrl(url);
+                if (!packId.isEmpty()) {
+                    extra_info.insert("pack_id", packId);
+                    addInstance(url.toString(), extra_info);
+                } else {
+                    CustomMessageBox::selectable(
+                        this, tr("Error"),
+                        tr("Unsupported Modrinth link.\n\n%1 currently only supports modpack links such as "
+                           "modrinth://modpack/fabulously-optimized.")
+                            .arg(BuildConfig.LAUNCHER_DISPLAYNAME),
+                        QMessageBox::Critical)
+                        ->show();
+                }
+                continue;
+            }
 
             const bool isExternalURLImport = (url.host().toLower() == "import") || (url.path().startsWith("/import", Qt::CaseInsensitive));
 
@@ -1015,18 +1021,28 @@ void MainWindow::processURLs(QList<QUrl> urls)
                 extra_info.insert("pack_id", addonId);
                 extra_info.insert("pack_version_id", fileId);
 
-                auto [job, array] = FlameAPI::get().getFile(addonId, fileId);
+                auto [job, array] = FlameAPI::getFile(addonId, fileId);
 
-                connect(job.get(), &Task::failed, this,
-                        [this](QString reason) { CustomMessageBox::selectable(this, tr("Error"), reason, QMessageBox::Critical)->show(); });
+                connect(job.get(), &Task::failed, this, [this](const QString& reason) {
+                    CustomMessageBox::selectable(this, tr("Error"), reason, QMessageBox::Critical)->show();
+                });
                 connect(job.get(), &Task::succeeded, this, [this, array, addonId, fileId, &dl_url, &version] {
                     qDebug() << "Returned CurseForge response:"
                              << Privacy::sanitizeResponseBody(*array, 2048);
                     auto doc = Json::requireDocument(*array);
-                    auto data = doc.object()["data"].toObject();
+                    if (!doc) {
+                        CustomMessageBox::selectable(this, tr("Error"), doc.error(), QMessageBox::Critical)->show();
+                        return;
+                    }
+                    auto data = doc->object()["data"].toObject();
                     // No way to find out if it's a mod or a modpack before here
                     // And also we need to check if it ends with .zip, instead of any better way
-                    version = FlameMod::loadIndexedPackVersion(data);
+                    auto versionRes = FlameMod::loadIndexedPackVersion(data);
+                    if (!versionRes) {
+                        CustomMessageBox::selectable(this, tr("Error"), versionRes.error(), QMessageBox::Critical)->show();
+                        return;
+                    }
+                    version = versionRes.value();
                     auto fileName = version.fileName;
 
                     // Have to use ensureString then use QUrl to get proper url encoding
@@ -1039,13 +1055,11 @@ void MainWindow::processURLs(QList<QUrl> urls)
                             ->show();
                         return;
                     }
-
-                    QFileInfo dl_file(dl_url.fileName());
                 });
 
                 {  // drop stack
                     ProgressDialog dlUrlDialod(this);
-                    dlUrlDialod.setSkipButton(true, tr("Abort"));
+                    dlUrlDialod.showSkipButton();
                     dlUrlDialod.execWithTask(job.get());
                 }
 
@@ -1128,7 +1142,7 @@ void MainWindow::processURLs(QList<QUrl> urls)
             auto entry = APPLICATION->metacache()->resolveEntry("general", path);
             entry->setStale(true);
             auto dl_job = unique_qobject_ptr<NetJob>(new NetJob(tr("Modpack download"), APPLICATION->network()));
-            dl_job->addNetAction(Net::ApiDownload::makeCached(dl_url, entry));
+            dl_job->addNetAction(Net::ApiRequest::makeCached(dl_url, entry));
             auto archivePath = entry->getFullPath();
 
             bool dl_success = false;
@@ -1138,7 +1152,7 @@ void MainWindow::processURLs(QList<QUrl> urls)
 
             {  // drop stack
                 ProgressDialog dlUrlDialod(this);
-                dlUrlDialod.setSkipButton(true, tr("Abort"));
+                dlUrlDialod.showSkipButton();
                 dlUrlDialod.execWithTask(dl_job.get());
             }
 
@@ -1161,7 +1175,7 @@ void MainWindow::processURLs(QList<QUrl> urls)
 
         auto type = ResourceUtils::identify(localFileInfo);
 
-        if (ModPlatform::ResourceTypeUtils::VALID_RESOURCES.count(type) == 0) {  // probably instance/modpack
+        if (ModPlatform::ResourceTypeUtils::g_VALID_RESOURCES.count(type) == 0) {  // probably instance/modpack
             addInstance(localFileName, extra_info);
             continue;
         }
@@ -1401,8 +1415,6 @@ void MainWindow::on_actionSettings_triggered()
 
 void MainWindow::globalSettingsClosed()
 {
-    // FIXME: quick HACK to make this work. improve, optimize.
-    APPLICATION->instances()->loadList();
     proxymodel->invalidate();
     proxymodel->sort(0);
     updateMainToolBar();
@@ -1646,7 +1658,6 @@ void MainWindow::closeEvent(QCloseEvent* event)
     // Save the window state and geometry.
     APPLICATION->settings()->set("MainWindowState", QString::fromUtf8(saveState().toBase64()));
     APPLICATION->settings()->set("MainWindowGeometry", QString::fromUtf8(saveGeometry().toBase64()));
-    instanceToolbarSetting->set(QString::fromUtf8(ui->instanceToolBar->getVisibilityState().toBase64()));
     event->accept();
     emit isClosing();
 }

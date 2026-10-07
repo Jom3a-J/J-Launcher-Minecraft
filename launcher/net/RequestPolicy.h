@@ -7,7 +7,7 @@
 #include <QString>
 #include <QUrl>
 
-/*! J Launcher's rules for how a NetRequest connects and which redirects it follows. */
+/*! J Launcher's rules for how a Request connects and which redirects it follows. */
 namespace Net {
 
 /*! Applies the opt-in HTTP/1 policy to the known CurseForge file CDN hosts. */

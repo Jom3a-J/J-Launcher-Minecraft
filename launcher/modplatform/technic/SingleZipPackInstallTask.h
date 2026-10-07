@@ -51,8 +51,8 @@ class SingleZipPackInstallTask : public InstanceTask {
     QString m_archivePath;
     QString m_serverArchivePath;
     NetJob::Ptr m_filesNetJob;
-    QFuture<QString> m_extractFuture;
-    QFutureWatcher<QString> m_extractFutureWatcher;
+    QFuture<Result<>> m_extractFuture;
+    QFutureWatcher<Result<>> m_extractFutureWatcher;
 };
 
 }  // namespace Technic
