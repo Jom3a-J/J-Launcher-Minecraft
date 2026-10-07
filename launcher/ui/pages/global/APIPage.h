@@ -38,9 +38,11 @@
 #pragma once
 
 #include <QWidget>
+#include <memory>
 
-#include "net/NetJob.h"
 #include "ui/pages/BasePage.h"
+
+class ApiKeyFields;
 
 namespace Ui {
 class APIPage;
@@ -67,10 +69,8 @@ class APIPage : public QWidget, public BasePage {
     void updateBaseURLPlaceholder(int index);
     void loadSettings();
     bool applySettings();
-    void updateFlameKeyStorageNote();
-    void testFlameKey();
 
    private:
     Ui::APIPage* ui;
-    NetJob::Ptr m_flameKeyTestJob;
+    std::unique_ptr<ApiKeyFields> m_apiKeys;
 };
