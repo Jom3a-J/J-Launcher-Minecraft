@@ -25,7 +25,7 @@
 #include <QtTest>
 
 #include "BuildConfig.h"
-#include "minecraft/auth/steps/MSAStep.h"
+#include "minecraft/auth/steps/MSALoginCallback.h"
 #include "ui/dialogs/MSALoginDialog.h"
 
 /**

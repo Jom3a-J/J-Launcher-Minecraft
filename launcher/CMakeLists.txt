@@ -239,6 +239,8 @@ set(MINECRAFT_SOURCES
     minecraft/auth/steps/MinecraftProfileStep.h
     minecraft/auth/steps/MSADeviceCodeStep.cpp
     minecraft/auth/steps/MSADeviceCodeStep.h
+    minecraft/auth/steps/MSALoginCallback.cpp
+    minecraft/auth/steps/MSALoginCallback.h
     minecraft/auth/steps/MSAStep.cpp
     minecraft/auth/steps/MSAStep.h
     minecraft/auth/steps/XboxAuthorizationStep.cpp
@@ -409,6 +411,8 @@ set(SETTINGS_SOURCES
     settings/INIFile.h
     settings/INISettingsObject.cpp
     settings/INISettingsObject.h
+    settings/ApiCredentials.cpp
+    settings/ApiCredentials.h
     settings/CredentialStore.cpp
     settings/CredentialStore.h
     settings/SecretEncryption.cpp
@@ -1071,6 +1075,8 @@ SET(LAUNCHER_SOURCES
     ui/pages/global/ProxyPage.h
     ui/pages/global/APIPage.cpp
     ui/pages/global/APIPage.h
+    ui/pages/global/ApiKeyFields.cpp
+    ui/pages/global/ApiKeyFields.h
 
     # GUI - platform pages
     ui/pages/modplatform/CustomPage.cpp

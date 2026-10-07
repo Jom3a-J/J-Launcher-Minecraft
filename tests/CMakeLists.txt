@@ -143,6 +143,9 @@ ecm_add_test(ATLPackManifest_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSI
 ecm_add_test(UniversalResourceDownloader_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME UniversalResourceDownloader)
 
+ecm_add_test(ApiCredentials_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME ApiCredentials)
+
 ecm_add_test(NetRequest_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME NetRequest)
 set_tests_properties(NetRequest PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

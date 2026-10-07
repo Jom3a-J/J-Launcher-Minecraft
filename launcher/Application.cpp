@@ -123,7 +123,7 @@
 #include "tools/JVisualVM.h"
 
 #include "settings/INISettingsObject.h"
-#include "settings/CredentialStore.h"
+#include "settings/ApiCredentials.h"
 #include "settings/Setting.h"
 
 #include "meta/Index.h"
@@ -931,115 +931,11 @@ Application::Application(int& argc, char** argv) : QApplication(argc, argv)
         // Custom Microsoft Authentication Client ID
         m_settings->registerSetting("MSAClientIDOverride", "");
 
-        // Migrate legacy plaintext CurseForge API keys into secure storage.
-        {
-            m_settings->registerSetting("CFKeyOverride", "");
-            m_settings->registerSetting("FlameKeyOverride", "");
+        // Custom Flame API Key
+        m_flameApiKeyOverride = ApiCredentials::loadAndMigrate(m_settings.get(), ApiCredentials::curseForge());
 
-            QString credentialReadError;
-            m_flameApiKeyOverride = CredentialStore::read(
-                QStringLiteral("CurseForgeApiKey"), &credentialReadError);
-            if (!credentialReadError.isEmpty()) {
-                qWarning() << "Could not read the stored CurseForge API key securely;"
-                              " preserving the legacy value for this session if available."
-                           << Privacy::sanitizeText(credentialReadError);
-            }
-            QString flameKey =
-                m_settings->get("FlameKeyOverride").toString().trimmed();
-            if (flameKey.isEmpty()) {
-                flameKey = m_settings->get("CFKeyOverride").toString().trimmed();
-            }
-            if (m_flameApiKeyOverride.isEmpty() && !flameKey.isEmpty()) {
-                if (!CredentialStore::isPersistent()) {
-                    m_flameApiKeyOverride = flameKey;
-                } else {
-                    QString credentialWriteError;
-                    if (CredentialStore::write(QStringLiteral("CurseForgeApiKey"),
-                                               flameKey, &credentialWriteError)) {
-                        QString credentialVerifyError;
-                        const QString storedKey = CredentialStore::read(
-                            QStringLiteral("CurseForgeApiKey"),
-                            &credentialVerifyError);
-                        if (credentialVerifyError.isEmpty() && storedKey == flameKey) {
-                            m_flameApiKeyOverride = flameKey;
-                            m_settings->reset("CFKeyOverride");
-                            m_settings->reset("FlameKeyOverride");
-                        } else {
-                            m_flameApiKeyOverride = flameKey;
-                            const QString reason = credentialVerifyError.isEmpty()
-                                ? QStringLiteral("stored credential did not match")
-                                : Privacy::sanitizeText(credentialVerifyError);
-                            qWarning() << "Could not verify the migrated CurseForge API key;"
-                                          " preserving the legacy value for this session."
-                                       << reason;
-                        }
-                    } else {
-                        m_flameApiKeyOverride = flameKey;
-                        qWarning() << "Could not migrate the CurseForge API key to secure storage;"
-                                      " preserving the legacy value for this session."
-                                   << Privacy::sanitizeText(credentialWriteError);
-                    }
-                }
-            } else if (!m_flameApiKeyOverride.isEmpty() && CredentialStore::isPersistent()
-                       && credentialReadError.isEmpty()) {
-                // A successfully read persistent credential supersedes any legacy copy.
-                m_settings->reset("CFKeyOverride");
-                m_settings->reset("FlameKeyOverride");
-            } else if (!flameKey.isEmpty()) {
-                // Session-only stores must not destroy the only persistent legacy copy.
-                m_flameApiKeyOverride = flameKey;
-            }
-        }
         m_settings->registerSetting("FallbackMRBlockedMods", true);
-        // Migrate the optional Modrinth bearer token out of the plaintext
-        // settings file using the same loss-resistant rules as CurseForge.
-        {
-            m_settings->registerSetting("ModrinthToken", "");
-
-            QString credentialReadError;
-            m_modrinthApiTokenOverride = CredentialStore::read(
-                QStringLiteral("ModrinthApiToken"), &credentialReadError);
-            if (!credentialReadError.isEmpty()) {
-                qWarning() << "Could not read the stored Modrinth API token securely;"
-                              " preserving the legacy value for this session if available."
-                           << Privacy::sanitizeText(credentialReadError);
-            }
-
-            const QString legacyToken =
-                m_settings->get("ModrinthToken").toString().trimmed();
-            if (m_modrinthApiTokenOverride.isEmpty() && !legacyToken.isEmpty()) {
-                m_modrinthApiTokenOverride = legacyToken;
-                if (CredentialStore::isPersistent()) {
-                    QString credentialWriteError;
-                    if (CredentialStore::write(QStringLiteral("ModrinthApiToken"),
-                                               legacyToken, &credentialWriteError)) {
-                        QString credentialVerifyError;
-                        const QString storedToken = CredentialStore::read(
-                            QStringLiteral("ModrinthApiToken"),
-                            &credentialVerifyError);
-                        if (credentialVerifyError.isEmpty()
-                            && storedToken == legacyToken) {
-                            m_settings->reset("ModrinthToken");
-                        } else {
-                            const QString reason = credentialVerifyError.isEmpty()
-                                ? QStringLiteral("stored credential did not match")
-                                : Privacy::sanitizeText(credentialVerifyError);
-                            qWarning() << "Could not verify the migrated Modrinth API token;"
-                                          " preserving the legacy value for this session."
-                                       << reason;
-                        }
-                    } else {
-                        qWarning() << "Could not migrate the Modrinth API token to secure storage;"
-                                      " preserving the legacy value for this session."
-                                   << Privacy::sanitizeText(credentialWriteError);
-                    }
-                }
-            } else if (!m_modrinthApiTokenOverride.isEmpty()
-                       && CredentialStore::isPersistent()
-                       && credentialReadError.isEmpty()) {
-                m_settings->reset("ModrinthToken");
-            }
-        }
+        m_modrinthApiTokenOverride = ApiCredentials::loadAndMigrate(m_settings.get(), ApiCredentials::modrinth());
         m_settings->registerSetting("UserAgentOverride", "");
 
         // FTBApp instances
@@ -2130,38 +2026,10 @@ QString Application::getFlameAPIKey() const
 
 bool Application::setFlameAPIKeyOverride(const QString& key, QString* error)
 {
-    const QString normalized = key.trimmed();
-    if (error) {
-        error->clear();
-    }
-
-    QString storageError;
-    const bool stored = normalized.isEmpty()
-        ? CredentialStore::remove(QStringLiteral("CurseForgeApiKey"), &storageError)
-        : CredentialStore::write(QStringLiteral("CurseForgeApiKey"), normalized,
-                                 &storageError);
-    if (!stored) {
-        if (error) {
-            *error = storageError;
-        }
+    if (!ApiCredentials::save(m_settings.get(), ApiCredentials::curseForge(), key, error)) {
         return false;
     }
-
-    QString verificationError;
-    const QString storedValue = CredentialStore::read(
-        QStringLiteral("CurseForgeApiKey"), &verificationError);
-    if (!verificationError.isEmpty() || storedValue != normalized) {
-        if (error) {
-            *error = !verificationError.isEmpty()
-                ? verificationError
-                : tr("The CurseForge API key could not be verified after saving.");
-        }
-        return false;
-    }
-
-    m_flameApiKeyOverride = normalized;
-    m_settings->reset("CFKeyOverride");
-    m_settings->reset("FlameKeyOverride");
+    m_flameApiKeyOverride = key.trimmed();
     updateCapabilities();
     return true;
 }
@@ -2171,41 +2039,12 @@ QString Application::getModrinthAPIToken() const
     return m_modrinthApiTokenOverride;
 }
 
-bool Application::setModrinthAPITokenOverride(const QString& token,
-                                               QString* error)
+bool Application::setModrinthAPITokenOverride(const QString& token, QString* error)
 {
-    const QString normalized = token.trimmed();
-    if (error) {
-        error->clear();
-    }
-
-    QString storageError;
-    const bool stored = normalized.isEmpty()
-        ? CredentialStore::remove(QStringLiteral("ModrinthApiToken"),
-                                  &storageError)
-        : CredentialStore::write(QStringLiteral("ModrinthApiToken"),
-                                 normalized, &storageError);
-    if (!stored) {
-        if (error) {
-            *error = storageError;
-        }
+    if (!ApiCredentials::save(m_settings.get(), ApiCredentials::modrinth(), token, error)) {
         return false;
     }
-
-    QString verificationError;
-    const QString storedValue = CredentialStore::read(
-        QStringLiteral("ModrinthApiToken"), &verificationError);
-    if (!verificationError.isEmpty() || storedValue != normalized) {
-        if (error) {
-            *error = !verificationError.isEmpty()
-                ? verificationError
-                : tr("The Modrinth API token could not be verified after saving.");
-        }
-        return false;
-    }
-
-    m_modrinthApiTokenOverride = normalized;
-    m_settings->reset("ModrinthToken");
+    m_modrinthApiTokenOverride = token.trimmed();
     return true;
 }
 
