@@ -20,9 +20,7 @@ ApiKeyFields::ApiKeyFields(const Widgets& widgets, QWidget* page) : m_ui(widgets
 {
     m_ui.flameKey->setEchoMode(QLineEdit::Password);
     m_ui.modrinthToken->setEchoMode(QLineEdit::Password);
-    m_ui.flameKey->setPlaceholderText(BuildConfig.FLAME_API_KEY.trimmed().isEmpty() ? tr("Enter your CurseForge API key")
-                                                                                     : tr("Use bundled key"));
-    updateStorageNote();
+    updateTexts();
     m_ui.flameKeyStatus->clear();
     QObject::connect(m_ui.testFlameKeyButton, &QPushButton::clicked, m_page, [this] { testFlameKey(); });
     QObject::connect(m_ui.flameKey, &QLineEdit::textChanged, m_page, [this] { m_ui.flameKeyStatus->clear(); });
@@ -56,11 +54,14 @@ bool ApiKeyFields::save()
 
 void ApiKeyFields::retranslate()
 {
-    updateStorageNote();
+    // The page's retranslateUi() has just put back the .ui texts these fields replace.
+    updateTexts();
 }
 
-void ApiKeyFields::updateStorageNote()
+void ApiKeyFields::updateTexts()
 {
+    m_ui.flameKey->setPlaceholderText(BuildConfig.FLAME_API_KEY.trimmed().isEmpty() ? tr("Enter your CurseForge API key")
+                                                                                     : tr("Use bundled key"));
     m_ui.storageNote->setText(
         CredentialStore::isPersistent()
             ? tr("Your personal key is stored in the operating system's secure credential store and is only sent to the CurseForge API.")

@@ -39,7 +39,7 @@ class ApiKeyFields {
     void retranslate();
 
    private:
-    void updateStorageNote();
+    void updateTexts();
     void testFlameKey();
 
     Widgets m_ui;
