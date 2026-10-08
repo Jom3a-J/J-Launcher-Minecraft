@@ -37,6 +37,10 @@ jobs:
       # compiled from source every time.
       VCPKG_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-binary-cache,readwrite
+      # The Visual Studio generator hands each project's sources to one cl.exe call, which
+      # compiles them one by one unless told otherwise. cl.exe reads extra options from CL, and
+      # /MP makes it compile the files of a project in parallel on every core.
+      CL: /MP
 
     steps:
       - name: Checkout repository
@@ -137,7 +141,7 @@ jobs:
               throw 'Windows x64 CMake configuration failed.'
           }
 
-          & cmake --build $env:BUILD_DIRECTORY --config Debug --parallel 2
+          & cmake --build $env:BUILD_DIRECTORY --config Debug --parallel 4
           if ($LASTEXITCODE -ne 0) {
               throw 'Windows x64 build failed.'
           }
