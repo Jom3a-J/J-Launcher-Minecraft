@@ -92,6 +92,8 @@ class ServerSoftwareDownloadTest : public QObject {
         QFile preserved(installedJar);
         QVERIFY(preserved.open(QIODevice::ReadOnly));
         QCOMPARE(preserved.readAll(), workingJar);
+        // The rejected download's temporary file is gone at once, not when the request is freed.
+        QCOMPARE(QDir(destination).entryList(QDir::Files | QDir::Hidden | QDir::System), QStringList{ "server.jar" });
     }
 
     void startingAnInstallCancelsAVersionListStillLoading()
@@ -630,6 +632,9 @@ class ServerSoftwareDownloadTest : public QObject {
             QVERIFY(!QFileInfo::exists(QDir(destination).filePath("run.bat")));
             QVERIFY(!QFileInfo::exists(
                 QDir(destination).filePath(provider.first + "-installer.jar")));
+            // Nor is any temporary file of the failed download left open in the folder.
+            QVERIFY2(QDir(destination).entryList(QDir::Files | QDir::Hidden | QDir::System).isEmpty(),
+                     qPrintable(QDir(destination).entryList(QDir::Files | QDir::Hidden | QDir::System).join(", ")));
         }
     }
 

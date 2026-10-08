@@ -21,6 +21,8 @@
 #include <QJsonObject>
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
+#include <QDir>
+#include <QScopeGuard>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -322,6 +324,10 @@ int main(int argc, char** argv)
     if (!dataDirectory.isValid()) {
         return 1;
     }
+    // Application makes the data folder the working directory, and Windows cannot remove a folder
+    // a process is in, so step back out before dataDirectory removes it.
+    const QString originalWorkingDirectory = QDir::currentPath();
+    const auto restoreWorkingDirectory = qScopeGuard([&] { QDir::setCurrent(originalWorkingDirectory); });
 
     QByteArray applicationName(argv[0]);
     QByteArray directoryOption("--dir");
