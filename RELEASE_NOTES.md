@@ -8,45 +8,51 @@ is not an approved stable package.
 J Launcher is an independent, GPL-3.0 Minecraft launcher derived from Prism
 Launcher and MultiMC. This candidate is for Windows x64 only.
 
-## What's new in 0.1.1-beta.4
+## What's new in 0.1.1-beta.5
 
-Changes since 0.1.1-beta.3.
+Changes since 0.1.1-beta.4.
 
-### Faster downloads
+### Prism Launcher update
 
-- CurseForge files download over several parallel connections, and large files
-  such as server packs are split into up to eight pieces downloaded at once.
-- Minecraft game files, libraries, and assets from Mojang also use several
-  connections. In a side-by-side test on one PC, a fresh Minecraft 1.21.1
-  download finished in about half the time Prism Launcher 11.1.0 took.
-- FTB modpacks download their files in parallel.
-- A download that receives no data for 15 seconds is retried straight away, up
-  to twice, instead of waiting for the one-minute timeout. Split files resume
-  from where the stalled piece stopped.
+- J Launcher now includes Prism Launcher's changes up to 5 October 2026,
+  with their fixes and improvements.
+- The installer has an optional **Open Modrinth website links** component. It
+  is off by default, so it does not take over links from the Modrinth App, and
+  uninstalling removes it only while it still points to this installation.
 
 ### Servers
 
-- The Servers page uses the shared downloader, so server files get the same
-  parallel, split, and retry behavior.
-- Forge and NeoForge server installs download the installer's libraries in
-  parallel, each checked against its published SHA-1, before the installer
-  runs.
-- A Forge or NeoForge server install that was stopped or failed is detected and
-  reinstalled instead of leaving a server that cannot start.
-- Servers for Forge versions before Minecraft 1.13 install correctly.
-- CurseForge server-pack downloads no longer report a failure twice, and fall
-  back to a normal download when the file host rejects split requests.
-- With no servers yet, the Servers page offers **Create from Modpack** as well
-  as **Create Server**. The Create Server dialog adds **NeoForge Modded** and
-  **Purpur Performance** templates.
+- Closing J Launcher while servers are running asks first and stops them
+  cleanly. Restart timers, the crash-restart limit, and restore rollback were
+  fixed.
+- Purpur, Forge, and NeoForge server downloads are checked against their
+  published checksums, and Fabric server jars are validated.
+- Preparing a server from a modpack and importing a server pack no longer
+  freeze the window. Server packs wrapped in a single folder import correctly.
+- Removing a mod or plugin moves it to the Recycle Bin. Mods and plugins cannot
+  be added or removed while a server pack is being imported.
+- **View Latest Crash Report** works again.
+- The FTB server installer runs only when it is signed by Feed The Beast Ltd,
+  and it cannot be changed between that check and running it.
 
-### Modpack server mode
+### Instances and downloads
 
-- CurseForge, FTB, legacy FTB, and Technic packs show whether they publish an
-  official server pack, and J Launcher warns before building a server from
-  client files.
-- The CurseForge tab has a server-ready filter, like the ATLauncher and
-  Modrinth tabs.
+- A freshly installed modpack could lose some of its components, such as LWJGL
+  or Fabric's intermediary mappings. It then showed "unresolved dependencies"
+  and could not launch offline until it had been launched once online. Fixed.
+- A game launch and a server that need the same Java version no longer
+  download it into the same folder at the same time.
+- Legacy FTB and ATLauncher installs can be cancelled.
+- A failed download no longer leaves a hidden temporary file in the target
+  folder.
+- Launcher logs are no longer cut off at 256 KB.
+
+### Security
+
+- Your CurseForge API key and Modrinth token are only ever sent to the site
+  they belong to, even when a download is redirected elsewhere.
+- Windows helper programs (`cmd.exe`, `taskkill.exe`) are started from the
+  Windows system folder by full path.
 
 ## Highlights
 
