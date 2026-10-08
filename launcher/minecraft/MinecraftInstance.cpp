@@ -67,6 +67,7 @@
 #include "minecraft/launch/PrintInstanceInfo.h"
 #include "minecraft/launch/ReconstructAssets.h"
 #include "minecraft/launch/ScanModFolders.h"
+#include "minecraft/launch/SyncGameSettings.h"
 #include "minecraft/launch/VerifyJavaInstall.h"
 
 #include "tasks/ConcurrentTask.h"
@@ -1211,6 +1212,9 @@ LaunchTask* MinecraftInstance::createLaunchTask(AuthSessionPtr session, Minecraf
         auto mode = session->launchMode != LaunchMode::Offline ? Net::Mode::Online : Net::Mode::Offline;
         process->appendStep(makeShared<TaskStepWrapper>(pptr, makeShared<MinecraftLoadAndCheck>(this, mode)));
     }
+
+    // J Launcher: copy the main instance's game settings if this instance follows it
+    process->appendStep(makeShared<SyncGameSettings>(pptr));
 
     // check java
     {
