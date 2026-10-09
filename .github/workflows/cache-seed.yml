@@ -1,47 +1,48 @@
-name: Build and test Windows x64
+name: Seed build caches
 
-# Phase 9 supports Windows x64 only. This workflow validates pull requests and
-# explicit manual runs without packaging, publishing, signing, or uploading.
+# Pull request checks can only reuse caches saved on develop, the default branch. This saves
+# the Qt SDK and the built vcpkg packages there, so a pull request does not install or build
+# them again. It installs and configures only: no build, no tests. It runs when what it caches
+# changes, weekly (the runner image's compiler changes the built packages, and unused caches
+# expire after a week), and by hand.
 on:
-  pull_request:
+  push:
     branches:
       - develop
-    # A full build takes a while; skip it when only documentation changed.
-    paths-ignore:
-      - '**/*.md'
-      - 'docs/**'
-      - 'LICENSE'
-      - 'COPYING*'
+    paths:
+      - 'vcpkg.json'
+      - 'vcpkg-configuration.json'
+      - 'cmake/vcpkg'
+      - 'cmake/vcpkg-ports/**'
+      - '.github/aqt-settings.ini'
+      - '.github/scripts/**'
+      - '.github/workflows/cache-seed.yml'
+  schedule:
+    - cron: '17 3 * * 1'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  group: cache-seed
+  cancel-in-progress: false
 
 jobs:
-  build-test:
-    name: Build and test (Windows x64)
+  seed:
+    name: Seed Qt and vcpkg caches
     runs-on: windows-2022
-    timeout-minutes: 90
+    timeout-minutes: 45
     permissions:
       contents: read
     env:
+      # Keep in step with build.yml: the keys below must match the ones it restores.
       QT_VERSION: 6.10.2
       QT_ARCH: win64_msvc2022_64
       QT_ROOT: C:\Qt
       BUILD_DIRECTORY: ${{ github.workspace }}\build-ci
-      # Built vcpkg packages are reused between runs instead of being compiled from source
-      # every time. Pull requests can only reuse what was saved on develop, which the cache
-      # seed workflow (cache-seed.yml) does; this workflow only reads it.
       VCPKG_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}\vcpkg-binary-cache,readwrite
-      # The Visual Studio generator hands each project's sources to one cl.exe call, which
-      # compiles them one by one unless told otherwise. cl.exe reads extra options from CL, and
-      # /MP makes it compile the files of a project in parallel on every core.
-      CL: /MP
 
     steps:
       - name: Checkout repository
@@ -69,6 +70,13 @@ jobs:
         shell: pwsh
         run: .\.github\scripts\ci-install-qt.ps1
 
+      - name: Save the pinned Qt SDK
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.QT_ROOT }}\${{ env.QT_VERSION }}
+          key: ${{ steps.qt-cache.outputs.cache-primary-key }}
+
       - name: Bootstrap the pinned vcpkg submodule
         id: vcpkg
         shell: pwsh
@@ -80,10 +88,10 @@ jobs:
           New-Item -ItemType Directory -Force -Path $env:VCPKG_BINARY_CACHE | Out-Null
           $vcpkgRevision = git -C cmake/vcpkg rev-parse HEAD
           "vcpkg_revision=$vcpkgRevision" >> $env:GITHUB_OUTPUT
-          # Built packages depend on the compiler, which comes with the runner image.
           "image=$env:ImageVersion" >> $env:GITHUB_OUTPUT
 
       - name: Restore the vcpkg binary cache
+        id: vcpkg-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.VCPKG_BINARY_CACHE }}
@@ -91,22 +99,16 @@ jobs:
           restore-keys: |
             vcpkg-x64-windows-${{ steps.vcpkg.outputs.vcpkg_revision }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/vcpkg-ports/**') }}-
 
-      - name: Configure, build, and test Windows x64
+      - name: Build the vcpkg packages
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
         shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
+        # Configuring runs vcpkg exactly as the pull request check does, which builds the
+        # packages into the binary cache.
+        run: .\.github\scripts\ci-configure.ps1
 
-          & .\.github\scripts\ci-configure.ps1
-
-          & cmake --build $env:BUILD_DIRECTORY --config Debug --parallel 4
-          if ($LASTEXITCODE -ne 0) {
-              throw 'Windows x64 build failed.'
-          }
-
-          $qtPrefix = Join-Path $env:QT_ROOT "$env:QT_VERSION\msvc2022_64"
-          $env:Path = "$qtPrefix\bin;$env:Path"
-          & ctest --test-dir $env:BUILD_DIRECTORY -C Debug `
-              --output-on-failure --timeout 300 --parallel 4
-          if ($LASTEXITCODE -ne 0) {
-              throw 'Windows x64 tests failed.'
-          }
+      - name: Save the vcpkg binary cache
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.VCPKG_BINARY_CACHE }}
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
