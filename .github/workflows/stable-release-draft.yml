@@ -147,7 +147,15 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Restore the pinned Qt SDK
+        id: qt-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.QT_ROOT }}\${{ env.QT_VERSION }}
+          key: qt-${{ env.QT_VERSION }}-${{ env.QT_ARCH }}-imageformats-networkauth-${{ hashFiles('.github/aqt-settings.ini', '.github/scripts/ci-install-qt.ps1') }}
+
       - name: Install the pinned Qt SDK
+        if: steps.qt-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           python -m pip install --disable-pip-version-check aqtinstall==3.3.0
@@ -182,15 +190,46 @@ jobs:
           }
 
       - name: Bootstrap the pinned vcpkg submodule
+        id: vcpkg
         shell: pwsh
         run: |
           & .\cmake\vcpkg\bootstrap-vcpkg.bat -disableMetrics
           if ($LASTEXITCODE -ne 0) {
               throw "Unable to bootstrap the repository's vcpkg revision."
           }
+          $vcpkgRevision = git -C cmake/vcpkg rev-parse HEAD
+          "vcpkg_revision=$vcpkgRevision" >> $env:GITHUB_OUTPUT
+          "image=$env:ImageVersion" >> $env:GITHUB_OUTPUT
+
+      # The vcpkg packages and Qt SDK come from caches saved on develop by cache-seed.yml, which
+      # only develop pushes, its schedule, or a maintainer runs; pull requests cannot write them.
+      # Same key as build.yml. A miss only means vcpkg builds the packages itself, as before.
+      - name: Restore the vcpkg binary cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          # The path must match the one cache-seed.yml saved from, or nothing is restored.
+          path: ${{ github.workspace }}\vcpkg-binary-cache
+          key: vcpkg-x64-windows-${{ steps.vcpkg.outputs.vcpkg_revision }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/vcpkg-ports/**') }}-${{ steps.vcpkg.outputs.image }}
+          restore-keys: |
+            vcpkg-x64-windows-${{ steps.vcpkg.outputs.vcpkg_revision }}-${{ hashFiles('vcpkg.json', 'vcpkg-configuration.json', 'cmake/vcpkg-ports/**') }}-
+
+      # The preflight counts any untracked file in the checkout as unclean source, so the restored
+      # packages move out of it before the build.
+      - name: Move the vcpkg packages out of the checkout
+        shell: pwsh
+        run: |
+          $restored = Join-Path $env:GITHUB_WORKSPACE 'vcpkg-binary-cache'
+          $packages = Join-Path $env:RUNNER_TEMP 'vcpkg-binary-cache'
+          if (Test-Path -LiteralPath $restored) {
+              Move-Item -LiteralPath $restored -Destination $packages
+          } else {
+              New-Item -ItemType Directory -Force -Path $packages | Out-Null
+          }
 
       - name: Build, test, package, and audit
         shell: pwsh
+        env:
+          VCPKG_BINARY_SOURCES: clear;files,${{ runner.temp }}\vcpkg-binary-cache,readwrite
         run: |
           # This tag predates the preflight script's detached-HEAD fix. Give its
           # exact commit a local branch name without changing source files.
@@ -212,7 +251,8 @@ jobs:
               Generator = 'Ninja Multi-Config'
               ExpectedTag = $env:RELEASE_TAG
               ReleaseStage = $env:RELEASE_STAGE
-              ParallelJobs = 2
+              # The runner has 4 cores, and Ninja compiles one file per job.
+              ParallelJobs = 4
           }
           $preflightCommand = Get-Command -Name $preflightScript
           if ($preflightCommand.Parameters.ContainsKey('CurseForgeApiKey')) {
