@@ -147,8 +147,11 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Betas reuse the Qt SDK and vcpkg packages saved on develop. Stable releases build and
+      # install everything in this run, for the plainest possible record of how they were made.
       - name: Restore the pinned Qt SDK
         id: qt-cache
+        if: env.RELEASE_STAGE == 'beta'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ env.QT_ROOT }}\${{ env.QT_VERSION }}
@@ -205,6 +208,7 @@ jobs:
       # only develop pushes, its schedule, or a maintainer runs; pull requests cannot write them.
       # Same key as build.yml. A miss only means vcpkg builds the packages itself, as before.
       - name: Restore the vcpkg binary cache
+        if: env.RELEASE_STAGE == 'beta'
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           # The path must match the one cache-seed.yml saved from, or nothing is restored.
