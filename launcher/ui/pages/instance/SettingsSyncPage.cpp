@@ -7,11 +7,13 @@
 #include <QFile>
 #include <QGroupBox>
 #include <QLabel>
-#include <QListWidget>
+#include <QTreeWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include "minecraft/GameSettingsSync.h"
 #include "minecraft/MinecraftInstance.h"
+#include "ui/pages/SyncOptionTree.h"
 
 using GameSettingsSync::Kind;
 
@@ -37,7 +39,7 @@ SettingsSyncPage::SettingsSyncPage(MinecraftInstance* instance, QWidget* parent)
     auto* ownLayout = new QVBoxLayout(m_ownGroup);
     m_ownIntro = new QLabel(m_ownGroup);
     m_ownIntro->setWordWrap(true);
-    m_ownOptions = new QListWidget(m_ownGroup);
+    m_ownOptions = new QTreeWidget(m_ownGroup);
     ownLayout->addWidget(m_ownIntro);
     ownLayout->addWidget(m_ownOptions, 1);
 
@@ -51,7 +53,7 @@ SettingsSyncPage::SettingsSyncPage(MinecraftInstance* instance, QWidget* parent)
         GameSettingsSync::setInstanceUsesSync(m_instance, checked);
         refresh();
     });
-    connect(m_ownOptions, &QListWidget::itemChanged, this, &SettingsSyncPage::onOwnOptionChanged);
+    connect(m_ownOptions, &QTreeWidget::itemChanged, this, &SettingsSyncPage::onOwnOptionChanged);
 
     updateTexts();
     refresh();
@@ -115,43 +117,53 @@ void SettingsSyncPage::fillOwnOptions()
         if (!excluded.contains(key))
             keys << key;
     }
+    QStringList modKeys;
     if (GameSettingsSync::syncsModOptions()) {
         QFile options(QDir(m_instance->gameRoot()).filePath(QStringLiteral("options.txt")));
         if (options.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            QStringList modKeys;
             for (const QString& line : QString::fromUtf8(options.readAll()).split(QLatin1Char('\n'))) {
                 const QString key = line.section(QLatin1Char(':'), 0, 0).trimmed();
                 if (!key.isEmpty() && line.contains(QLatin1Char(':')) && !GameSettingsSync::isVanillaOption(key) &&
                     key != QStringLiteral("version") && key != QStringLiteral("resourcePacks") &&
-                    key != QStringLiteral("incompatibleResourcePacks") && !excluded.contains(key))
+                    key != QStringLiteral("incompatibleResourcePacks") && !excluded.contains(key) && !modKeys.contains(key))
                     modKeys << key;
             }
-            modKeys.sort();
-            keys << modKeys;
         }
     }
 
     const QStringList own = GameSettingsSync::ownOptionKeys(m_instance);
     m_filling = true;
-    m_ownOptions->clear();
-    for (const QString& key : keys) {
-        auto* item = new QListWidgetItem(key, m_ownOptions);
-        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-        item->setCheckState(own.contains(key) ? Qt::Checked : Qt::Unchecked);
-    }
+    SyncOptionTree::fill(m_ownOptions, keys, QSet<QString>(own.begin(), own.end()), modKeys);
     m_filling = false;
 }
 
-void SettingsSyncPage::onOwnOptionChanged(QListWidgetItem* item)
+void SettingsSyncPage::onOwnOptionChanged(QTreeWidgetItem* item)
 {
-    if (m_filling || !item)
+    if (m_filling || !item || item->data(0, Qt::UserRole).toString().isEmpty() || m_saveQueued)
         return;
-    QStringList own = GameSettingsSync::ownOptionKeys(m_instance);
-    if (item->checkState() == Qt::Checked) {
-        if (!own.contains(item->text()))
-            own << item->text();
-    } else {
-        own.removeAll(item->text());
+    // A whole category ticked at once changes each of its settings, one after the other: save
+    // once, after all of them.
+    m_saveQueued = true;
+    QTimer::singleShot(0, this, [this] {
+        m_saveQueued = false;
+        saveOwnOptions();
+    });
+}
+
+void SettingsSyncPage::saveOwnOptions()
+{
+    // Settings kept as this instance's own that the list does not show (left out of sync for now)
+    // stay kept; the shown ones are as ticked.
+    const QStringList shownTicked = SyncOptionTree::keys(m_ownOptions, true);
+    const QStringList shownUnticked = SyncOptionTree::keys(m_ownOptions, false);
+    QStringList own;
+    for (const QString& key : GameSettingsSync::ownOptionKeys(m_instance)) {
+        if (!shownUnticked.contains(key))
+            own << key;
+    }
+    for (const QString& key : shownTicked) {
+        if (!own.contains(key))
+            own << key;
     }
     GameSettingsSync::setOwnOptionKeys(m_instance, own);
 }

@@ -15,28 +15,17 @@
 #include <QScrollArea>
 #include <QSet>
 #include <QTreeWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include "Application.h"
 #include "InstanceList.h"
 #include "minecraft/GameSettingsSync.h"
 #include "minecraft/MinecraftInstance.h"
+#include "ui/pages/SyncOptionTree.h"
 
 using GameSettingsSync::Kind;
 
-namespace {
-// The groups the game settings are shown in, by key prefix.
-struct OptionGroup {
-    const char* prefix;
-    const char* title;
-};
-const OptionGroup OptionGroups[] = {
-    { "key_key.", QT_TRANSLATE_NOOP("SyncPage", "Keybinds") },
-    { "soundCategory_", QT_TRANSLATE_NOOP("SyncPage", "Volume") },
-    { "modelPart_", QT_TRANSLATE_NOOP("SyncPage", "Skin parts") },
-    { "", QT_TRANSLATE_NOOP("SyncPage", "Other settings") },
-};
-}  // namespace
 
 SyncPage::SyncPage(QWidget* parent) : QWidget(parent)
 {
@@ -178,24 +167,13 @@ void SyncPage::refresh()
 void SyncPage::fillOptions()
 {
     const QStringList excluded = GameSettingsSync::excludedOptionKeys();
-    m_filling = true;
-    m_options->clear();
-    QTreeWidgetItem* groups[std::size(OptionGroups)] = {};
-    for (size_t g = 0; g < std::size(OptionGroups); ++g) {
-        groups[g] = new QTreeWidgetItem(m_options, { QCoreApplication::translate("SyncPage", OptionGroups[g].title) });
-        groups[g]->setFlags(groups[g]->flags() | Qt::ItemIsAutoTristate | Qt::ItemIsUserCheckable);
-    }
+    QSet<QString> synced;
     for (const QString& key : GameSettingsSync::vanillaOptionKeys()) {
-        size_t g = 0;
-        while (!key.startsWith(QLatin1String(OptionGroups[g].prefix)))
-            ++g;  // the last group's empty prefix matches everything
-        const QString shown = key.mid(qsizetype(qstrlen(OptionGroups[g].prefix)));
-        auto* item = new QTreeWidgetItem(groups[g], { shown });
-        item->setToolTip(0, key);
-        item->setData(0, Qt::UserRole, key);
-        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-        item->setCheckState(0, excluded.contains(key) ? Qt::Unchecked : Qt::Checked);
+        if (!excluded.contains(key))
+            synced.insert(key);
     }
+    m_filling = true;
+    SyncOptionTree::fill(m_options, GameSettingsSync::vanillaOptionKeys(), synced);
     m_filling = false;
 }
 
@@ -299,18 +277,15 @@ bool SyncPage::startFromInstance(const QString& title)
 
 void SyncPage::onOptionChanged(QTreeWidgetItem* item)
 {
-    if (m_filling || !item || item->data(0, Qt::UserRole).toString().isEmpty())
+    if (m_filling || !item || item->data(0, Qt::UserRole).toString().isEmpty() || m_saveQueued)
         return;
-    QStringList excluded;
-    for (int g = 0; g < m_options->topLevelItemCount(); ++g) {
-        auto* group = m_options->topLevelItem(g);
-        for (int i = 0; i < group->childCount(); ++i) {
-            auto* child = group->child(i);
-            if (child->checkState(0) != Qt::Checked)
-                excluded << child->data(0, Qt::UserRole).toString();
-        }
-    }
-    GameSettingsSync::setExcludedOptionKeys(excluded);
+    // A whole category ticked at once changes each of its settings, one after the other: save
+    // once, after all of them.
+    m_saveQueued = true;
+    QTimer::singleShot(0, this, [this] {
+        m_saveQueued = false;
+        GameSettingsSync::setExcludedOptionKeys(SyncOptionTree::keys(m_options, false));
+    });
 }
 
 void SyncPage::onConfigChanged(QListWidgetItem* item)

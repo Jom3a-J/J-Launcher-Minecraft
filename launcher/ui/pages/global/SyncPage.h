@@ -58,4 +58,5 @@ class SyncPage : public QWidget, public BasePage {
     QPushButton* m_refreshConfig;
     QLabel* m_note;
     bool m_filling = false;
+    bool m_saveQueued = false;  // one save after a whole category changes
 };

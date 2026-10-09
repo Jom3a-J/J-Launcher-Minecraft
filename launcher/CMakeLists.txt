@@ -1081,6 +1081,8 @@ SET(LAUNCHER_SOURCES
     ui/pages/global/ProxyPage.h
     ui/pages/global/SyncPage.cpp
     ui/pages/global/SyncPage.h
+    ui/pages/SyncOptionTree.cpp
+    ui/pages/SyncOptionTree.h
     ui/pages/global/APIPage.cpp
     ui/pages/global/APIPage.h
     ui/pages/global/ApiKeyFields.cpp

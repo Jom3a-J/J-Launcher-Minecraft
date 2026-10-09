@@ -149,6 +149,10 @@ ecm_add_test(ApiCredentials_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSIO
 ecm_add_test(GameSettingsSync_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME GameSettingsSync)
 
+ecm_add_test(SyncOptionTree_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
+    TEST_NAME SyncOptionTree)
+set_tests_properties(SyncOptionTree PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 ecm_add_test(ApiKeyFields_test.cpp LINK_LIBRARIES Launcher_logic Qt${QT_VERSION_MAJOR}::Test
     TEST_NAME ApiKeyFields)
 set_tests_properties(ApiKeyFields PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

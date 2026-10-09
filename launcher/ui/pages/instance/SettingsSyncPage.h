@@ -11,8 +11,8 @@
 class QCheckBox;
 class QGroupBox;
 class QLabel;
-class QListWidget;
-class QListWidgetItem;
+class QTreeWidget;
+class QTreeWidgetItem;
 class MinecraftInstance;
 
 // An instance's Sync page: whether this instance takes part in sync between instances, which
@@ -33,7 +33,8 @@ class SettingsSyncPage : public QWidget, public BasePage {
     void updateTexts();
     void refresh();
     void fillOwnOptions();
-    void onOwnOptionChanged(QListWidgetItem* item);
+    void onOwnOptionChanged(QTreeWidgetItem* item);
+    void saveOwnOptions();
 
     MinecraftInstance* m_instance;
     QLabel* m_status;
@@ -42,6 +43,7 @@ class SettingsSyncPage : public QWidget, public BasePage {
     QCheckBox* m_kindBoxes[GameSettingsSync::KindCount];
     QGroupBox* m_ownGroup;
     QLabel* m_ownIntro;
-    QListWidget* m_ownOptions;
+    QTreeWidget* m_ownOptions;
     bool m_filling = false;
+    bool m_saveQueued = false;  // one save after a whole category changes
 };
