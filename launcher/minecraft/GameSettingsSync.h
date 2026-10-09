@@ -117,13 +117,16 @@ struct Report {
     QStringList changed;  // what was put into the instance, or saved to the shared copy
     int backupsMade = 0;
     QStringList errors;
+    QString session;  // applyToInstance: set once this session's record is saved; collect needs it
 };
 
 // When a game starts: puts the shared copy into the instance and records the result in statePath.
 Report applyToInstance(const QString& storeRoot, const QString& gameRoot, const QString& backupRoot, const QString& statePath,
                        const Plan& plan);
-// When the game has closed: saves what changed since applyToInstance into the shared copy.
-Report collectFromInstance(const QString& storeRoot, const QString& gameRoot, const QString& statePath, const Plan& plan);
+// When the game has closed: saves what changed since applyToInstance into the shared copy. Only with
+// the session applyToInstance returned, and only against that session's own record.
+Report collectFromInstance(const QString& storeRoot, const QString& gameRoot, const QString& statePath, const Plan& plan,
+                           const QString& session);
 // The starting point: replaces the shared copy with this instance's things.
 Report initializeStore(const QString& storeRoot, const QString& gameRoot, const Plan& plan);
 

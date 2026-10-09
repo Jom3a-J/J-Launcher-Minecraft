@@ -3,8 +3,15 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QTemporaryDir>
 #include <QTest>
+
+#ifdef Q_OS_WIN
+#include <fcntl.h>
+#include <io.h>
+#include <share.h>
+#endif
 
 #include "minecraft/GameSettingsSync.h"
 
@@ -70,13 +77,18 @@ struct Setup {
     QString backup(const QString& name) const { return root.filePath(name + "/settings-sync-backup"); }
     QString state(const QString& name) const { return root.filePath(name + "/.jlsync/launch-state.json"); }
 
+    // Like the launch step: closing the game uses the session its start returned.
+    mutable QHash<QString, QString> sessions;
+
     GameSettingsSync::Report apply(const QString& name, const Plan& plan = everything()) const
     {
-        return GameSettingsSync::applyToInstance(store(), game(name), backup(name), state(name), plan);
+        auto report = GameSettingsSync::applyToInstance(store(), game(name), backup(name), state(name), plan);
+        sessions.insert(name, report.session);
+        return report;
     }
     GameSettingsSync::Report collect(const QString& name, const Plan& plan = everything()) const
     {
-        return GameSettingsSync::collectFromInstance(store(), game(name), state(name), plan);
+        return GameSettingsSync::collectFromInstance(store(), game(name), state(name), plan, sessions.value(name));
     }
 };
 }  // namespace
@@ -117,6 +129,19 @@ class GameSettingsSyncTest : public QObject {
         QVERIFY(GameSettingsSync::usesNamedKeys("1.21.1"));
         QVERIFY(!GameSettingsSync::usesNamedKeys("1.12.2"));
         QVERIFY(!GameSettingsSync::usesNamedKeys(QString()));
+        // Snapshots: 17w43a was the first with named keys; 1.12-era ones still use numbers.
+        QVERIFY(!GameSettingsSync::usesNamedKeys("17w06a"));
+        QVERIFY(!GameSettingsSync::usesNamedKeys("17w31a"));
+        QVERIFY(GameSettingsSync::usesNamedKeys("17w43a"));
+        QVERIFY(GameSettingsSync::usesNamedKeys("18w01a"));
+        QVERIFY(GameSettingsSync::usesNamedKeys("24w14a"));
+        // Pre-releases and release candidates belong to their release.
+        QVERIFY(GameSettingsSync::usesNamedKeys("1.13-pre1"));
+        QVERIFY(GameSettingsSync::usesNamedKeys("1.13 Pre-Release 1"));
+        QVERIFY(GameSettingsSync::usesNamedKeys("1.21-rc1"));
+        QVERIFY(!GameSettingsSync::usesNamedKeys("1.12.2-pre2"));
+        // Anything unrecognised counts as old.
+        QVERIFY(!GameSettingsSync::usesNamedKeys("3D Shareware v1.34"));
     }
 
     void takesTheDataVersionOnlyWhenTheInstanceHasNone()
@@ -247,10 +272,25 @@ class GameSettingsSyncTest : public QObject {
         QVERIFY(QFile::setPermissions(s.state("a"), QFile::ReadOwner));
 
         const auto report = s.apply("a");
-        QFile::setPermissions(s.state("a"), QFile::ReadOwner | QFile::WriteOwner);
         QVERIFY(!report.errors.isEmpty());
+        QVERIFY(report.session.isEmpty());
         // Nothing was put in, so closing the game cannot mistake sync's values for the player's.
         QCOMPARE(readText(s.game("a") + "/options.txt"), QByteArray("fov:0.5\n"));
+        // And closing the game saves nothing: the earlier record (fov:0.1) is never compared with.
+        s.collect("a");
+        QFile::setPermissions(s.state("a"), QFile::ReadOwner | QFile::WriteOwner);
+        QCOMPARE(readText(s.store() + "/options.txt"), QByteArray("fov:0.8\n"));
+    }
+
+    void onlyComparesWithItsOwnSessionsRecord()
+    {
+        Setup s;
+        QVERIFY(writeText(s.store() + "/options.txt", "fov:0.8\n"));
+        QVERIFY(writeText(s.game("a") + "/options.txt", "fov:0.5\n"));
+        QVERIFY(writeText(s.state("a"), "{\"session\":\"earlier\",\"options\":\"fov:0.1\\n\",\"files\":{}}"));
+        const auto report = GameSettingsSync::collectFromInstance(s.store(), s.game("a"), s.state("a"), everything(), "this-one");
+        QVERIFY(report.changed.isEmpty());
+        QCOMPARE(readText(s.store() + "/options.txt"), QByteArray("fov:0.8\n"));
     }
 
     void hotbarsOnlyFrom113On()
@@ -542,6 +582,60 @@ class GameSettingsSyncTest : public QObject {
         plan.modpack = true;
         report = GameSettingsSync::initializeStore(m.store(), m.game("start"), plan);
         QVERIFY(!QFileInfo::exists(m.store() + "/packs"));
+    }
+
+    void startingAgainReplacesWhatTheNewInstanceLacks()
+    {
+        Setup s;
+        Plan plan = everything();
+        plan.sharedConfig = { "xaero" };
+        QVERIFY(writeText(s.store() + "/options.txt", "fov:0.8\n"));
+        QVERIFY(writeText(s.store() + "/servers.dat", "the old instance's servers"));
+        QVERIFY(writeText(s.store() + "/config/xaero/old.txt", "old"));
+        QVERIFY(writeText(s.game("new") + "/options.txt", "fov:0.3\n"));
+        QVERIFY(writeText(s.game("new") + "/config/xaero/minimap.txt", "zoom:2"));
+
+        const auto report = GameSettingsSync::initializeStore(s.store(), s.game("new"), plan);
+        QVERIFY2(report.errors.isEmpty(), qPrintable(report.errors.join('\n')));
+        QCOMPARE(readText(s.store() + "/options.txt"), QByteArray("fov:0.3\n"));
+        QVERIFY(!QFileInfo::exists(s.store() + "/servers.dat"));
+        QVERIFY(!QFileInfo::exists(s.store() + "/config/xaero/old.txt"));
+        QCOMPARE(readText(s.store() + "/config/xaero/minimap.txt"), QByteArray("zoom:2"));
+
+        // Nothing was deleted: the old copies were set aside.
+        const QStringList replaced = QDir(s.store() + "/replaced").entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        QCOMPARE(replaced.size(), 1);
+        const QString aside = s.store() + "/replaced/" + replaced.first();
+        QCOMPARE(readText(aside + "/servers.dat"), QByteArray("the old instance's servers"));
+        QCOMPARE(readText(aside + "/options.txt"), QByteArray("fov:0.8\n"));
+        QCOMPARE(readText(aside + "/config/xaero/old.txt"), QByteArray("old"));
+
+        // An instance starting afterwards does not get the old server list.
+        s.apply("other");
+        QVERIFY(!QFileInfo::exists(s.game("other") + "/servers.dat"));
+    }
+
+    void startingAgainFromAnUnreadableInstanceChangesNothing()
+    {
+#ifdef Q_OS_WIN
+        Setup s;
+        QVERIFY(writeText(s.store() + "/options.txt", "fov:0.8\n"));
+        QVERIFY(writeText(s.store() + "/servers.dat", "servers"));
+        QVERIFY(writeText(s.game("locked") + "/options.txt", "fov:0.3\n"));
+        // Another program holds the file and lets nobody read it.
+        int handle = -1;
+        QCOMPARE(_wsopen_s(&handle, reinterpret_cast<const wchar_t*>(QDir::toNativeSeparators(s.game("locked") + "/options.txt").utf16()),
+                           _O_RDONLY, _SH_DENYRW, 0),
+                 0);
+        const auto report = GameSettingsSync::initializeStore(s.store(), s.game("locked"), everything());
+        _close(handle);
+        QVERIFY(!report.errors.isEmpty());
+        QCOMPARE(readText(s.store() + "/options.txt"), QByteArray("fov:0.8\n"));
+        QCOMPARE(readText(s.store() + "/servers.dat"), QByteArray("servers"));
+        QVERIFY(!QFileInfo::exists(s.store() + "/replaced"));
+#else
+        QSKIP("Holding a file so nobody can read it is a Windows feature.");
+#endif
     }
 
     void startsFromTheChosenInstance()

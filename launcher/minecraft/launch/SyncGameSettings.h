@@ -22,5 +22,6 @@ class SyncGameSettings : public LaunchStep {
     void logReport(const QString& doneText, const GameSettingsSync::Report& report);
 
     bool m_applied = false;
+    QString m_session;  // this launch's own sync record
     GameSettingsSync::Plan m_plan;
 };

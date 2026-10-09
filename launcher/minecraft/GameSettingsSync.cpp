@@ -3,6 +3,7 @@
 #include "GameSettingsSync.h"
 
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QDebug>
 #include <QDir>
 #include <QDirIterator>
@@ -12,6 +13,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QRegularExpression>
+#include <QUuid>
 
 #include "Application.h"
 #include "BaseInstance.h"
@@ -393,6 +396,22 @@ QStringList shaderSettingsFiles(const QString& root, const QStringList& ownShade
     return files;
 }
 
+// Moves storeRoot/relativePath (a file or folder) aside to storeRoot/replaced/<stamp>/, so a new
+// starting point can replace the shared copy without deleting anything. True when nothing is in
+// the way any more.
+bool retireFromStore(const QString& storeRoot, const QString& stamp, const QString& relativePath, Report& report)
+{
+    const QString path = QDir(storeRoot).filePath(relativePath);
+    if (!QFileInfo::exists(path))
+        return true;
+    const QString target = QDir(storeRoot).filePath(QStringLiteral("replaced/") + stamp + QLatin1Char('/') + relativePath);
+    if (!FS::ensureFilePathExists(target) || !QDir().rename(path, target)) {
+        report.errors << QStringLiteral("Could not set aside %1").arg(path);
+        return false;
+    }
+    return true;
+}
+
 QString countText(const char* text, int count)
 {
     return QCoreApplication::translate("SyncGameSettings", text, nullptr, count);
@@ -521,9 +540,22 @@ QString minecraftVersion(MinecraftInstance* instance)
 
 bool usesNamedKeys(const QString& minecraftVersion)
 {
-    // 1.13 replaced numeric key codes with names such as "key.keyboard.w". Unknown counts as old,
-    // so keybinds are never written in a form the game cannot read.
-    return !minecraftVersion.isEmpty() && !(Version(minecraftVersion) < Version(QStringLiteral("1.13")));
+    // 1.13 replaced numeric key codes with names such as "key.keyboard.w"; its first snapshot was
+    // 17w43a. Anything not recognised counts as old, so keybinds are never written in a form the
+    // game cannot read.
+    static const QRegularExpression snapshot(QStringLiteral("^(\\d{2})w(\\d{2})[a-z]"));
+    static const QRegularExpression release(QStringLiteral("^(\\d+\\.\\d+(?:\\.\\d+)*)(?:$|[\\s_-])"));
+    const QString version = minecraftVersion.trimmed();
+    if (const auto match = snapshot.match(version); match.hasMatch()) {
+        const int year = match.captured(1).toInt();
+        const int week = match.captured(2).toInt();
+        return year > 17 || (year == 17 && week >= 43);
+    }
+    // A release, or a pre-release or release candidate of one ("1.13-pre1", "1.13 Pre-Release 1"):
+    // those already belong to their release, so only the number counts.
+    if (const auto match = release.match(version); match.hasMatch())
+        return !(Version(match.captured(1)) < Version(QStringLiteral("1.13")));
+    return false;
 }
 
 bool isVanillaOption(const QString& key)
@@ -820,22 +852,31 @@ Report applyToInstance(const QString& storeRoot, const QString& gameRoot, const 
     state.insert("files", files);
     state.insert("packs", packs);
     state.insert("groupFiles", groupFiles);
+    // This session's own record: closing the game only ever compares with it.
+    const QString session = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    state.insert("session", session);
     if (auto written = FS::write(statePath, QJsonDocument(state).toJson(QJsonDocument::Compact)); !written)
         report.errors << written.error();
+    else
+        report.session = session;
     return report;
 }
 
-Report collectFromInstance(const QString& storeRoot, const QString& gameRoot, const QString& statePath, const Plan& plan)
+Report collectFromInstance(const QString& storeRoot, const QString& gameRoot, const QString& statePath, const Plan& plan,
+                           const QString& session)
 {
     Report report;
-    if (!QFileInfo(statePath).isFile())
-        return report;  // nothing was applied, so there is nothing to compare with
+    if (session.isEmpty() || !QFileInfo(statePath).isFile())
+        return report;  // nothing was applied this session, so there is nothing to compare with
     auto stateData = FS::read(statePath);
     if (!stateData) {
         report.errors << stateData.error();
         return report;
     }
     const QJsonObject state = QJsonDocument::fromJson(*stateData).object();
+    // A record from another session would make values sync put in look like the player's changes.
+    if (state.value("session").toString() != session)
+        return report;
     const QJsonObject files = state.value("files").toObject();
     const QString instanceOptions = readText(QDir(gameRoot).filePath(OptionsFile), report);
     const QString optionsAtLaunch = state.value("options").toString();
@@ -978,23 +1019,40 @@ Report collectFromInstance(const QString& storeRoot, const QString& gameRoot, co
 Report initializeStore(const QString& storeRoot, const QString& gameRoot, const Plan& plan)
 {
     Report report;
-    const Options options = parseOptions(readText(QDir(gameRoot).filePath(OptionsFile), report));
+    // Read the starting point first: if its settings cannot be read, the shared copy stays as it is.
+    const QString sourceOptionsPath = QDir(gameRoot).filePath(OptionsFile);
+    const bool sourceHasOptions = QFileInfo(sourceOptionsPath).isFile();
+    const Options options = parseOptions(readText(sourceOptionsPath, report));
+    if (!report.errors.isEmpty())
+        return report;
+
+    // The new starting point replaces the shared copy: what it does not have must not stay behind
+    // from the previous one. Nothing is deleted; the old copies are set aside under replaced/.
+    const QString stamp = QDateTime::currentDateTime().toString(QStringLiteral("yyyyMMdd-HHmmss-zzz"));
     if (plan.gameSettings) {
-        // Everything except what is never synced: which settings move is decided at each launch,
-        // so changing the choices later needs no new starting point.
-        QStringList lines;
-        for (const QString& key : options.keys) {
-            if (key == DataVersionKey || (!neverSynced(key) && (!isKeybind(key) || plan.options.namedKeys)))
-                lines << options.lines.value(key);
+        if (!sourceHasOptions) {
+            retireFromStore(storeRoot, stamp, OptionsFile, report);
+        } else {
+            // Everything except what is never synced: which settings move is decided at each
+            // launch, so changing the choices later needs no new starting point.
+            QStringList lines;
+            for (const QString& key : options.keys) {
+                if (key == DataVersionKey || (!neverSynced(key) && (!isKeybind(key) || plan.options.namedKeys)))
+                    lines << options.lines.value(key);
+            }
+            if (retireFromStore(storeRoot, stamp, OptionsFile, report)) {
+                if (auto written = FS::write(QDir(storeRoot).filePath(OptionsFile), joinLines(lines).toUtf8()); !written)
+                    report.errors << written.error();
+                else
+                    report.changed << QCoreApplication::translate("SyncGameSettings", "game settings");
+            }
         }
-        if (auto written = FS::write(QDir(storeRoot).filePath(OptionsFile), joinLines(lines).toUtf8()); !written)
-            report.errors << written.error();
-        else
-            report.changed << QCoreApplication::translate("SyncGameSettings", "game settings");
     }
     for (const WholeFile& file : WholeFiles) {
         const QString path = QString::fromLatin1(file.path);
-        if (planned(plan, file.kind) && QFileInfo(QDir(gameRoot).filePath(path)).isFile() && copyFile(path, gameRoot, storeRoot, report))
+        if (!planned(plan, file.kind) || !retireFromStore(storeRoot, stamp, path, report))
+            continue;
+        if (QFileInfo(QDir(gameRoot).filePath(path)).isFile() && copyFile(path, gameRoot, storeRoot, report))
             report.changed << kindName(file);
     }
 
@@ -1056,7 +1114,8 @@ Report initializeStore(const QString& storeRoot, const QString& gameRoot, const 
     if (plan.modSettings) {
         int copied = 0;
         for (const QString& entry : plan.sharedConfig) {
-            if (!isPlainEntryName(entry))
+            // Each shared entry as a whole becomes the starting point's: files it lacks go too.
+            if (!isPlainEntryName(entry) || !retireFromStore(storeRoot, stamp, ConfigFolder + QLatin1Char('/') + entry, report))
                 continue;
             for (const QString& path : configFiles(gameRoot, entry)) {
                 if (copyFile(path, gameRoot, storeRoot, report))
