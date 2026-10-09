@@ -8,8 +8,8 @@
 
 #include "minecraft/GameSettingsSync.h"
 
-using GameSettingsSync::Choices;
-using GameSettingsSync::OptionsScope;
+using GameSettingsSync::OptionRules;
+using GameSettingsSync::Plan;
 
 namespace {
 bool writeText(const QString& path, const QByteArray& text)
@@ -25,263 +25,293 @@ QByteArray readText(const QString& path)
     return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
 }
 
-OptionsScope settingsOnly(bool keybinds = true)
+OptionRules rules(QSet<QString> excluded = {}, bool modOptions = true, bool namedKeys = true)
 {
-    OptionsScope scope;
-    scope.keybinds = keybinds;
-    return scope;
+    OptionRules result;
+    result.excluded = std::move(excluded);
+    result.modOptions = modOptions;
+    result.namedKeys = namedKeys;
+    return result;
 }
 
-// A main and a follower instance's game folders, and the follower's backup folder.
-struct Instances {
+Plan everything()
+{
+    Plan plan;
+    plan.gameSettings = plan.servers = plan.commandHistory = plan.hotbars = plan.modSettings = true;
+    return plan;
+}
+
+// The shared copy, two instances' game folders, and their backup folders and launch states.
+struct Setup {
     QTemporaryDir root;
-    QString main() const { return root.filePath("main/minecraft"); }
-    QString follower() const { return root.filePath("follower/minecraft"); }
-    QString backup() const { return root.filePath("follower/settings-sync-backup"); }
-};
+    QString store() const { return root.filePath("data/sync"); }
+    QString game(const QString& name) const { return root.filePath(name + "/minecraft"); }
+    QString backup(const QString& name) const { return root.filePath(name + "/settings-sync-backup"); }
+    QString state(const QString& name) const { return root.filePath(name + "/.jlsync/launch-state.json"); }
 
-Choices everything()
-{
-    Choices choices;
-    choices.gameSettings = choices.resourcePacks = choices.shaderPacks = choices.modSettings = true;
-    choices.sameKeyFormat = true;
-    return choices;
-}
+    GameSettingsSync::Report apply(const QString& name, const Plan& plan = everything()) const
+    {
+        return GameSettingsSync::applyToInstance(store(), game(name), backup(name), state(name), plan);
+    }
+    GameSettingsSync::Report collect(const QString& name, const Plan& plan = everything()) const
+    {
+        return GameSettingsSync::collectFromInstance(store(), game(name), state(name), plan);
+    }
+};
 }  // namespace
 
 class GameSettingsSyncTest : public QObject {
     Q_OBJECT
 
    private slots:
-    // ---- Game settings (options.txt) ----
+    // ---- Putting the shared settings into an instance ----
 
-    void copiesMainSettingsAndKeepsFollowerOnlyOnes()
+    void appliesOnlyTheSyncedSettings()
     {
-        const QString follower = "version:3465\nfov:0.0\nsoundCategory_master:1.0\nfollowerOnly:kept\n";
-        const QString main = "version:3955\nfov:0.5\nsoundCategory_master:0.3\nmainOnly:added\n";
-        QCOMPARE(GameSettingsSync::mergeOptions(follower, main, settingsOnly()),
-                 QString("version:3465\nfov:0.5\nsoundCategory_master:0.3\nfollowerOnly:kept\nmainOnly:added\n"));
+        const QString instance = "version:3465\nfov:0.0\ngamma:0.0\nlastServer:old\nresourcePacks:[\"vanilla\"]\n";
+        const QString store = "version:3955\nfov:0.5\ngamma:1.0\nlastServer:new\nresourcePacks:[\"file/x.zip\"]\n";
+        // gamma is this instance's own; lastServer is left out everywhere; version and the pack list never move.
+        QCOMPARE(GameSettingsSync::applyOptions(instance, store, rules({ "gamma", "lastServer" })),
+                 QString("version:3465\nfov:0.5\ngamma:0.0\nlastServer:old\nresourcePacks:[\"vanilla\"]\n"));
     }
 
-    void copiesTheResourcePackListOnlyWhenAsked()
+    void modSettingsOnlyGoWhereTheModIs()
     {
-        const QString follower = "resourcePacks:[\"vanilla\"]\nfov:0.0\n";
-        const QString main = "resourcePacks:[\"vanilla\",\"file/pack.zip\"]\nincompatibleResourcePacks:[]\nfov:0.5\n";
-        QCOMPARE(GameSettingsSync::mergeOptions(follower, main, settingsOnly()), QString("resourcePacks:[\"vanilla\"]\nfov:0.5\n"));
-
-        OptionsScope packsOnly;
-        packsOnly.gameSettings = false;
-        packsOnly.resourcePackList = true;
-        QCOMPARE(GameSettingsSync::mergeOptions(follower, main, packsOnly),
-                 QString("resourcePacks:[\"vanilla\",\"file/pack.zip\"]\nfov:0.0\nincompatibleResourcePacks:[]\n"));
+        const QString store = "fov:0.5\nsodium.quality:high\n";
+        QCOMPARE(GameSettingsSync::applyOptions("fov:0.0\n", store, rules()), QString("fov:0.5\n"));
+        QCOMPARE(GameSettingsSync::applyOptions("fov:0.0\nsodium.quality:low\n", store, rules()),
+                 QString("fov:0.5\nsodium.quality:high\n"));
+        QCOMPARE(GameSettingsSync::applyOptions("fov:0.0\nsodium.quality:low\n", store, rules({}, false)),
+                 QString("fov:0.5\nsodium.quality:low\n"));
     }
 
-    void takesTheDataVersionOnlyWhenTheFollowerHasNone()
+    void keybindsOnlyBetween113AndLater()
     {
-        const QString main = "version:3955\nfov:0.5\n";
-        QCOMPARE(GameSettingsSync::mergeOptions(QString(), main, settingsOnly()), QString("version:3955\nfov:0.5\n"));
-        QCOMPARE(GameSettingsSync::mergeOptions("fov:0.0\n", main, settingsOnly()), QString("fov:0.5\nversion:3955\n"));
-        QCOMPARE(GameSettingsSync::mergeOptions("version:1343\n", main, settingsOnly()), QString("version:1343\nfov:0.5\n"));
+        const QString store = "key_key.jump:key.keyboard.space\nfov:0.5\n";
+        QCOMPARE(GameSettingsSync::applyOptions("key_key.jump:57\nfov:0.0\n", store, rules({}, true, false)),
+                 QString("key_key.jump:57\nfov:0.5\n"));
+        QCOMPARE(GameSettingsSync::applyOptions("key_key.jump:key.keyboard.j\n", store, rules()),
+                 QString("key_key.jump:key.keyboard.space\nfov:0.5\n"));
+        QVERIFY(GameSettingsSync::usesNamedKeys("1.13"));
+        QVERIFY(GameSettingsSync::usesNamedKeys("1.21.1"));
+        QVERIFY(!GameSettingsSync::usesNamedKeys("1.12.2"));
+        QVERIFY(!GameSettingsSync::usesNamedKeys(QString()));
     }
 
-    void copiesKeybindsOnlyWhenAllowed()
+    void takesTheDataVersionOnlyWhenTheInstanceHasNone()
     {
-        const QString follower = "key_key.jump:57\nfov:0.0\n";
-        const QString main = "key_key.jump:key.keyboard.space\nkey_key.sprint:key.keyboard.left.control\nfov:0.5\n";
-        QCOMPARE(GameSettingsSync::mergeOptions(follower, main, settingsOnly(false)), QString("key_key.jump:57\nfov:0.5\n"));
-        QCOMPARE(GameSettingsSync::mergeOptions(follower, main, settingsOnly()),
-                 QString("key_key.jump:key.keyboard.space\nfov:0.5\nkey_key.sprint:key.keyboard.left.control\n"));
+        const QString store = "version:3955\nfov:0.5\n";
+        QCOMPARE(GameSettingsSync::applyOptions(QString(), store, rules()), QString("version:3955\nfov:0.5\n"));
+        QCOMPARE(GameSettingsSync::applyOptions("version:1343\n", store, rules()), QString("version:1343\nfov:0.5\n"));
     }
 
-    void keepsValuesThatContainColonsWhole()
+    void leavesAnUnchangedFileAsItIs()
     {
-        QCOMPARE(GameSettingsSync::mergeOptions("lastServer:old.example:25565\n", "lastServer:mc.example.net:25566\n", settingsOnly()),
-                 QString("lastServer:mc.example.net:25566\n"));
+        const QString instance = "fov:0.5\r\nsodium.quality:low\r\n";
+        QCOMPARE(GameSettingsSync::applyOptions(instance, "fov:0.5\n", rules()), instance);
     }
 
-    void readsWindowsLineEndings()
+    // ---- Saving what changed back into the shared copy ----
+
+    void savesOnlyWhatChangedDuringTheSession()
     {
-        QCOMPARE(GameSettingsSync::mergeOptions("fov:0.0\r\nfollowerOnly:kept\r\n", "fov:0.5\r\n", settingsOnly()),
-                 QString("fov:0.5\nfollowerOnly:kept\n"));
+        const QString store = "fov:0.5\ngamma:0.5\n";
+        const QString atLaunch = "fov:0.5\ngamma:0.5\nmaxFps:120\n";
+        const QString now = "fov:0.5\ngamma:1.0\nmaxFps:120\n";
+        QCOMPARE(GameSettingsSync::collectOptions(store, now, atLaunch, rules()), QString("fov:0.5\ngamma:1.0\nmaxFps:120\n"));
     }
 
-    void keybindsAreCompatibleOnTheSameSideOf113()
+    void twoGamesKeepEachOthersChanges()
     {
-        QVERIFY(GameSettingsSync::keybindsCompatible("1.20.1", "1.13"));
-        QVERIFY(GameSettingsSync::keybindsCompatible("1.8.9", "1.12.2"));
-        QVERIFY(!GameSettingsSync::keybindsCompatible("1.12.2", "1.20.1"));
-        QVERIFY(!GameSettingsSync::keybindsCompatible("1.21", "1.7.10"));
-        QVERIFY(!GameSettingsSync::keybindsCompatible(QString(), "1.20.1"));
+        const QString store = "fov:0.5\ngamma:0.5\n";
+        const QString first = GameSettingsSync::collectOptions(store, "fov:0.9\ngamma:0.5\n", store, rules());
+        const QString second = GameSettingsSync::collectOptions(first, "fov:0.5\ngamma:1.0\n", store, rules());
+        QCOMPARE(second, QString("fov:0.9\ngamma:1.0\n"));
     }
 
-    void backsUpTheFollowersOwnSettingsOnce()
+    void neverSavesLeftOutOrOwnSettings()
     {
-        Instances dirs;
-        QVERIFY(writeText(dirs.main() + "/options.txt", "fov:0.5\n"));
-        QVERIFY(writeText(dirs.follower() + "/options.txt", "fov:0.0\nfollowerOnly:kept\n"));
-        Choices choices;
-        choices.gameSettings = true;
-        choices.sameKeyFormat = true;
+        const QString store = "fov:0.5\nlastServer:a\n";
+        const QString now = "fov:0.9\nlastServer:b\nversion:3955\nresourcePacks:[]\n";
+        QCOMPARE(GameSettingsSync::collectOptions(store, now, store, rules({ "fov", "lastServer" })), store);
+        QCOMPARE(GameSettingsSync::collectOptions(store, "key_key.jump:57\n", QString(), rules({}, true, false)), store);
+    }
 
-        auto report = GameSettingsSync::sync(dirs.main(), dirs.follower(), dirs.backup(), choices);
-        QVERIFY(report.optionsChanged);
+    void savesModSettingsOnlyWhenTheyAreSynced()
+    {
+        const QString now = "fov:0.5\nsodium.quality:high\n";
+        QCOMPARE(GameSettingsSync::collectOptions("fov:0.5\n", now, "fov:0.5\n", rules()), QString("fov:0.5\nsodium.quality:high\n"));
+        QCOMPARE(GameSettingsSync::collectOptions("fov:0.5\n", now, "fov:0.5\n", rules({}, false)), QString("fov:0.5\n"));
+    }
+
+    // ---- Whole instances ----
+
+    void syncsBetweenInstancesBothWays()
+    {
+        Setup s;
+        QVERIFY(writeText(s.store() + "/options.txt", "fov:0.5\n"));
+        QVERIFY(writeText(s.game("a") + "/options.txt", "fov:0.0\n"));
+        QVERIFY(writeText(s.game("b") + "/options.txt", "fov:0.0\n"));
+
+        // A starts, gets the shared value, and changes it in-game.
+        auto report = s.apply("a");
+        QVERIFY(report.errors.isEmpty());
+        QCOMPARE(readText(s.game("a") + "/options.txt"), QByteArray("fov:0.5\n"));
+        QVERIFY(writeText(s.game("a") + "/options.txt", "fov:0.8\n"));
+        report = s.collect("a");
+        QVERIFY(report.errors.isEmpty());
+        QCOMPARE(readText(s.store() + "/options.txt"), QByteArray("fov:0.8\n"));
+
+        // B starts afterwards and gets A's change.
+        s.apply("b");
+        QCOMPARE(readText(s.game("b") + "/options.txt"), QByteArray("fov:0.8\n"));
+    }
+
+    void syncsServersCommandHistoryAndHotbarsAsWholeFiles()
+    {
+        Setup s;
+        QVERIFY(writeText(s.store() + "/servers.dat", "shared servers"));
+        QVERIFY(writeText(s.store() + "/hotbar.nbt", "shared hotbar"));
+        QVERIFY(writeText(s.game("a") + "/servers.dat", "own servers"));
+
+        auto report = s.apply("a");
+        QVERIFY(report.errors.isEmpty());
+        QCOMPARE(readText(s.game("a") + "/servers.dat"), QByteArray("shared servers"));
+        QCOMPARE(readText(s.game("a") + "/hotbar.nbt"), QByteArray("shared hotbar"));
+        QCOMPARE(readText(s.backup("a") + "/servers.dat"), QByteArray("own servers"));
         QCOMPARE(report.backupsMade, 1);
-        QCOMPARE(readText(dirs.follower() + "/options.txt"), QByteArray("fov:0.5\nfollowerOnly:kept\n"));
-        QCOMPARE(readText(dirs.backup() + "/options.txt"), QByteArray("fov:0.0\nfollowerOnly:kept\n"));
 
-        report = GameSettingsSync::sync(dirs.main(), dirs.follower(), dirs.backup(), choices);
-        QVERIFY(!report.changedAnything());
+        // A new command history, a changed server list; the hotbar is untouched.
+        QVERIFY(writeText(s.game("a") + "/servers.dat", "changed servers"));
+        QVERIFY(writeText(s.game("a") + "/command_history.txt", "/time set day\n"));
+        report = s.collect("a");
+        QVERIFY(report.errors.isEmpty());
+        QCOMPARE(readText(s.store() + "/servers.dat"), QByteArray("changed servers"));
+        QCOMPARE(readText(s.store() + "/command_history.txt"), QByteArray("/time set day\n"));
+        QCOMPARE(readText(s.store() + "/hotbar.nbt"), QByteArray("shared hotbar"));
+    }
 
-        // A later change copies again but keeps the first backup.
-        QVERIFY(writeText(dirs.main() + "/options.txt", "fov:1.0\n"));
-        report = GameSettingsSync::sync(dirs.main(), dirs.follower(), dirs.backup(), choices);
-        QVERIFY(report.optionsChanged);
+    void anUnchangedFileDoesNotOverwriteAnotherGamesChange()
+    {
+        Setup s;
+        QVERIFY(writeText(s.store() + "/servers.dat", "shared"));
+        s.apply("a");
+        s.apply("b");
+        QVERIFY(writeText(s.game("a") + "/servers.dat", "added a server in a"));
+        s.collect("a");
+        s.collect("b");  // b was open at the same time and changed nothing
+        QCOMPARE(readText(s.store() + "/servers.dat"), QByteArray("added a server in a"));
+    }
+
+    void backsUpAnInstancesOwnFilesOnlyOnce()
+    {
+        Setup s;
+        QVERIFY(writeText(s.store() + "/servers.dat", "shared 1"));
+        QVERIFY(writeText(s.game("a") + "/servers.dat", "own"));
+        s.apply("a");
+        QVERIFY(writeText(s.store() + "/servers.dat", "shared 2"));
+        const auto report = s.apply("a");
         QCOMPARE(report.backupsMade, 0);
-        QCOMPARE(readText(dirs.backup() + "/options.txt"), QByteArray("fov:0.0\nfollowerOnly:kept\n"));
+        QCOMPARE(readText(s.game("a") + "/servers.dat"), QByteArray("shared 2"));
+        QCOMPARE(readText(s.backup("a") + "/servers.dat"), QByteArray("own"));
     }
 
-    void createsTheFollowersSettingsWithoutABackup()
+    void neverUsesTheRecordOfAnEarlierSession()
     {
-        Instances dirs;
-        QVERIFY(writeText(dirs.main() + "/options.txt", "version:3955\nfov:0.5\n"));
-        QVERIFY(QDir().mkpath(dirs.follower()));
-        Choices choices;
-        choices.gameSettings = true;
+        Setup s;
+        QVERIFY(writeText(s.store() + "/options.txt", "fov:0.8\n"));
+        QVERIFY(writeText(s.game("a") + "/options.txt", "fov:0.5\n"));
+        // A record left from an earlier session, which cannot be replaced.
+        QVERIFY(writeText(s.state("a"), "{\"options\":\"fov:0.1\\n\",\"files\":{}}"));
+        QVERIFY(QFile::setPermissions(s.state("a"), QFile::ReadOwner));
 
-        const auto report = GameSettingsSync::sync(dirs.main(), dirs.follower(), dirs.backup(), choices);
-        QVERIFY(report.optionsChanged);
-        QCOMPARE(report.backupsMade, 0);
-        QVERIFY(!QFileInfo::exists(dirs.backup()));
-        QCOMPARE(readText(dirs.follower() + "/options.txt"), QByteArray("version:3955\nfov:0.5\n"));
+        const auto report = s.apply("a");
+        QFile::setPermissions(s.state("a"), QFile::ReadOwner | QFile::WriteOwner);
+        QVERIFY(!report.errors.isEmpty());
+        // Nothing was put in, so closing the game cannot mistake sync's values for the player's.
+        QCOMPARE(readText(s.game("a") + "/options.txt"), QByteArray("fov:0.5\n"));
     }
 
-    void doesNothingWithoutMainSettings()
+    void hotbarsOnlyFrom113On()
     {
-        Instances dirs;
-        QVERIFY(writeText(dirs.follower() + "/options.txt", "fov:0.0\n"));
-        const auto report = GameSettingsSync::sync(dirs.main(), dirs.follower(), dirs.backup(), everything());
-        QVERIFY(!report.mainHasOptions);
-        QVERIFY(!report.changedAnything());
+        Setup s;
+        QVERIFY(writeText(s.store() + "/hotbar.nbt", "shared hotbar"));
+        QVERIFY(writeText(s.game("old") + "/hotbar.nbt", "old hotbar"));
+        Plan plan;
+        plan.hotbars = true;
+        plan.options.namedKeys = false;
+        s.apply("old", plan);
+        QCOMPARE(readText(s.game("old") + "/hotbar.nbt"), QByteArray("old hotbar"));
+        QVERIFY(writeText(s.game("old") + "/hotbar.nbt", "changed old hotbar"));
+        s.collect("old", plan);
+        QCOMPARE(readText(s.store() + "/hotbar.nbt"), QByteArray("shared hotbar"));
+    }
+
+    void savesNothingWithoutALaunchRecord()
+    {
+        Setup s;
+        QVERIFY(writeText(s.game("a") + "/options.txt", "fov:0.9\n"));
+        QVERIFY(writeText(s.game("a") + "/servers.dat", "servers"));
+        const auto report = s.collect("a");
+        QVERIFY(report.changed.isEmpty());
+        QVERIFY(!QFileInfo::exists(s.store()));
+    }
+
+    void modSettingsFilesOnlyGoWhereTheModIs()
+    {
+        Setup s;
+        Plan plan;
+        plan.modSettings = true;
+        plan.sharedConfig = { "sodium-options.json", "xaero", "../escape" };
+        QVERIFY(writeText(s.store() + "/config/sodium-options.json", "{\"quality\":1}"));
+        QVERIFY(writeText(s.store() + "/config/xaero/minimap.txt", "zoom:2"));
+        QVERIFY(writeText(s.game("a") + "/config/sodium-options.json", "{\"quality\":0}"));
+        QVERIFY(QDir().mkpath(s.game("b") + "/config"));
+
+        s.apply("a", plan);
+        s.apply("b", plan);
+        QCOMPARE(readText(s.game("a") + "/config/sodium-options.json"), QByteArray("{\"quality\":1}"));
+        QVERIFY(!QFileInfo::exists(s.game("a") + "/config/xaero"));
+        QVERIFY(!QFileInfo::exists(s.game("b") + "/config/sodium-options.json"));
+
+        QVERIFY(writeText(s.game("a") + "/config/sodium-options.json", "{\"quality\":2}"));
+        s.collect("a", plan);
+        QCOMPARE(readText(s.store() + "/config/sodium-options.json"), QByteArray("{\"quality\":2}"));
+    }
+
+    void syncsOnlyWhatThePlanAllows()
+    {
+        Setup s;
+        QVERIFY(writeText(s.store() + "/options.txt", "fov:0.5\n"));
+        QVERIFY(writeText(s.store() + "/servers.dat", "shared servers"));
+        QVERIFY(writeText(s.store() + "/hotbar.nbt", "shared hotbar"));
+        QVERIFY(writeText(s.game("a") + "/options.txt", "fov:0.0\n"));
+        Plan plan;
+        plan.servers = true;
+        s.apply("a", plan);
+        QCOMPARE(readText(s.game("a") + "/options.txt"), QByteArray("fov:0.0\n"));
+        QCOMPARE(readText(s.game("a") + "/servers.dat"), QByteArray("shared servers"));
+        QVERIFY(!QFileInfo::exists(s.game("a") + "/hotbar.nbt"));
+
+        QVERIFY(writeText(s.game("a") + "/options.txt", "fov:0.9\n"));
+        s.collect("a", plan);
+        QCOMPARE(readText(s.store() + "/options.txt"), QByteArray("fov:0.5\n"));
+    }
+
+    void startsFromTheChosenInstance()
+    {
+        Setup s;
+        QVERIFY(writeText(s.store() + "/options.txt", "fov:0.1\n"));
+        QVERIFY(writeText(s.game("start") + "/options.txt",
+                          "version:1343\nkey_key.jump:57\nfov:0.7\nresourcePacks:[]\nsodium.quality:high\n"));
+        QVERIFY(writeText(s.game("start") + "/servers.dat", "start servers"));
+        Plan plan = everything();
+        plan.options.namedKeys = false;  // a 1.12 instance: its keybinds are not the shared ones
+
+        const auto report = GameSettingsSync::initializeStore(s.store(), s.game("start"), plan);
         QVERIFY(report.errors.isEmpty());
-        QCOMPARE(readText(dirs.follower() + "/options.txt"), QByteArray("fov:0.0\n"));
-    }
-
-    // ---- Resource and shader packs ----
-
-    void addsMissingPacksButNeverReplacesOrRemovesAny()
-    {
-        Instances dirs;
-        QVERIFY(writeText(dirs.main() + "/resourcepacks/Faithful.zip", "main faithful"));
-        QVERIFY(writeText(dirs.main() + "/resourcepacks/Shared.zip", "main shared"));
-        QVERIFY(writeText(dirs.main() + "/resourcepacks/FolderPack/pack.mcmeta", "{}"));
-        QVERIFY(writeText(dirs.follower() + "/resourcepacks/Shared.zip", "follower shared"));
-        QVERIFY(writeText(dirs.follower() + "/resourcepacks/OwnPack.zip", "follower own"));
-        Choices choices;
-        choices.resourcePacks = true;
-
-        const auto report = GameSettingsSync::sync(dirs.main(), dirs.follower(), dirs.backup(), choices);
-        QCOMPARE(report.resourcePacksAdded, 2);
-        QVERIFY(report.errors.isEmpty());
-        QCOMPARE(readText(dirs.follower() + "/resourcepacks/Faithful.zip"), QByteArray("main faithful"));
-        QCOMPARE(readText(dirs.follower() + "/resourcepacks/FolderPack/pack.mcmeta"), QByteArray("{}"));
-        QCOMPARE(readText(dirs.follower() + "/resourcepacks/Shared.zip"), QByteArray("follower shared"));
-        QCOMPARE(readText(dirs.follower() + "/resourcepacks/OwnPack.zip"), QByteArray("follower own"));
-        QCOMPARE(QDir(dirs.follower() + "/resourcepacks").entryList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden).size(), 4);
-    }
-
-    void copiesTheSwitchedOnPackListWithThePacks()
-    {
-        Instances dirs;
-        QVERIFY(writeText(dirs.main() + "/resourcepacks/Faithful.zip", "pack"));
-        QVERIFY(writeText(dirs.main() + "/options.txt", "fov:0.5\nresourcePacks:[\"vanilla\",\"file/Faithful.zip\"]\n"));
-        QVERIFY(writeText(dirs.follower() + "/options.txt", "fov:0.0\nresourcePacks:[\"vanilla\"]\n"));
-        Choices choices;
-        choices.resourcePacks = true;
-        choices.sameKeyFormat = true;
-
-        auto report = GameSettingsSync::sync(dirs.main(), dirs.follower(), dirs.backup(), choices);
-        QVERIFY(report.optionsChanged);
-        QCOMPARE(readText(dirs.follower() + "/options.txt"), QByteArray("fov:0.0\nresourcePacks:[\"vanilla\",\"file/Faithful.zip\"]\n"));
-
-        // Across 1.13 the list is written differently: the files still come, the list does not.
-        Instances other;
-        QVERIFY(writeText(other.main() + "/resourcepacks/Faithful.zip", "pack"));
-        QVERIFY(writeText(other.main() + "/options.txt", "resourcePacks:[\"vanilla\",\"file/Faithful.zip\"]\n"));
-        QVERIFY(writeText(other.follower() + "/options.txt", "resourcePacks:[\"Faithful.zip\"]\n"));
-        choices.sameKeyFormat = false;
-        report = GameSettingsSync::sync(other.main(), other.follower(), other.backup(), choices);
-        QCOMPARE(report.resourcePacksAdded, 1);
-        QVERIFY(!report.optionsChanged);
-        QCOMPARE(readText(other.follower() + "/options.txt"), QByteArray("resourcePacks:[\"Faithful.zip\"]\n"));
-    }
-
-    void copiesShaderPacksAndTheirSettings()
-    {
-        Instances dirs;
-        QVERIFY(writeText(dirs.main() + "/shaderpacks/BSL.zip", "bsl"));
-        QVERIFY(writeText(dirs.main() + "/shaderpacks/BSL.zip.txt", "SHADOW=true\n"));
-        QVERIFY(writeText(dirs.main() + "/config/iris.properties", "shaderPack=BSL.zip\n"));
-        QVERIFY(writeText(dirs.main() + "/optionsshaders.txt", "shaderPack=BSL.zip\n"));
-        QVERIFY(writeText(dirs.follower() + "/shaderpacks/BSL.zip.txt", "SHADOW=false\n"));
-        QVERIFY(writeText(dirs.follower() + "/config/iris.properties", "shaderPack=\n"));
-        Choices choices;
-        choices.shaderPacks = true;
-
-        const auto report = GameSettingsSync::sync(dirs.main(), dirs.follower(), dirs.backup(), choices);
-        QVERIFY(report.errors.isEmpty());
-        QCOMPARE(report.shaderPacksAdded, 1);
-        QCOMPARE(report.settingsFilesReplaced, 3);
-        QCOMPARE(report.backupsMade, 2);
-        QCOMPARE(readText(dirs.follower() + "/shaderpacks/BSL.zip"), QByteArray("bsl"));
-        QCOMPARE(readText(dirs.follower() + "/shaderpacks/BSL.zip.txt"), QByteArray("SHADOW=true\n"));
-        QCOMPARE(readText(dirs.follower() + "/config/iris.properties"), QByteArray("shaderPack=BSL.zip\n"));
-        QCOMPARE(readText(dirs.follower() + "/optionsshaders.txt"), QByteArray("shaderPack=BSL.zip\n"));
-        QCOMPARE(readText(dirs.backup() + "/shaderpacks/BSL.zip.txt"), QByteArray("SHADOW=false\n"));
-        QCOMPARE(readText(dirs.backup() + "/config/iris.properties"), QByteArray("shaderPack=\n"));
-    }
-
-    // ---- Mod settings ----
-
-    void copiesOnlyTheSharedConfigEntries()
-    {
-        Instances dirs;
-        QVERIFY(writeText(dirs.main() + "/config/sodium-options.json", "{\"quality\":1}"));
-        QVERIFY(writeText(dirs.main() + "/config/xaero/minimap.txt", "zoom:2"));
-        QVERIFY(writeText(dirs.main() + "/config/xaero/sub/waypoints.txt", "home"));
-        QVERIFY(writeText(dirs.main() + "/config/modpack-balance.toml", "hard=true"));
-        QVERIFY(writeText(dirs.follower() + "/config/sodium-options.json", "{\"quality\":0}"));
-        QVERIFY(writeText(dirs.follower() + "/config/modpack-balance.toml", "hard=false"));
-        QVERIFY(writeText(dirs.follower() + "/config/xaero/own.txt", "kept"));
-        Choices choices;
-        choices.modSettings = true;
-        choices.sharedConfig = { "sodium-options.json", "xaero", "../escape", "missing.json" };
-
-        const auto report = GameSettingsSync::sync(dirs.main(), dirs.follower(), dirs.backup(), choices);
-        QVERIFY(report.errors.isEmpty());
-        QCOMPARE(report.settingsFilesReplaced, 3);
-        QCOMPARE(report.backupsMade, 1);
-        QCOMPARE(readText(dirs.follower() + "/config/sodium-options.json"), QByteArray("{\"quality\":1}"));
-        QCOMPARE(readText(dirs.follower() + "/config/xaero/minimap.txt"), QByteArray("zoom:2"));
-        QCOMPARE(readText(dirs.follower() + "/config/xaero/sub/waypoints.txt"), QByteArray("home"));
-        QCOMPARE(readText(dirs.follower() + "/config/xaero/own.txt"), QByteArray("kept"));
-        QCOMPARE(readText(dirs.follower() + "/config/modpack-balance.toml"), QByteArray("hard=false"));
-        QCOMPARE(readText(dirs.backup() + "/config/sodium-options.json"), QByteArray("{\"quality\":0}"));
-    }
-
-    void copiesNothingThatIsNotChosen()
-    {
-        Instances dirs;
-        QVERIFY(writeText(dirs.main() + "/options.txt", "fov:0.5\n"));
-        QVERIFY(writeText(dirs.main() + "/resourcepacks/Faithful.zip", "pack"));
-        QVERIFY(writeText(dirs.main() + "/shaderpacks/BSL.zip", "bsl"));
-        QVERIFY(writeText(dirs.main() + "/config/sodium-options.json", "{}"));
-        QVERIFY(QDir().mkpath(dirs.follower()));
-        Choices choices;
-        choices.sharedConfig = { "sodium-options.json" };
-
-        const auto report = GameSettingsSync::sync(dirs.main(), dirs.follower(), dirs.backup(), choices);
-        QVERIFY(!report.changedAnything());
-        QCOMPARE(QDir(dirs.follower()).entryList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden).size(), 0);
+        QCOMPARE(readText(s.store() + "/options.txt"), QByteArray("version:1343\nfov:0.7\nsodium.quality:high\n"));
+        QCOMPARE(readText(s.store() + "/servers.dat"), QByteArray("start servers"));
     }
 };
 
