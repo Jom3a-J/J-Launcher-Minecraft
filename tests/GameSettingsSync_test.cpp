@@ -34,6 +34,27 @@ OptionRules rules(QSet<QString> excluded = {}, bool modOptions = true, bool name
     return result;
 }
 
+// A plan for pack sync in one pack group. Deleted packs are removed straight away (and listed)
+// instead of going to the Recycle Bin, so the test leaves nothing there.
+Plan packPlan(QStringList* removedPaths, const QString& group = "1.21.1-fabric", bool resource = true, bool shader = false)
+{
+    Plan plan;
+    plan.resourcePacks = resource;
+    plan.shaderPacks = shader;
+    plan.packGroup = group;
+    plan.removeFile = [removedPaths](const QString& path) {
+        if (removedPaths)
+            *removedPaths << path;
+        return QFileInfo(path).isDir() ? QDir(path).removeRecursively() : QFile::remove(path);
+    };
+    return plan;
+}
+
+QStringList entries(const QString& folder)
+{
+    return QDir(folder).entryList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+}
+
 Plan everything()
 {
     Plan plan;
@@ -296,6 +317,231 @@ class GameSettingsSyncTest : public QObject {
         QVERIFY(writeText(s.game("a") + "/options.txt", "fov:0.9\n"));
         s.collect("a", plan);
         QCOMPARE(readText(s.store() + "/options.txt"), QByteArray("fov:0.5\n"));
+    }
+
+    // ---- Resource and shader packs ----
+
+    void packsTravelBothWaysWithinAGroup()
+    {
+        Setup s;
+        const Plan plan = packPlan(nullptr);
+        const QString group = s.store() + "/packs/1.21.1-fabric/resourcepacks";
+        QVERIFY(writeText(group + "/Faithful.zip", "faithful"));
+        QVERIFY(writeText(s.game("a") + "/resourcepacks/Mine.zip", "mine"));
+
+        auto report = s.apply("a", plan);
+        QVERIFY2(report.errors.isEmpty(), qPrintable(report.errors.join('\n')));
+        QCOMPARE(entries(s.game("a") + "/resourcepacks"), QStringList({ "Faithful.zip", "Mine.zip" }));
+
+        // A pack added during the session goes to the group; the one it already had too.
+        QVERIFY(writeText(s.game("a") + "/resourcepacks/New.zip", "new"));
+        report = s.collect("a", plan);
+        QVERIFY2(report.errors.isEmpty(), qPrintable(report.errors.join('\n')));
+        QCOMPARE(entries(group), QStringList({ "Faithful.zip", "Mine.zip", "New.zip" }));
+
+        s.apply("b", plan);
+        QCOMPARE(entries(s.game("b") + "/resourcepacks"), QStringList({ "Faithful.zip", "Mine.zip", "New.zip" }));
+        QCOMPARE(readText(s.game("b") + "/resourcepacks/New.zip"), QByteArray("new"));
+    }
+
+    void packsNeverCrossGroups()
+    {
+        Setup s;
+        QVERIFY(writeText(s.store() + "/packs/1.21.1-fabric/resourcepacks/Faithful.zip", "faithful"));
+        s.apply("forge", packPlan(nullptr, "1.20.1-forge"));
+        QVERIFY(entries(s.game("forge") + "/resourcepacks").isEmpty());
+        QCOMPARE(GameSettingsSync::packGroupName("1.20.1", "forge"), QString("1.20.1-forge"));
+        QCOMPARE(GameSettingsSync::packGroupName(QString(), "forge"), QString());
+
+        // No group (unknown version): packs are not synced at all.
+        s.apply("unknown", packPlan(nullptr, QString()));
+        QVERIFY(entries(s.game("unknown") + "/resourcepacks").isEmpty());
+    }
+
+    void aDeletedPackLeavesTheOtherInstances()
+    {
+        Setup s;
+        QStringList removed;
+        const Plan plan = packPlan(&removed);
+        const QString group = s.store() + "/packs/1.21.1-fabric/resourcepacks";
+        QVERIFY(writeText(group + "/Old.zip", "old"));
+        s.apply("a", plan);
+        s.apply("b", plan);
+
+        QVERIFY(QFile::remove(s.game("a") + "/resourcepacks/Old.zip"));
+        s.collect("a", plan);
+        QVERIFY(!QFileInfo::exists(group + "/Old.zip"));
+
+        removed.clear();
+        const auto report = s.apply("b", plan);
+        QVERIFY(report.errors.isEmpty());
+        QVERIFY(!QFileInfo::exists(s.game("b") + "/resourcepacks/Old.zip"));
+        QCOMPARE(removed, QStringList({ QDir(s.game("b") + "/resourcepacks").filePath("Old.zip") }));
+
+        // Added again later, it syncs again.
+        QVERIFY(writeText(s.game("b") + "/resourcepacks/Old.zip", "old again"));
+        s.collect("b", plan);
+        s.apply("a", plan);
+        QCOMPARE(readText(s.game("a") + "/resourcepacks/Old.zip"), QByteArray("old again"));
+    }
+
+    void aPackDeletedWhileAnotherGameRanStaysDeleted()
+    {
+        Setup s;
+        const Plan plan = packPlan(nullptr);
+        const QString group = s.store() + "/packs/1.21.1-fabric/resourcepacks";
+        QVERIFY(writeText(group + "/Old.zip", "old"));
+        s.apply("a", plan);
+        s.apply("b", plan);  // b is open at the same time
+
+        QVERIFY(QFile::remove(s.game("a") + "/resourcepacks/Old.zip"));
+        s.collect("a", plan);
+        s.collect("b", plan);  // b still has it and changed nothing
+        QVERIFY(!QFileInfo::exists(group + "/Old.zip"));
+
+        s.apply("c", plan);
+        QVERIFY(!QFileInfo::exists(s.game("c") + "/resourcepacks/Old.zip"));
+    }
+
+    void folderPacksAreCopiedWhole()
+    {
+        Setup s;
+        const Plan plan = packPlan(nullptr);
+        QVERIFY(writeText(s.game("a") + "/resourcepacks/FolderPack/pack.mcmeta", "{}"));
+        QVERIFY(writeText(s.game("a") + "/resourcepacks/FolderPack/assets/minecraft/a.png", "png"));
+        s.apply("a", plan);
+        s.collect("a", plan);
+        s.apply("b", plan);
+        QCOMPARE(readText(s.game("b") + "/resourcepacks/FolderPack/pack.mcmeta"), QByteArray("{}"));
+        QCOMPARE(readText(s.game("b") + "/resourcepacks/FolderPack/assets/minecraft/a.png"), QByteArray("png"));
+    }
+
+    void startingAgainBringsBackTheStartingPacks()
+    {
+        Setup s;
+        const Plan plan = packPlan(nullptr);
+        QVERIFY(writeText(s.store() + "/packs/1.21.1-fabric/sync.json", "{\"removed\":{\"resourcepacks\":[\"Faithful.zip\",\"Other.zip\"]}}"));
+        QVERIFY(writeText(s.game("start") + "/resourcepacks/Faithful.zip", "faithful"));
+        QVERIFY(GameSettingsSync::initializeStore(s.store(), s.game("start"), plan).errors.isEmpty());
+        QCOMPARE(readText(s.store() + "/packs/1.21.1-fabric/sync.json").contains("Faithful.zip"), false);
+        QVERIFY(readText(s.store() + "/packs/1.21.1-fabric/sync.json").contains("Other.zip"));
+        s.apply("b", plan);
+        QCOMPARE(readText(s.game("b") + "/resourcepacks/Faithful.zip"), QByteArray("faithful"));
+    }
+
+    void aModpacksOwnShaderSettingsStayItsOwn()
+    {
+        Setup s;
+        Plan plan = packPlan(nullptr, "1.21.1-fabric", false, true);
+        plan.modpack = true;
+        QVERIFY(writeText(s.game("pack") + "/shaderpacks/Own.zip", "own shader"));
+        QVERIFY(writeText(s.game("pack") + "/shaderpacks/Own.zip.txt", "QUALITY=1\n"));
+        s.apply("pack", plan);
+        QVERIFY(writeText(s.game("pack") + "/shaderpacks/Own.zip.txt", "QUALITY=2\n"));
+        QVERIFY(writeText(s.game("pack") + "/shaderpacks/Added.zip.txt", "QUALITY=3\n"));
+        s.collect("pack", plan);
+        const QString group = s.store() + "/packs/1.21.1-fabric/shaderpacks";
+        QVERIFY(!QFileInfo::exists(group + "/Own.zip.txt"));
+        QCOMPARE(readText(group + "/Added.zip.txt"), QByteArray("QUALITY=3\n"));
+    }
+
+    void aModpacksOwnPacksStayItsOwn()
+    {
+        Setup s;
+        QStringList removed;
+        Plan plan = packPlan(&removed);
+        plan.modpack = true;
+        const QString group = s.store() + "/packs/1.21.1-fabric/resourcepacks";
+        QVERIFY(writeText(s.game("pack") + "/resourcepacks/Bundled.zip", "from the modpack"));
+        QVERIFY(writeText(group + "/Bundled.zip", "someone else's"));
+        // Deleted somewhere else: that must not take the modpack's own copy.
+        QVERIFY(writeText(s.store() + "/packs/1.21.1-fabric/sync.json", "{\"removed\":{\"resourcepacks\":[\"Bundled.zip\"]}}"));
+
+        s.apply("pack", plan);
+        QCOMPARE(readText(s.game("pack") + "/resourcepacks/Bundled.zip"), QByteArray("from the modpack"));
+        QVERIFY(removed.isEmpty());
+
+        // Packs added later are shared; deleting its own pack shares nothing.
+        QVERIFY(writeText(s.game("pack") + "/resourcepacks/Added.zip", "added later"));
+        QVERIFY(QFile::remove(s.game("pack") + "/resourcepacks/Bundled.zip"));
+        s.collect("pack", plan);
+        QCOMPARE(readText(group + "/Added.zip"), QByteArray("added later"));
+        QCOMPARE(readText(group + "/Bundled.zip"), QByteArray("someone else's"));
+    }
+
+    void theSwitchedOnListStaysWithinTheGroup()
+    {
+        Setup s;
+        Plan plan = packPlan(nullptr);
+        plan.gameSettings = true;
+        QVERIFY(writeText(s.store() + "/options.txt", "fov:0.5\n"));
+        QVERIFY(writeText(s.store() + "/packs/1.21.1-fabric/options.txt", "resourcePacks:[\"vanilla\",\"file/A.zip\"]\n"));
+        QVERIFY(writeText(s.game("a") + "/options.txt", "fov:0.0\nresourcePacks:[\"vanilla\"]\n"));
+
+        s.apply("a", plan);
+        QCOMPARE(readText(s.game("a") + "/options.txt"), QByteArray("fov:0.5\nresourcePacks:[\"vanilla\",\"file/A.zip\"]\n"));
+
+        // A new order goes to the group's list, never to the settings shared with every instance.
+        QVERIFY(writeText(s.game("a") + "/options.txt", "fov:0.5\nresourcePacks:[\"file/A.zip\",\"vanilla\"]\n"));
+        s.collect("a", plan);
+        QCOMPARE(readText(s.store() + "/packs/1.21.1-fabric/options.txt"), QByteArray("resourcePacks:[\"file/A.zip\",\"vanilla\"]\n"));
+        QCOMPARE(readText(s.store() + "/options.txt"), QByteArray("fov:0.5\n"));
+    }
+
+    void syncsShaderPacksAndTheirSettings()
+    {
+        Setup s;
+        const Plan plan = packPlan(nullptr, "1.21.1-fabric", false, true);
+        const QString group = s.store() + "/packs/1.21.1-fabric";
+        QVERIFY(writeText(group + "/shaderpacks/BSL.zip", "bsl"));
+        QVERIFY(writeText(group + "/shaderpacks/BSL.zip.txt", "SHADOW=true\n"));
+        QVERIFY(writeText(group + "/config/iris.properties", "shaderPack=BSL.zip\n"));
+        QVERIFY(writeText(s.game("a") + "/config/iris.properties", "shaderPack=\n"));
+
+        auto report = s.apply("a", plan);
+        QVERIFY2(report.errors.isEmpty(), qPrintable(report.errors.join('\n')));
+        QCOMPARE(readText(s.game("a") + "/shaderpacks/BSL.zip"), QByteArray("bsl"));
+        QCOMPARE(readText(s.game("a") + "/shaderpacks/BSL.zip.txt"), QByteArray("SHADOW=true\n"));
+        QCOMPARE(readText(s.game("a") + "/config/iris.properties"), QByteArray("shaderPack=BSL.zip\n"));
+        QCOMPARE(readText(s.backup("a") + "/config/iris.properties"), QByteArray("shaderPack=\n"));
+
+        QVERIFY(writeText(s.game("a") + "/shaderpacks/BSL.zip.txt", "SHADOW=false\n"));
+        report = s.collect("a", plan);
+        QVERIFY(report.errors.isEmpty());
+        QCOMPARE(readText(group + "/shaderpacks/BSL.zip.txt"), QByteArray("SHADOW=false\n"));
+        // Resource packs were not chosen: the shader settings file is not a pack, and nothing else moved.
+        QVERIFY(!QFileInfo::exists(group + "/resourcepacks"));
+    }
+
+    void packsStayPutWhenNotChosen()
+    {
+        Setup s;
+        QVERIFY(writeText(s.store() + "/packs/1.21.1-fabric/resourcepacks/Faithful.zip", "faithful"));
+        QVERIFY(writeText(s.store() + "/packs/1.21.1-fabric/shaderpacks/BSL.zip", "bsl"));
+        Plan plan = packPlan(nullptr, "1.21.1-fabric", false, false);
+        plan.gameSettings = true;
+        s.apply("a", plan);
+        QVERIFY(!QFileInfo::exists(s.game("a") + "/resourcepacks"));
+        QVERIFY(!QFileInfo::exists(s.game("a") + "/shaderpacks"));
+    }
+
+    void startsThePackGroupFromTheChosenInstance()
+    {
+        Setup s;
+        QVERIFY(writeText(s.game("start") + "/resourcepacks/Faithful.zip", "faithful"));
+        QVERIFY(writeText(s.game("start") + "/options.txt", "fov:0.7\nresourcePacks:[\"file/Faithful.zip\"]\n"));
+        Plan plan = packPlan(nullptr);
+        auto report = GameSettingsSync::initializeStore(s.store(), s.game("start"), plan);
+        QVERIFY(report.errors.isEmpty());
+        QCOMPARE(entries(s.store() + "/packs/1.21.1-fabric/resourcepacks"), QStringList({ "Faithful.zip" }));
+        QCOMPARE(readText(s.store() + "/packs/1.21.1-fabric/options.txt"), QByteArray("resourcePacks:[\"file/Faithful.zip\"]\n"));
+
+        // A modpack instance's packs are its own, so it starts the group empty.
+        Setup m;
+        QVERIFY(writeText(m.game("start") + "/resourcepacks/Bundled.zip", "bundled"));
+        plan.modpack = true;
+        report = GameSettingsSync::initializeStore(m.store(), m.game("start"), plan);
+        QVERIFY(!QFileInfo::exists(m.store() + "/packs"));
     }
 
     void startsFromTheChosenInstance()

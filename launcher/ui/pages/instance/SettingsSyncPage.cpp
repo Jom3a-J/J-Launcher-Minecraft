@@ -24,7 +24,7 @@ SettingsSyncPage::SettingsSyncPage(MinecraftInstance* instance, QWidget* parent)
 
     m_kindsGroup = new QGroupBox(this);
     auto* kindsLayout = new QVBoxLayout(m_kindsGroup);
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < GameSettingsSync::KindCount; ++i) {
         m_kindBoxes[i] = new QCheckBox(m_kindsGroup);
         kindsLayout->addWidget(m_kindBoxes[i]);
         connect(m_kindBoxes[i], &QCheckBox::clicked, this, [this, i](bool checked) {
@@ -77,7 +77,9 @@ void SettingsSyncPage::updateTexts()
     m_kindBoxes[1]->setText(tr("Multiplayer server list"));
     m_kindBoxes[2]->setText(tr("Command history"));
     m_kindBoxes[3]->setText(tr("Creative hotbars"));
-    m_kindBoxes[4]->setText(tr("Mod settings"));
+    m_kindBoxes[4]->setText(tr("Resource packs"));
+    m_kindBoxes[5]->setText(tr("Shader packs"));
+    m_kindBoxes[6]->setText(tr("Mod settings"));
     m_ownGroup->setTitle(tr("Keep this instance's own value for"));
     m_ownIntro->setText(tr("Ticked settings are never changed by sync in this instance, and changes to them here are not shared."));
 }
@@ -91,7 +93,7 @@ void SettingsSyncPage::refresh()
     m_use->setChecked(uses);
     m_use->setEnabled(on);
     m_kindsGroup->setEnabled(on && uses);
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < GameSettingsSync::KindCount; ++i) {
         const Kind kind = GameSettingsSync::AllKinds[i];
         const bool global = GameSettingsSync::syncs(kind);
         m_kindBoxes[i]->setChecked(global && GameSettingsSync::instanceUses(m_instance, kind));
