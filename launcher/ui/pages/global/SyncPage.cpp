@@ -62,7 +62,7 @@ SyncPage::SyncPage(QWidget* parent) : QWidget(parent)
 
     m_kindsGroup = new QGroupBox(content);
     auto* kindsLayout = new QVBoxLayout(m_kindsGroup);
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < GameSettingsSync::KindCount; ++i) {
         m_kindBoxes[i] = new QCheckBox(m_kindsGroup);
         kindsLayout->addWidget(m_kindBoxes[i]);
         connect(m_kindBoxes[i], &QCheckBox::clicked, this, [this, i](bool checked) {
@@ -140,7 +140,13 @@ void SyncPage::updateTexts()
     m_kindBoxes[1]->setText(tr("Multiplayer server list"));
     m_kindBoxes[2]->setText(tr("Command history"));
     m_kindBoxes[3]->setText(tr("Creative hotbars"));
-    m_kindBoxes[4]->setText(tr("Mod settings (the config files chosen below)"));
+    m_kindBoxes[4]->setText(tr("Resource packs, which ones are switched on, and their order"));
+    m_kindBoxes[5]->setText(tr("Shader packs, the selected shader, and each shader's settings"));
+    m_kindBoxes[6]->setText(tr("Mod settings (the config files chosen below)"));
+    const QString packNote = tr("Only between instances with the same Minecraft version and mod loader. A pack deleted in one "
+                                "instance is moved to the Recycle Bin in the others. Packs a modpack came with stay its own.");
+    m_kindBoxes[4]->setToolTip(packNote);
+    m_kindBoxes[5]->setToolTip(packNote);
     m_optionsGroup->setTitle(tr("Game settings to sync"));
     m_modOptions->setText(tr("Settings added by mods (only to instances that have the mod)"));
     m_configGroup->setTitle(tr("Mod settings to sync"));
@@ -149,7 +155,9 @@ void SyncPage::updateTexts()
     m_refreshConfig->setText(tr("Refresh"));
     m_note->setText(tr("Each instance can leave out any of these, or keep its own value for some settings, on the Sync page of its "
                        "Edit window. Before sync replaces a file in an instance for the first time, the instance's own copy is "
-                       "saved in its settings-sync-backup folder. Keybinds are not synced with instances before Minecraft 1.13."));
+                       "saved in its settings-sync-backup folder. Keybinds and creative hotbars are not synced with instances "
+                       "before Minecraft 1.13. Resource and shader packs are only shared between instances with the same "
+                       "Minecraft version and mod loader."));
     fillOptions();
 }
 
@@ -159,7 +167,7 @@ void SyncPage::refresh()
     m_enable->setChecked(on);
     m_status->setText(on ? tr("Sync is on.") : tr("Sync is off. Turning it on asks which instance to start from."));
     m_startAgain->setEnabled(on);
-    for (int i = 0; i < 5; ++i)
+    for (int i = 0; i < GameSettingsSync::KindCount; ++i)
         m_kindBoxes[i]->setChecked(GameSettingsSync::syncs(GameSettingsSync::AllKinds[i]));
     m_modOptions->setChecked(GameSettingsSync::syncsModOptions());
     m_optionsGroup->setEnabled(GameSettingsSync::syncs(Kind::GameSettings));

@@ -5,6 +5,7 @@
 #include <QIcon>
 #include <QWidget>
 
+#include "minecraft/GameSettingsSync.h"
 #include "ui/pages/BasePage.h"
 
 class QCheckBox;
@@ -38,7 +39,7 @@ class SettingsSyncPage : public QWidget, public BasePage {
     QLabel* m_status;
     QCheckBox* m_use;
     QGroupBox* m_kindsGroup;
-    QCheckBox* m_kindBoxes[5];
+    QCheckBox* m_kindBoxes[GameSettingsSync::KindCount];
     QGroupBox* m_ownGroup;
     QLabel* m_ownIntro;
     QListWidget* m_ownOptions;
