@@ -279,12 +279,16 @@ set(MINECRAFT_SOURCES
     minecraft/launch/ReconstructAssets.h
     minecraft/launch/ScanModFolders.cpp
     minecraft/launch/ScanModFolders.h
+    minecraft/launch/SyncGameSettings.cpp
+    minecraft/launch/SyncGameSettings.h
     minecraft/launch/VerifyJavaInstall.cpp
     minecraft/launch/VerifyJavaInstall.h
     minecraft/launch/AutoInstallJava.cpp
     minecraft/launch/AutoInstallJava.h
 
     minecraft/GradleSpecifier.h
+    minecraft/GameSettingsSync.cpp
+    minecraft/GameSettingsSync.h
     minecraft/MinecraftInstance.cpp
     minecraft/MinecraftInstance.h
     minecraft/LaunchProfile.cpp
@@ -1049,6 +1053,8 @@ SET(LAUNCHER_SOURCES
     ui/pages/instance/OtherLogsPage.h
     ui/pages/instance/ServersPage.cpp
     ui/pages/instance/ServersPage.h
+    ui/pages/instance/SettingsSyncPage.cpp
+    ui/pages/instance/SettingsSyncPage.h
     ui/pages/instance/WorldListPage.cpp
     ui/pages/instance/WorldListPage.h
     ui/pages/instance/McClient.cpp
