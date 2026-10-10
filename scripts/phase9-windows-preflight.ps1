@@ -344,7 +344,8 @@ if (-not $SkipTests) {
     Invoke-Checked -FilePath 'ctest' -ArgumentList @(
         '--test-dir', $build,
         '-C', 'Release',
-        '--output-on-failure'
+        '--output-on-failure',
+        '--parallel', "$ParallelJobs"
     )
 }
 

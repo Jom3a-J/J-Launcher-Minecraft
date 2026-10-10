@@ -8,51 +8,46 @@ is not an approved stable package.
 J Launcher is an independent, GPL-3.0 Minecraft launcher derived from Prism
 Launcher and MultiMC. This candidate is for Windows x64 only.
 
-## What's new in 0.1.1-beta.5
+## What's new in 0.1.1-beta.6
 
-Changes since 0.1.1-beta.4.
+Changes since 0.1.1-beta.5.
 
-### Prism Launcher update
+### Sync between instances
 
-- J Launcher now includes Prism Launcher's changes up to 5 October 2026,
-  with their fixes and improvements.
-- The installer has an optional **Open Modrinth website links** component. It
-  is off by default, so it does not take over links from the Modrinth App, and
-  uninstalling removes it only while it still points to this installation.
+Keep your settings the same in all your instances. Turn it on in
+**Settings → Sync**, and pick the instance to start from. After that, what you
+change in one game is saved when it closes, and the next instance you start
+gets it.
 
-### Servers
+- **What can be synced:**
+  - game settings (keybinds, video, sound, controls, and so on);
+  - the multiplayer server list;
+  - command history;
+  - creative hotbars;
+  - resource packs (off by default);
+  - shader packs (off by default);
+  - mod settings (off by default).
+- **Game settings:** choose which ones are synced, grouped by category. Settings
+  that mods add only go to instances that have the mod.
+- **Resource and shader packs:** only shared between instances with the same
+  Minecraft version and mod loader. That includes which packs are switched on,
+  their order, the selected shader and its settings. A pack deleted in one
+  instance is moved to the Recycle Bin in the others. Packs a modpack came with
+  stay its own.
+- **Per instance:** each instance has a **Sync** page in its Edit window, where
+  it can leave out any kind, or keep its own value for chosen settings.
+- **Safety:**
+  - two games open at the same time keep each other's changes;
+  - before sync first replaces a file in an instance, the instance's own copy is
+    saved in its `settings-sync-backup` folder;
+  - keybinds and creative hotbars are only synced between Minecraft 1.13 and
+    newer;
+  - sync never stops a game from starting.
 
-- Closing J Launcher while servers are running asks first and stops them
-  cleanly. Restart timers, the crash-restart limit, and restore rollback were
-  fixed.
-- Purpur, Forge, and NeoForge server downloads are checked against their
-  published checksums, and Fabric server jars are validated.
-- Preparing a server from a modpack and importing a server pack no longer
-  freeze the window. Server packs wrapped in a single folder import correctly.
-- Removing a mod or plugin moves it to the Recycle Bin. Mods and plugins cannot
-  be added or removed while a server pack is being imported.
-- **View Latest Crash Report** works again.
-- The FTB server installer runs only when it is signed by Feed The Beast Ltd,
-  and it cannot be changed between that check and running it.
+### Fixes
 
-### Instances and downloads
-
-- A freshly installed modpack could lose some of its components, such as LWJGL
-  or Fabric's intermediary mappings. It then showed "unresolved dependencies"
-  and could not launch offline until it had been launched once online. Fixed.
-- A game launch and a server that need the same Java version no longer
-  download it into the same folder at the same time.
-- Legacy FTB and ATLauncher installs can be cancelled.
-- A failed download no longer leaves a hidden temporary file in the target
-  folder.
-- Launcher logs are no longer cut off at 256 KB.
-
-### Security
-
-- Your CurseForge API key and Modrinth token are only ever sent to the site
-  they belong to, even when a download is redirected elsewhere.
-- Windows helper programs (`cmd.exe`, `taskkill.exe`) are started from the
-  Windows system folder by full path.
+- After changing the launcher's language, the CurseForge API key box under
+  **Settings → Services** shows its proper hint again instead of "Use Default".
 
 ## Highlights
 
